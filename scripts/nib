@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Run nib from the current source tree. Rebuilds only what changed (incremental `fast` profile),
+# then runs it with your arguments, from your current directory.
+#
+#   ~/src/nibble/scripts/nib some_file.py
+#   ~/src/nibble/scripts/nib @gpu train.py
+#
+# Remote daemons come from dist/daemons (built by scripts/build.sh); nothing is installed.
+set -euo pipefail
+
+# Resolve the repo root even when this script is reached through a symlink or alias.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+command -v cargo >/dev/null || { echo "nib: cargo not found (brew install rustup && rustup default stable)" >&2; exit 1; }
+
+cargo build --quiet --profile fast -p nib -p nibd --manifest-path "$ROOT/Cargo.toml"
+
+# Remote daemons are uploaded by content hash, so a stale one is reused silently and the remote
+# refuses the handshake. Rebuild them when nibd's sources are newer than any of them.
+daemons_stale() {
+  local d
+  for d in "$ROOT"/dist/daemons/*/nibd; do
+    [ -f "$d" ] || return 0
+    [ -n "$(find "$ROOT/crates/nibd" "$ROOT/crates/nib-proto" "$ROOT/Cargo.lock" -newer "$d" -type f -print -quit)" ] && return 0
+  done
+  return 1
+}
+if daemons_stale; then
+  echo "nib: nibd sources changed; rebuilding the remote daemons (scripts/build.sh daemons)" >&2
+  "$ROOT/scripts/build.sh" daemons >&2 || echo "nib: remote daemons not rebuilt; ssh remotes may refuse this nib" >&2
+fi
+
+export NIB_DAEMONS="${NIB_DAEMONS:-$ROOT/dist/daemons}"
+exec "$ROOT/target/fast/nib" "$@"

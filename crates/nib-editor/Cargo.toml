@@ -1,0 +1,15 @@
+[package]
+name = "nib-editor"
+description = "UI-agnostic editor model: documents, commands, keymap, config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helix-core.workspace = true
+nib-syntax.workspace = true
+serde.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+toml_edit.workspace = true

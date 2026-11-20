@@ -1,0 +1,87 @@
+# nib config — copy to ~/.config/nib/config.toml (Windows: %APPDATA%\nib\config.toml)
+
+[editor]
+tab_width = 4
+font_size = 14
+renderer = "auto"        # "cpu" on GPU-less machines (e.g. Horizon VM), "gpu", or "auto"
+# font = "JetBrains Mono"  # code font family; unset = system monospace
+# line_height = 1.4
+# beginner_mode = false    # shortcut cheat sheet on the right
+# Everything in [editor], [window], [theme] and [keys] can also be changed from Settings (gear
+# icon). nibble's defaults are built in; this file only needs what you want different.
+
+[window]
+# width = 1200             # logical pixels; also Settings > Appearance > Window
+# height = 800
+# fullscreen = false
+
+# `nib @name [path]` opens a profile. Paths are relative to `root` on the target machine.
+# The SSH panel (server icon) and `nib ctl ssh add` write these for you.
+[profiles.gpu]
+ssh = "gpu-box"          # Host alias from ~/.ssh/config (ProxyJump etc. are honored)
+root = "~/projects/seg"
+
+[profiles.lab]
+ssh = "10.0.0.7"         # or a hostname, or user@host
+user = "tal"             # optional, ssh only: -l
+port = 2222              # -p
+identity = "~/.ssh/lab"  # -i
+jump = "bastion"         # -J
+root = "~/code"
+
+[profiles.ubuntu]
+wsl = "Ubuntu-24.04"     # Windows only
+root = "~/code"
+
+[profiles.here]
+root = "~/src/nibble"    # neither ssh nor wsl = local
+
+# Colours ("#rrggbb"); everything is optional. Built-in defaults shown.
+[theme]
+# background = "#000000"
+# foreground = "#d4d4d4"            # code text
+# browser_foreground = "#3b8eea"    # file browser text
+# selection = "#264f78"
+# dim = "#6e7681"                   # hints, line numbers, status
+# accent = "#3b8eea"                # control strip icons
+# panel = "#000000"                 # settings, menus, cheat sheet
+# [theme.syntax]
+# keyword = "#569cd6"
+# string = "#ce9178"
+
+# Languages beyond the built-in ones (python, bash, json, yaml, toml, markdown, html). Easiest:
+#   nib grammar add rust go javascript     (fetches, compiles and writes these entries)
+# which puts grammars/<name>.dylib and queries/<name>/ beside this file. By hand:
+# [languages.rust]
+# grammar = "rust"               # grammars/rust.{dylib,so}, symbol tree_sitter_rust (default: the name)
+# extensions = ["rs"]
+# filenames = []                 # whole names, e.g. "Justfile"
+# shebangs = ["rust-script"]
+# aliases = []                   # other names a ```fence may use (extensions already work)
+
+# Language servers run inside nibd, on the machine with the code, and start when a file they serve
+# is opened. Built in: python (ty), rust (rust-analyzer), go (gopls), typescript
+# (typescript-language-server), c (clangd). A built-in name changes only the fields given; any
+# other name adds a server. A bare command is also looked up in the project's .venv and
+# node_modules/.bin, ~/.local/bin, ~/.cargo/bin and ~/go/bin.
+# [lsp.python]
+# command = ["ty", "server"]     # default: ty from .venv, $PATH or ~/.local/bin, else uvx
+# [lsp.go]
+# command = []                   # turn a built-in off
+# [lsp.zig]
+# command = ["zls"]
+# extensions = ["zig", "zon"]    # claiming an extension takes it from any other server
+# roots = ["build.zig"]          # topmost dir holding one is the server's root (default: nib's root)
+
+# The AI panel.
+[ai]
+# cloud_models = true   # OpenCode: list its cloud models too (default: only ones downloaded locally)
+# pick_model = false    # new agents start with the last model instead of opening the dropdown
+# agent = "claude"      # nib writes these two when you pick a model: new agents start with it
+# model = "opus"
+
+# Override shortcuts: chord = command name, or "none" to unbind.
+# Command names: see `nib --commands`.
+[keys]
+# "mod+shift+d" = "duplicate_line"   # mod = Cmd on macOS, Ctrl elsewhere
+# "mod+y" = "none"

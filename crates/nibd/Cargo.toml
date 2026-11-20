@@ -1,0 +1,16 @@
+[package]
+name = "nibd"
+description = "nibble daemon: runs where the code lives (fs, search, LSP, git, PTYs, agents)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nib-proto.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+portable-pty = "0.9"
+serde = { workspace = true, features = ["derive"] }
+# Fuzzy file-name matching for search (the version helix-core uses, so it builds once).
+nucleo = "0.5"

@@ -1,0 +1,50 @@
+[package]
+name = "nib"
+description = "nibble: minimal, fast, remote-first code editor (Iced GUI client)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nib"
+path = "src/main.rs"
+
+[dependencies]
+nib-proto.workspace = true
+nib-editor.workspace = true
+nib-syntax.workspace = true
+helix-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+sha2.workspace = true
+vt100 = "0.18"
+# Task internals, to run the app's tasks without a window (`nib --headless`). Same crate iced uses.
+iced_runtime = "0.14"
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "advanced", "svg", "image-without-codecs", "markdown", "x11", "wayland", "thread-pool"] }
+# Decoders for the image viewer (iced only draws; codecs are picked here to keep the build lean).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "webp", "bmp"] }
+csv = "1"
+htmd = "0.5"
+usvg = { version = "0.45.1", default-features = false }
+pulldown-cmark = { version = "0.12", default-features = false }
+ratex-parser = "0.1.16"
+ratex-layout = "0.1.16"
+ratex-types = "0.1.16"
+ratex-svg = { version = "0.1.16", features = ["embed-fonts"] }
+# PDF viewer: pure-Rust rasterizer (D-049).
+hayro = "0.9"
+arboard = "3.7.0"
+# The window's handle, to ask the OS where a file was dropped (winit doesn't say).
+raw-window-handle = "0.6"
+
+
+[target.'cfg(unix)'.dependencies]
+# getuid, for the control socket's private directory.
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Where the mouse is when a file is dropped on the window (see `drop.rs`). Same versions winit uses.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }

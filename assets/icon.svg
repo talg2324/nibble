@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- bite taken out of the last bit -->
+    <mask id="bite">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="902" cy="402" r="74" fill="#000"/>
+      <circle cx="826" cy="372" r="40" fill="#000"/>
+      <circle cx="930" cy="480" r="40" fill="#000"/>
+    </mask>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="#000"/>
+  <g fill="#fff">
+    <rect x="112" y="402" width="170" height="170" rx="34"/>
+    <rect x="316" y="402" width="170" height="170" rx="34"/>
+    <rect x="520" y="402" width="170" height="170" rx="34"/>
+  </g>
+  <rect x="724" y="402" width="170" height="170" rx="34" fill="#007acc" mask="url(#bite)"/>
+  <text x="512" y="760" text-anchor="middle" font-family="Menlo, DejaVu Sans Mono, monospace" font-size="120" fill="#fff">nibble</text>
+</svg>

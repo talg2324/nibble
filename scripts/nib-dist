@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Run the latest compiled release for this machine (dist/<host-triple>/nib, from scripts/build.sh).
+# Never builds; tells you if the build is older than the source.
+#
+#   ~/src/nibble/scripts/nib-dist some_file.py
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+case "$(uname -sm)" in
+  "Darwin arm64") HOST=aarch64-apple-darwin ;;
+  "Darwin x86_64") HOST=x86_64-apple-darwin ;;
+  "Linux x86_64") HOST=x86_64-unknown-linux-gnu ;;
+  "Linux aarch64") HOST=aarch64-unknown-linux-gnu ;;
+  MINGW*|MSYS*|CYGWIN*) HOST=x86_64-pc-windows-msvc ;;
+  *) HOST="$(rustc -vV | sed -n 's/^host: //p')" ;;
+esac
+
+BIN="$ROOT/dist/$HOST/nib"
+[[ -x "$BIN" || -x "$BIN.exe" ]] || { echo "nib-dist: no build for $HOST — run scripts/build.sh" >&2; exit 1; }
+[[ -x "$BIN" ]] || BIN="$BIN.exe"
+
+built="$(sed -n 's/^commit //p' "$ROOT/dist/$HOST/BUILD_INFO" 2>/dev/null | cut -d' ' -f1)"
+head="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+if [[ -n "$built" && -n "$head" && "$built" != "$head" ]]; then
+  echo "nib-dist: note: build is from $built, source is at $head (scripts/build.sh to refresh)" >&2
+fi
+
+export NIB_DAEMONS="${NIB_DAEMONS:-$ROOT/dist/daemons}"
+exec "$BIN" "$@"
