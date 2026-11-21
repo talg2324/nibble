@@ -19,7 +19,7 @@ Agents get API access to the editor with no MCP needed.
   </tr>
 </table>
 
-> **Status: v0.1.** Early, used daily, moving fast. Expect rough edges and breaking changes. macOS and Linux; Windows works for local projects (SSH/WSL remotes from Windows not yet). You build it yourself (see [Roadmap](#roadmap)).
+> **Status: v0.1.** Early, used daily, moving fast. Expect rough edges and breaking changes. macOS and Linux; Windows works for local projects and SSH remotes (WSL remotes from Windows not yet). You build it yourself (see [Roadmap](#roadmap)).
 
 ## Ideology
 
@@ -249,7 +249,7 @@ Editing is built on [helix-core](https://github.com/helix-editor/helix) (rope, s
 ## Roadmap
 
 - [x] **v0.1**: the editor, SSH remotes, the agents tab with Follow and the mailbox, `nib ctl`, `nib ai`, runtime grammars and language servers. macOS and Linux.
-- [ ] **v0.2**: Windows support, including WSL, and a revamped diff experience. Native Windows already works for local projects (editor, tree, search, git, terminals, language servers, `nib ctl`).
+- [ ] **v0.2**: Windows support, including WSL, and a revamped diff experience. Native Windows already works for local projects (editor, tree, search, git, terminals, language servers, `nib ctl`) and SSH remotes.
 - [ ] **v0.3**: localhost integration: see web servers running on the remote (dev servers, notebooks, dashboards) inside nibble, with agents able to read and act on the page.
 - [ ] **v0.4**: GitHub Actions that build and publish binaries. Until then, you build nibble yourself.
 
