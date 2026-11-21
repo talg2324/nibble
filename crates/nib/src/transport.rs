@@ -332,6 +332,9 @@ fn stderr_log(label: &str) -> Stdio {
 pub fn ssh_command(host: &SshHost, env: &SshEnv, extra: &[&str]) -> Command {
     let mut c = command("ssh");
     c.arg("-T").args(extra).args(["-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15"]);
+    if let Some(o) = crate::ssh::known_hosts_option(host) {
+        c.args(["-o", &o]);
+    }
     if env.batch {
         c.args(["-o", "BatchMode=yes"]);
     }

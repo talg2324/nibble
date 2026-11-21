@@ -342,19 +342,39 @@ pub fn new_token() -> String {
 // ---------------------------------------------------------------------------------------------
 
 struct Resolved {
+    /// Where trusted host keys are read from and written to.
     known_hosts: Vec<String>,
+    /// ssh's own config throws host keys away (`UserKnownHostsFile /dev/null`): nib keeps them in
+    /// `known_hosts` instead and must tell ssh so, or a trusted key is never found again.
+    overridden: bool,
+}
+
+/// `-o UserKnownHostsFile=...` for nib's ssh when the user's config sends host keys to /dev/null
+/// (keys trusted from the panel would vanish and every strict connect would fail).
+pub fn known_hosts_option(host: &SshHost) -> Option<String> {
+    let r = resolve(host);
+    r.overridden.then(|| format!("UserKnownHostsFile={}", r.known_hosts.join(" ")))
 }
 
 /// What ssh's own config says for `host` (`ssh -G`).
 fn resolve(host: &SshHost) -> Resolved {
     let out = crate::transport::command("ssh").arg("-G").args(host.args()).arg(&host.host).output();
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-    let known_hosts = text
+    let default = || home().join(".ssh/known_hosts").to_string_lossy().into_owned();
+    let configured: Vec<String> = text
         .lines()
         .find_map(|l| l.strip_prefix("userknownhostsfile "))
         .map(|v| v.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_else(|| vec![home().join(".ssh/known_hosts").to_string_lossy().into_owned()]);
-    Resolved { known_hosts }
+        .unwrap_or_else(|| vec![default()]);
+    let real: Vec<String> = configured.iter().filter(|f| !is_discard(f)).cloned().collect();
+    let overridden = real.len() != configured.len();
+    let known_hosts = if real.is_empty() { vec![default()] } else { real };
+    Resolved { known_hosts, overridden }
+}
+
+/// A known_hosts "file" that keeps nothing.
+fn is_discard(f: &str) -> bool {
+    f == "/dev/null" || f.eq_ignore_ascii_case("none")
 }
 
 fn fingerprints(file: &Path) -> Vec<String> {
