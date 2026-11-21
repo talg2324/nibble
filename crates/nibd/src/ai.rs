@@ -1021,12 +1021,12 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
         env.push(("NIB_AGENT", name.clone().into()));
         env.push(("NIBD", me.into_os_string()));
         // `nib-mail` is in the mailbox's `bin`.
-        let mut path = dir.join("bin").into_os_string();
-        if let Some(rest) = std::env::var_os("PATH") {
-            path.push(":");
-            path.push(rest);
+        // `join_paths` uses the system's separator (`;` on Windows).
+        let rest = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = std::iter::once(dir.join("bin")).chain(std::env::split_paths(&rest));
+        if let Ok(path) = std::env::join_paths(dirs) {
+            env.push(("PATH", path));
         }
-        env.push(("PATH", path));
     }
     // A past conversation goes on in its own record, with the assistant's session of it.
     // It also keeps its task and the name made from it.
