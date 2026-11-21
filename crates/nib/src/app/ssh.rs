@@ -25,7 +25,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 const WIDTH: f32 = 440.0;
-const PLACEHOLDER: &str = "user@host or IP address, then ↵";
+/// The command key, as a hint shows it before another key.
+const MOD_PLUS: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+const PLACEHOLDER: &str = "user@host or IP, then ↵ (asks for a password if it needs one)";
 
 /// What the keyboard walks, in the order the panel shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +141,10 @@ const EDIT_FIELDS: [(&str, &str); 7] = [
     ("nibd", "a nibd on the host (default: upload one)"),
 ];
 
+/// The fields the form shows (name, host, user). The rest (port, key file, jump host, nibd)
+/// are for ~/.ssh/config or config.toml: they're kept as they are, not shown.
+const EDIT_SHOWN: usize = 3;
+
 struct Edit {
     /// The saved connection being changed (None: saving a ~/.ssh/config host as one).
     orig: Option<String>,
@@ -147,6 +153,17 @@ struct Edit {
     /// The changes, shown before writing config.toml (y saves).
     confirm: Option<Vec<String>>,
     error: Option<String>,
+}
+
+impl Edit {
+    fn new(orig: Option<String>, fields: [String; 7]) -> Edit {
+        Edit { orig, fields, sel: 1, confirm: None, error: None }
+    }
+
+    /// How many fields the form shows.
+    fn shown(&self) -> usize {
+        EDIT_SHOWN
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -286,7 +303,7 @@ impl App {
             Msg::EditField(i) => {
                 self.ssh_focus();
                 if let Some(e) = &mut self.ssh.edit {
-                    e.sel = i.min(EDIT_FIELDS.len() - 1);
+                    e.sel = i.min(e.shown() - 1);
                     e.confirm = None;
                 }
             }
@@ -810,7 +827,7 @@ impl App {
             p.jump.clone().unwrap_or_default(),
             p.nibd.clone().unwrap_or_default(),
         ];
-        self.ssh.edit = Some(Edit { orig, fields, sel: 1, confirm: None, error: None });
+        self.ssh.edit = Some(Edit::new(orig, fields));
         Task::none()
     }
 
@@ -919,7 +936,7 @@ impl App {
             e.confirm = None;
             return Task::none();
         }
-        let last = EDIT_FIELDS.len() - 1;
+        let last = e.shown() - 1;
         match chord.key {
             Key::Esc => self.ssh.edit = None,
             _ if cmd == Some(Command::Save) => return self.ssh_edit_confirm(),
@@ -1374,7 +1391,7 @@ impl App {
             None => format!("Save {} as a connection", e.fields[1]),
         };
         let mut c = column![text(title).size(12).color(fg)].spacing(6);
-        for (i, (label, hint)) in EDIT_FIELDS.iter().enumerate() {
+        for (i, (label, hint)) in EDIT_FIELDS.iter().enumerate().take(e.shown()) {
             let selected = e.sel == i && e.confirm.is_none();
             let r = row![text(*label).size(11).color(if selected { fg } else { dim }).width(70), self.ssh_box(e.fields[i].clone(), hint, selected, focused)]
                 .spacing(8)
@@ -1411,7 +1428,7 @@ impl App {
                         .spacing(8),
                 );
                 if focused {
-                    c = c.push(row![self.hint("↑↓", "field"), self.hint("⌘S", "save"), self.hint("esc", "cancel")].spacing(12));
+                    c = c.push(row![self.hint("↑↓", "field"), self.hint(&format!("{MOD_PLUS}S"), "save"), self.hint("esc", "cancel")].spacing(12));
                 }
             }
         }
@@ -1664,6 +1681,10 @@ mod tests {
         let _ = a.ssh_edit_confirm();
         let changes = a.ssh.edit.as_ref().unwrap().confirm.clone().unwrap();
         assert_eq!(changes, ["host: gpu-box → gpu-box2", "user: (not set) → tal"]);
+        key(&mut a, "n");
+        key(&mut a, "down");
+        assert_eq!(a.ssh.edit.as_ref().unwrap().sel, 2, "user is the last field shown");
+        let _ = a.ssh_edit_confirm();
         key(&mut a, "n"); // back to the form, nothing written
         assert!(a.ssh.edit.as_ref().unwrap().confirm.is_none());
         key(&mut a, "esc");
