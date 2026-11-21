@@ -289,6 +289,13 @@ fn main() -> Result<()> {
             titlebar_transparent: true,
             fullsize_content_view: true,
         },
+        // Linux: the Wayland app_id / X11 WM_CLASS. Desktops (and WSLg) match it to nib.desktop
+        // for the taskbar icon; without one WSLg shows its penguin.
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "nib".into(),
+            ..Default::default()
+        },
         ..Default::default()
     })
     .theme(|_: &app::App| iced::Theme::Dark)
