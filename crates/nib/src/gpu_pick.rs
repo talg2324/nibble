@@ -50,6 +50,12 @@ pub struct Outcome(pub String);
 /// Pick the setup for this launch and put its environment in place. Call before iced starts.
 /// `None` when there is nothing to choose (not WSL, or the user already chose).
 pub fn choose(renderer: &str) -> Option<Outcome> {
+    if cfg!(target_os = "linux") && is_wsl() && std::env::var_os("EGL_LOG_LEVEL").is_none() {
+        // WSL has no DRM device, so Mesa's EGL loader prints "failed to get driver name for
+        // fd -1" / "MESA-LOADER: failed to retrieve device information" to the terminal on
+        // every launch (and in every probe), whichever setup is used. Harmless; keep them out.
+        std::env::set_var("EGL_LOG_LEVEL", "fatal");
+    }
     if renderer != "auto" || !cfg!(target_os = "linux") || !is_wsl() {
         return None;
     }
