@@ -553,7 +553,7 @@ fn ago(secs: i64) -> String {
 }
 
 /// `s` cut to at most `max` characters, the last one an ellipsis.
-fn ellipsize(s: &str, max: usize) -> String {
+pub(super) fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }

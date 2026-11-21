@@ -2066,11 +2066,20 @@ impl App {
         if self.label != "local" {
             status = status.push(text(self.label.clone()).size(14.4).wrapping(text::Wrapping::None).color(th.dim));
         }
-        let mut strip = row![buttons].spacing(14.4).align_y(iced::Alignment::Center);
-        if let Some((s, warn)) = self.git_status() {
+        let strip = row![buttons].spacing(14.4).align_y(iced::Alignment::Center);
+        // The git line takes what room is left and gives way to the status on the right: cut to
+        // fit, ending in "…" (iced can't ellipsize). The strip's font is monospace (~0.6 em per
+        // character); the clip catches a font that runs wider than that.
+        let git = self.git_status().map(|(s, warn)| {
             let color = if warn { th.warn } else { th.dim };
-            strip = strip.push(text(s).size(14.4).color(color).wrapping(text::Wrapping::None));
-        }
+            let line = iced::widget::responsive(move |room| {
+                let fit = (room.width / (14.4 * 0.6)).floor() as usize;
+                let s = if fit == 0 { String::new() } else { git::ellipsize(&s, fit) };
+                text(s).size(14.4).color(color).wrapping(text::Wrapping::None).into()
+            });
+            // Responsive fills both ways; a fixed height keeps the strip one line tall.
+            container(line).width(Length::Fill).height(19).clip(true)
+        });
         // A small signature mark at the far right; hover for the version.
         let (w, h) = crate::icons::LOGO_SMALL_SIZE;
         let mark = tooltip(
@@ -2080,7 +2089,12 @@ impl App {
                 .style(|_| container::Style::default().background(Color::from_rgb8(0x1a, 0x1a, 0x1a))),
             tooltip::Position::Top,
         );
-        let strip = strip.push(space::horizontal()).push(status).push(mark);
+        // The git line is the spacer when there is one.
+        let strip = match git {
+            Some(g) => strip.push(g),
+            None => strip.push(space::horizontal()),
+        };
+        let strip = strip.push(status).push(mark);
         mouse_area(container(strip).padding([2.4, 9.6]).width(Length::Fill)).into()
     }
 }
