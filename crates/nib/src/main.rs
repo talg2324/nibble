@@ -232,6 +232,7 @@ fn main() -> Result<()> {
     if !headless {
         gpu_log::init();
     }
+    log_panics();
     if let Some(gpu_pick::Outcome(note)) = &gpu_pick {
         control::log("gpu", note);
     }
@@ -287,7 +288,7 @@ fn main() -> Result<()> {
         }
     }
 
-    iced::application(
+    let result = iced::application(
         move || {
             let (init, syn_rx, ctl_rx) = init.lock().unwrap().take().expect("boot runs once");
             let (app, t) = app::App::boot(init);
@@ -324,7 +325,22 @@ fn main() -> Result<()> {
     .default_font(iced::Font::MONOSPACE)
     .antialiasing(false)
     .run()
-    .map_err(|e| anyhow::anyhow!("{title}: {e}"))
+    .map_err(|e| anyhow::anyhow!("{title}: {e}"));
+    // A window has no console to print this to: put it in nib.log (before `ctl_guard` logs `exit`).
+    if let Err(e) = &result {
+        control::log("error", &format!("{e:#}"));
+    }
+    result
+}
+
+/// Also write panics to nib.log: a window's stderr goes nowhere, so otherwise a crash leaves no trace.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        control::log("panic", &format!("thread {:?}: {info}", thread.name().unwrap_or("?")));
+        default(info);
+    }));
 }
 
 /// The window's own icon: the title bar and Alt-Tab on Windows, _NET_WM_ICON on X11. (The exe's

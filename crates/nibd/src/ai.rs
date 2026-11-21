@@ -557,7 +557,7 @@ pub fn set_warm(model: &str, warm: bool, gpu: &ollama::GpuSel, root: &Path) -> R
         // Loaded is most of warm: a prime that fails only costs the first reply its speed.
         let config = opencode_config(read_only_permissions(), model, gpu);
         if let Err(e) = prime(model, root, &config) {
-            eprintln!("nibd: priming {model}: {e}");
+            log!("priming {model}: {e}");
         }
     }
     Ok(())
@@ -925,7 +925,7 @@ fn prompt_file(id: AiId, prompt: &str) -> Option<PathBuf> {
     match std::fs::write(&f, prompt) {
         Ok(()) => Some(f),
         Err(e) => {
-            eprintln!("nibd: system prompt: {}: {e}", f.display());
+            log!("system prompt: {}: {e}", f.display());
             None
         }
     }
@@ -995,7 +995,7 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
     if agent == AiAgent::OpenCode && !ollama::pulled().is_empty() {
         // Its local models need the server; a cold model then loads with the first message.
         if let Err(e) = ollama::ensure_running() {
-            eprintln!("nibd: ollama: {e}");
+            log!("ollama: {e}");
         }
     }
     let mut s = sessions.lock().unwrap();

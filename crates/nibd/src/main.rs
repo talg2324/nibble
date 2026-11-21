@@ -1,5 +1,14 @@
 //! `nibd`: speaks the nib protocol on stdin/stdout. stdout is reserved for frames; logs go to stderr.
 
+/// A line on stderr, which the client appends to its per-target log (`~/.cache/nib/<target>.log`,
+/// shared by every window on that target): stamped with the UTC time and this nibd's pid, so a
+/// line can be matched to a window's `nib.log`.
+macro_rules! log {
+    ($($arg:tt)*) => {
+        eprintln!("nibd {} [{}]: {}", nib_proto::log_clock(), std::process::id(), format_args!($($arg)*))
+    };
+}
+
 mod ai;
 mod history;
 mod mail;
@@ -47,7 +56,17 @@ fn main() -> anyhow::Result<()> {
         out.write_all(nib_proto::MAGIC)?;
         out.flush()?;
     }
-    serve_stdio(IDLE_LIMIT)
+    log!("start, version {}", env!("CARGO_PKG_VERSION"));
+    match serve_stdio(IDLE_LIMIT) {
+        Ok(()) => {
+            log!("exit");
+            Ok(())
+        }
+        Err(e) => {
+            log!("exit: {e:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// The client pings every `nib_proto::PING_EVERY`; this long without hearing anything means it is
@@ -71,7 +90,7 @@ fn serve_stdio(idle: Duration) -> anyhow::Result<()> {
     let next = || match rx.recv_timeout(idle) {
         Ok(m) => Ok(m?),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            eprintln!("nibd: nothing from nib for {}s; exiting", idle.as_secs());
+            log!("nothing from nib for {}s; exiting", idle.as_secs());
             Ok(None)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
@@ -352,7 +371,7 @@ impl State {
                 })?;
                 // Not fatal: the editor works without them; the tree just doesn't offer them.
                 self.places = places::setup(&root)
-                    .inspect_err(|e| eprintln!("nibd: scratch / NIBDIR: {e}"))
+                    .inspect_err(|e| log!("scratch / NIBDIR: {e}"))
                     .ok();
                 let lsp = lsp::Lsp::new(root.clone(), &lsp, self.tx.clone());
                 let path_of = |p: Option<&PathBuf>| p.map(|p| nib_proto::path::to_wire(p)).unwrap_or_default();

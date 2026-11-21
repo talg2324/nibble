@@ -190,6 +190,11 @@ fn launch(mut cmd: Command, label: String) -> Result<Launch> {
         .stderr(stderr_log(&label));
     // What ssh says about a failure (host key, auth, network) is the error to show.
     let log_start = std::fs::metadata(log_path(&label)).map(|m| m.len()).unwrap_or(0);
+    // Which window the lines below belong to (the log is shared by every window on this target).
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(log_path(&label)) {
+        use std::io::Write;
+        let _ = writeln!(f, "nib: {} window pid {} starts {:?}", nib_proto::log_clock(), std::process::id(), cmd.get_program());
+    }
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning {:?}", cmd.get_program()))?;

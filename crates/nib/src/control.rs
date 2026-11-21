@@ -94,13 +94,10 @@ pub fn session() -> Option<&'static Value> {
 /// Append a line to `nib.log` (nothing when control is off).
 pub fn log(kind: &str, text: &str) {
     let Some(r) = RUN.get() else { return };
-    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let day = (ms / 1000) % 86_400;
-    let (h, m, s) = (day / 3600, day / 60 % 60, day % 60);
     let mut text: String = text.chars().take(400).collect();
     text = text.replace('\n', "\\n");
     use std::io::Write;
-    let _ = writeln!(r.log.lock().unwrap(), "{h:02}:{m:02}:{s:02}.{:03}Z {kind:<5} {text}", ms % 1000);
+    let _ = writeln!(r.log.lock().unwrap(), "{} {kind:<5} {text}", nib_proto::log_clock());
 }
 
 /// Next default snapshot file: `<run dir>/snapshots/001.png`, `002.png`, …
