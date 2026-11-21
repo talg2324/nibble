@@ -4,6 +4,7 @@
 tab_width = 4
 font_size = 14
 renderer = "auto"        # "cpu" on GPU-less machines (e.g. Horizon VM), "gpu", or "auto"
+                          # (auto on WSL: finds the GPU once and caches it in ~/.cache/nib/gpu.json)
 # font = "JetBrains Mono"  # code font family; unset = system monospace
 # line_height = 1.4
 # beginner_mode = false    # shortcut cheat sheet on the right

@@ -145,7 +145,8 @@ pub struct EditorConfig {
     pub tab_width: usize,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
-    /// "auto" (GPU, falling back to CPU), "cpu" (tiny-skia; use on GPU-less VMs), "gpu" (wgpu).
+    /// "auto" (GPU, falling back to CPU; on WSL nib finds the GPU setup once and caches it, see
+    /// `nib/src/gpu_pick.rs`), "cpu" (tiny-skia; use on GPU-less VMs), "gpu" (wgpu).
     #[serde(default = "default_renderer")]
     pub renderer: String,
     /// Code font family (e.g. "JetBrains Mono"). Unset = the system monospace font.

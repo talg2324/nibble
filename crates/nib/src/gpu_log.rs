@@ -7,6 +7,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static PICKED: AtomicBool = AtomicBool::new(false);
+/// The adapter wgpu picked is a GPU (not llvmpipe / lavapipe / another software one).
+static ON_GPU: AtomicBool = AtomicBool::new(false);
 
 struct Sink;
 
@@ -26,6 +28,7 @@ impl log::Log for Sink {
         let msg = r.args().to_string();
         if let Some(info) = msg.strip_prefix("Selected: ") {
             PICKED.store(true, Ordering::Relaxed);
+            ON_GPU.store(!info.contains("device_type: Cpu"), Ordering::Relaxed);
             crate::control::log("gpu", &format!("wgpu: {}", compact(info)));
         } else if let Some(list) = msg.strip_prefix("Available adapters: ") {
             crate::control::log("gpu", &format!("available: {}", adapters(list)));
@@ -51,6 +54,7 @@ pub fn window_up() {
     if !PICKED.load(Ordering::Relaxed) {
         crate::control::log("gpu", "tiny-skia (software): wgpu found no usable adapter, or ICED_BACKEND chose it");
     }
+    crate::gpu_pick::window_up(ON_GPU.load(Ordering::Relaxed));
 }
 
 /// A `{:#?}` dump on one line: `AdapterInfo { name: "…", …, backend: Vulkan }`.

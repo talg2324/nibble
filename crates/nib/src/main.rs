@@ -10,6 +10,7 @@ mod control;
 mod editor_view;
 mod gif;
 mod gpu_log;
+mod gpu_pick;
 mod grammar_cli;
 mod headless;
 mod icons;
@@ -164,6 +165,9 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("gif") {
         std::process::exit(gif::gif_main(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some(gpu_pick::PROBE_ARG) {
+        std::process::exit(gpu_pick::probe_main());
+    }
     let headless = args.first().map(String::as_str) == Some("--headless");
     let args = if headless { &args[1..] } else { &args[..] };
     timing::start();
@@ -186,6 +190,8 @@ fn main() -> Result<()> {
             _ => {}
         }
     }
+    // "auto" on WSL: find the GPU setup once and remember it (`gpu_pick`).
+    let gpu_pick = if headless { None } else { gpu_pick::choose(&cfg.editor.renderer) };
 
     // Grammar/query compilation runs in parallel with connecting and window creation.
     nib_syntax::configure(
@@ -225,6 +231,9 @@ fn main() -> Result<()> {
 
     if !headless {
         gpu_log::init();
+    }
+    if let Some(gpu_pick::Outcome(note)) = &gpu_pick {
+        control::log("gpu", note);
     }
     let title = format!("nib — {}", launch.label);
     let window = cfg.window.clone();
