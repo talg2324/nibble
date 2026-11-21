@@ -1274,14 +1274,14 @@ impl App {
         let working = self.ai.chats.iter().filter(|c| c.busy).count();
         let follow = self.ai_follow_label().map(|(name, live)| {
             let accent = th.accent;
-            let chip = container(text(name).size(14.4).color(accent)).padding([0, 6]).style(move |_| container::Style {
+            let chip = container(text(name).size(14.4).wrapping(iced::widget::text::Wrapping::None).color(accent)).padding([0, 6]).style(move |_| container::Style {
                 border: Border { color: accent, width: 1.0, radius: 3.0.into() },
                 background: Some(Background::Color(Color { a: 0.12, ..accent })),
                 ..Default::default()
             });
-            let mut label = row![text("◉ following").size(14.4).color(accent), chip].spacing(6).align_y(Alignment::Center);
+            let mut label = row![text("◉ following").size(14.4).wrapping(iced::widget::text::Wrapping::None).color(accent), chip].spacing(6).align_y(Alignment::Center);
             if !live {
-                label = label.push(text("(not running)").size(14.4).color(accent));
+                label = label.push(text("(not running)").size(14.4).wrapping(iced::widget::text::Wrapping::None).color(accent));
             }
             button(label).on_press(Message::Ai(Msg::Follow)).padding(0).style(|_, _| button::Style::default())
         });
@@ -1294,13 +1294,13 @@ impl App {
         if let Some(f) = follow {
             line = line.push(f);
         }
-        line = line.push(text(label).size(14.4).color(if paused > 0 { th.warn } else { th.accent }));
+        line = line.push(text(label).size(14.4).wrapping(iced::widget::text::Wrapping::None).color(if paused > 0 { th.warn } else { th.accent }));
         let countdown = self.ai.chats.iter().filter_map(running).filter_map(step_clock).find(|(_, down, _)| *down);
         if let Some((clock, _, _)) = countdown {
-            line = line.push(text(format!("◷ {clock}")).size(14.4).font(self.face.font).color(th.warn));
+            line = line.push(text(format!("◷ {clock}")).size(14.4).wrapping(iced::widget::text::Wrapping::None).font(self.face.font).color(th.warn));
         }
         let chord = self.keymap.chords_for(Command::Panic).first().map(|k| format!(" · {k}")).unwrap_or_default();
-        let panic = button(text(format!("‖ panic{chord}")).size(12).color(BAD))
+        let panic = button(text(format!("‖ panic{chord}")).size(12).wrapping(iced::widget::text::Wrapping::None).color(BAD))
             .on_press(Message::Ai(Msg::Panic))
             .padding([2, 8])
             .style(|_, _| button::Style { border: Border { color: BAD, width: 1.0, radius: 3.0.into() }, ..Default::default() });

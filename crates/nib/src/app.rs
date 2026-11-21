@@ -2039,10 +2039,10 @@ impl App {
 
         let mut status = row![].spacing(19.2).align_y(iced::Alignment::Center);
         if let Some((f, warn, _)) = &self.flash {
-            status = status.push(text(f.clone()).size(14.4).color(if *warn { th.warn } else { th.foreground }));
+            status = status.push(text(f.clone()).size(14.4).wrapping(text::Wrapping::None).color(if *warn { th.warn } else { th.foreground }));
         }
         if let Some(s) = self.passive_status() {
-            status = status.push(text(s).size(14.4).color(th.dim));
+            status = status.push(text(s).size(14.4).wrapping(text::Wrapping::None).color(th.dim));
         }
         // The agents, whatever tab is in front: how many are at work, and the way to stop them.
         if let Some(agents) = self.ai_strip() {
@@ -2054,17 +2054,17 @@ impl App {
                 let n: usize = d.selection.ranges().iter().map(|r| r.len()).sum();
                 let cursors = d.selection.len();
                 if cursors > 1 {
-                    status = status.push(text(format!("{cursors} cursors")).size(14.4).color(th.accent));
+                    status = status.push(text(format!("{cursors} cursors")).size(14.4).wrapping(text::Wrapping::None).color(th.accent));
                 }
                 if n > 0 {
-                    status = status.push(text(format!("{n} selected")).size(14.4).color(th.dim));
+                    status = status.push(text(format!("{n} selected")).size(14.4).wrapping(text::Wrapping::None).color(th.dim));
                 }
-                status = status.push(text(format!("Ln {}, Col {}", l + 1, c + 1)).size(14.4).color(th.dim));
-                status = status.push(text(d.language_name()).size(14.4).color(th.dim));
+                status = status.push(text(format!("Ln {}, Col {}", l + 1, c + 1)).size(14.4).wrapping(text::Wrapping::None).color(th.dim));
+                status = status.push(text(d.language_name()).size(14.4).wrapping(text::Wrapping::None).color(th.dim));
             }
         }
         if self.label != "local" {
-            status = status.push(text(self.label.clone()).size(14.4).color(th.dim));
+            status = status.push(text(self.label.clone()).size(14.4).wrapping(text::Wrapping::None).color(th.dim));
         }
         let mut strip = row![buttons].spacing(14.4).align_y(iced::Alignment::Center);
         if let Some((s, warn)) = self.git_status() {
