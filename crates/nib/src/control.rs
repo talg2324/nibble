@@ -398,7 +398,7 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
   ai effort LEVEL      the shown agent's thinking level: default or one of its assistant's
                        (state.ai.efforts); taken when its session starts
   ai system-prompt TEXT  replace what the shown agent adds to its system prompt (empty: none)
-  ai prompt            show the system prompt pane beside the steps
+  ai system            show the system prompt pane beside the steps
   wait [SECS]          until nothing is waiting on the daemon (default 10 s)
   raw JSON             send one request as-is, e.g. raw '{\"cmd\":\"state\"}'
 
@@ -506,7 +506,7 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         ["ai", "skills"] => json!({ "cmd": "ai.side", "skills": true }),
         ["ai", "terminal"] => json!({ "cmd": "ai.side", "skills": false }),
         ["ai", "noside"] => json!({ "cmd": "ai.side", "off": true }),
-        ["ai", "prompt"] => json!({ "cmd": "ai.side", "side": "prompt" }),
+        ["ai", "system" | "prompt"] => json!({ "cmd": "ai.side", "side": "system" }),
         ["ai", "effort", level] => json!({ "cmd": "ai.effort", "level": level }),
         ["ai", "system-prompt", rest @ ..] => json!({ "cmd": "ai.prompt", "text": rest.join(" ") }),
         ["ai", "mode", mode] => json!({ "cmd": "ai.mode", "mode": mode }),
