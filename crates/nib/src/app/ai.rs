@@ -1427,18 +1427,30 @@ impl App {
             }
             AiEvent::Step(s) => {
                 ai.busy = true;
+                // The agent reading a picture: it is shown under the step (read on the daemon's
+                // side, where the agent runs), keyed by the path the step names.
+                let picture = match &s.kind {
+                    AiStepKind::Read { path, .. } if PreviewImage::wanted(path) => Some(path.clone()),
+                    _ => None,
+                };
+                let images = picture.iter().map(|p| (p.clone(), None)).collect();
                 ai.turns.push(Turn {
                     who: Who::Step,
                     text: String::new(),
                     md: markdown::Content::new(),
                     math: Default::default(),
-                    images: Default::default(),
+                    images,
                     step: Some(Step { id: s.id, parent: s.parent, acts: act::of(&s.kind, &root), kind: s.kind, started: Instant::now(), done: None }),
                 });
                 if let Some(step) = self.ai.chats[self.ai.cur].turns.last().and_then(|t| t.step.as_ref()).map(step_copy) {
                     self.ai_follow_step(&step);
                 }
-                return self.ai_arm_clock();
+                let chat = self.ai.key;
+                let fetch = match picture {
+                    Some(path) => self.request(Request::ReadFile { path: path.clone() }, Pending::AiImage { chat, url: path }),
+                    None => Task::none(),
+                };
+                return Task::batch([fetch, self.ai_arm_clock()]);
             }
             AiEvent::StepDone(d) => {
                 let step = ai.turns.iter_mut().rev().filter_map(|t| t.step.as_mut()).find(|s| s.id == d.id).map(|step| {
@@ -2540,6 +2552,27 @@ mod tests {
         assert_eq!(a.ai.turns.last().map(|t| t.text.as_str()), Some("[1 image]"));
         let _ = a.update(Message::Ai(Msg::Clip(Clip::Text("pasted\r\ntext".into()))));
         assert_eq!(a.ai.input, "pasted\ntext");
+    }
+
+    #[test]
+    fn a_picture_the_agent_reads_is_fetched_for_its_step() {
+        let mut a = chatting();
+        say(&mut a, "go");
+        event(&mut a, 7, step("r1", AiStepKind::Read { path: "/tmp/shot.png".into(), offset: None, limit: None }));
+        let asked = a.pending.values().find_map(|p| match p {
+            Pending::AiImage { url, .. } => Some(url.clone()),
+            _ => None,
+        });
+        assert_eq!(asked.as_deref(), Some("/tmp/shot.png"));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(4, 3, image::Rgba([9, 9, 9, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        a.ai_image(a.ai.key, "/tmp/shot.png".into(), png);
+        assert!(matches!(a.ai.turns.last().and_then(|t| t.images.get("/tmp/shot.png")), Some(Some(_))));
+        // A source file is not a picture: nothing is fetched for it.
+        event(&mut a, 7, step("r2", AiStepKind::Read { path: "/tmp/a.rs".into(), offset: None, limit: None }));
+        assert!(a.ai.turns.last().is_some_and(|t| t.images.is_empty()));
     }
 
     #[test]

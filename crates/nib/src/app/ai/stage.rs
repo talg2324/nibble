@@ -24,6 +24,8 @@ const INPUT_ID: &str = "ai-input";
 const INPUT_MAX_HEIGHT: f32 = 200.0;
 /// The column left of each thing in the feed that marks what it is (🤖 🔧 📚 ✉️ ✅ …).
 const MARK_WIDTH: f32 = 18.0;
+/// The tallest a picture an agent read is drawn in the feed (it shrinks to fit, keeping its shape).
+const PICTURE_HEIGHT: f32 = 360.0;
 use iced::widget::text::Span;
 use iced::widget::{button, column, container, markdown, mouse_area, pick_list, responsive, rich_text, row, scrollable, space, span, stack, svg, text, tooltip};
 use iced::gradient::Linear;
@@ -927,7 +929,16 @@ impl App {
                         AiStepKind::Skill { .. } => emoji("📚"),
                         _ => emoji("🔧"),
                     };
-                    mark(icon, self.ai_step_row(s))
+                    let row = self.ai_step_row(s);
+                    // A picture the agent read, once it has arrived.
+                    let pic = match &s.kind {
+                        AiStepKind::Read { path, .. } => t.images.get(path).and_then(Option::as_ref),
+                        _ => None,
+                    };
+                    match pic {
+                        Some(p) => mark(icon, column![row, container(p.view()).max_height(PICTURE_HEIGHT)].spacing(4).into()),
+                        None => mark(icon, row),
+                    }
                 }
                 (Who::Mail, _) => {
                     let accent = th.accent;
