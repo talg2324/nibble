@@ -253,6 +253,7 @@ Editing is built on [helix-core](https://github.com/helix-editor/helix) (rope, s
 - [ ] **v0.2**: Windows support, including WSL, and a revamped diff experience. Native Windows already works for local projects (editor, tree, search, git, terminals, language servers, `nib ctl`).
 - [ ] **v0.3**: localhost integration: see web servers running on the remote (dev servers, notebooks, dashboards) inside nibble, with agents able to read and act on the page.
 - [ ] **v0.4**: GitHub Actions that build and publish binaries. Until then, you build nibble yourself.
+- [ ] **v0.5**: model routing: nibble picks the model (and thinking level) for each task, with a small local model deciding and the user able to override.
 
 ## Contributing
 
