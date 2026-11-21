@@ -49,7 +49,7 @@ struct ColorEdit {
 /// The app window as the Appearance page sees it.
 #[derive(Default)]
 pub struct WindowState {
-    id: Option<window::Id>,
+    pub(super) id: Option<window::Id>,
     /// Logical size of the current monitor.
     monitor: Option<Size>,
     /// Current logical size (tracked from resize events).
@@ -190,7 +190,7 @@ fn by_category() -> Vec<(&'static str, Vec<Command>)> {
 }
 
 /// `c` moved toward white (dark themes) or black (light themes) by `t`.
-fn raise(c: Color, t: f32) -> Color {
+pub(super) fn raise(c: Color, t: f32) -> Color {
     let lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
     let to = if lum < 0.5 { 1.0 } else { 0.0 };
     Color { r: c.r + (to - c.r) * t, g: c.g + (to - c.g) * t, b: c.b + (to - c.b) * t, a: c.a }

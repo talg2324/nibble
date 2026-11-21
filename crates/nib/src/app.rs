@@ -8,6 +8,7 @@ mod pdf_tab;
 mod search;
 mod settings;
 mod ssh;
+mod titlebar;
 mod tree;
 mod viewers;
 mod watch;
@@ -94,6 +95,8 @@ pub enum Message {
     Ctl(crate::control::Call),
     /// The window screenshot a control `snapshot` asked for (and where to save it).
     ControlShot(crate::control::Call, Option<PathBuf>, iced::window::Screenshot),
+    /// nib's own title bar and window edges (`titlebar.rs`).
+    TitleBar(titlebar::Msg),
 }
 
 enum Pending {
@@ -368,6 +371,8 @@ pub struct App {
     messages: VecDeque<(String, bool)>,
     quit_armed: bool,
     close_armed: bool,
+    /// nib's own title bar, on WSL (`titlebar.rs`).
+    titlebar: titlebar::State,
     force_save_armed: bool,
     disconnected: bool,
     connected: bool,
@@ -404,6 +409,7 @@ pub struct Init {
 const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
 /// Height of the macOS title bar the window content runs under (see main.rs); 0 elsewhere.
 pub const TITLEBAR_H: f32 = if cfg!(target_os = "macos") { 28.0 } else { 0.0 };
+pub use titlebar::own_frame;
 
 impl App {
     pub fn boot(init: Init) -> (Self, Task<Message>) {
@@ -480,6 +486,7 @@ impl App {
             messages: VecDeque::new(),
             quit_armed: false,
             close_armed: false,
+            titlebar: Default::default(),
             force_save_armed: false,
             disconnected: false,
             connected: false,
@@ -547,6 +554,9 @@ impl App {
         });
         let resized = iced::window::resize_events().map(|(_, size)| Message::Settings(settings::Msg::Resized(size)));
         let mut subs = vec![keys, blur, resized];
+        if titlebar::own_frame() {
+            subs.push(iced::window::resize_events().map(|(id, _)| Message::TitleBar(titlebar::Msg::Resized(id))));
+        }
         if self.bench.is_some() {
             subs.push(iced::window::frames().map(|_| Message::Frame));
         }
@@ -757,6 +767,7 @@ impl App {
             Message::Git(m) => self.on_git_msg(m),
             Message::Ai(m) => self.on_ai_msg(m),
             Message::Drop(m) => self.on_drop(m),
+            Message::TitleBar(m) => self.on_titlebar(m),
             Message::Ssh(m) => self.on_ssh_msg(m),
             Message::PickerOpen(i) => self.picker_open(i),
             Message::HoverDue(seq) => self.hover_due(seq),
@@ -1823,6 +1834,9 @@ impl App {
             // The content runs under the transparent title bar; keep it clear of the traffic lights.
             col = col.push(space().height(TITLEBAR_H));
         }
+        if let Some(bar) = self.titlebar() {
+            col = col.push(bar).push(self.hrule());
+        }
         if !self.tabs.is_empty() || self.ai.open {
             col = col.push(self.tab_bar());
         }
@@ -1832,7 +1846,7 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
-        self.with_settings_menu(self.with_code_overlay(base))
+        self.with_frame_edges(self.with_settings_menu(self.with_code_overlay(base)))
     }
 
     /// What the editor area shows with no tab open: the logo, plus a few shortcuts to get going.

@@ -1,4 +1,4 @@
-//! Control-strip icons (inline SVG, drawn with `currentColor` replaced at load time).
+//! Control-strip and title-bar icons (inline SVG, drawn with `currentColor` replaced at load time).
 
 use iced::widget::svg;
 
@@ -32,6 +32,14 @@ const LOGO: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="104 394 
 /// small circles blur into a slanted corner at this size.
 const LOGO_SMALL: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 53 11"><defs><mask id="bite"><rect width="53" height="11" fill="#fff"/><circle cx="53.4" cy="-0.4" r="6" fill="#000"/></mask></defs><g fill="currentColor"><rect width="11" height="11" rx="2.5"/><rect x="14" width="11" height="11" rx="2.5"/><rect x="28" width="11" height="11" rx="2.5"/></g><rect x="42" width="11" height="11" rx="2.5" fill="ACCENT" mask="url(#bite)"/></svg>"##;
 
+/// Title-bar buttons (`app/titlebar.rs`): each SVG is the whole 46x30 button, glyph in the
+/// middle, so the icon's hover state is the button's. Lines sit on half pixels to stay sharp.
+/// Drawn white; the title bar tints them.
+const WIN_MINIMIZE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 30" fill="none" stroke="#fff" stroke-width="1"><path d="M18 15.5h10"/></svg>"##;
+const WIN_MAXIMIZE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 30" fill="none" stroke="#fff" stroke-width="1"><rect x="18.5" y="10.5" width="9" height="9"/></svg>"##;
+const WIN_RESTORE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 30" fill="none" stroke="#fff" stroke-width="1"><rect x="18.5" y="12.5" width="7" height="7"/><path d="M20.5 12.5v-2h7v7h-2"/></svg>"##;
+const WIN_CLOSE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 30" fill="none" stroke="#fff" stroke-width="1.1"><path d="M18 10l10 10M28 10l-10 10"/></svg>"##;
+
 /// LOGO_SMALL's width and height in logical pixels: its viewBox, one unit per pixel.
 pub const LOGO_SMALL_SIZE: (f32, f32) = (53.0, 11.0);
 
@@ -53,6 +61,10 @@ pub struct Icons {
     pub gear_on: svg::Handle,
     pub logo: svg::Handle,
     pub logo_small: svg::Handle,
+    pub win_minimize: svg::Handle,
+    pub win_maximize: svg::Handle,
+    pub win_restore: svg::Handle,
+    pub win_close: svg::Handle,
 }
 
 impl Icons {
@@ -72,6 +84,10 @@ impl Icons {
             gear_on: handle(GEAR, on),
             logo: handle(&LOGO.replace("ACCENT", on), off),
             logo_small: handle(&LOGO_SMALL.replace("ACCENT", on), off),
+            win_minimize: svg::Handle::from_memory(WIN_MINIMIZE.as_bytes()),
+            win_maximize: svg::Handle::from_memory(WIN_MAXIMIZE.as_bytes()),
+            win_restore: svg::Handle::from_memory(WIN_RESTORE.as_bytes()),
+            win_close: svg::Handle::from_memory(WIN_CLOSE.as_bytes()),
         }
     }
 }

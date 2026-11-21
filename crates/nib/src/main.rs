@@ -319,6 +319,8 @@ fn main() -> Result<()> {
             application_id: "nib".into(),
             ..Default::default()
         },
+        // WSL: no frame from winit; the app draws its own (app/titlebar.rs says why).
+        decorations: !app::own_frame(),
         ..Default::default()
     })
     .theme(|_: &app::App| iced::Theme::Dark)
