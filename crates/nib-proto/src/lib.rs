@@ -524,8 +524,9 @@ pub enum ClientNotify {
     /// at once for Claude Code, with the next message for the others.
     AiSetMode { id: AiId, mode: AiMode },
     /// The user's answer to `AiEvent::Ask`. `message`: said to the agent with a refusal
-    /// (what to do instead).
-    AiAnswer { id: AiId, request: String, allow: bool, message: Option<String> },
+    /// (what to do instead). `answers`: with a yes to questions, one per question, in order
+    /// (several picks joined by ", ").
+    AiAnswer { id: AiId, request: String, allow: bool, message: Option<String>, answers: Vec<String> },
     /// Make room in the chat's context: the conversation so far is replaced by a summary of
     /// it, focused on `focus` if given. Answered with `AiEvent::Compacted`, then `TurnDone`.
     AiCompact { id: AiId, focus: Option<String> },
@@ -939,10 +940,32 @@ pub struct AiAsk {
     pub step: Option<String>,
     /// The harness's tool: `Bash`, `Edit`, `ExitPlanMode` (approve the plan), `AskUserQuestion`.
     pub tool: String,
-    /// What it wants to do, or its plan, or its question: text to show.
+    /// What it wants to do, or its plan: text to show. Empty for questions.
     pub what: String,
-    /// It is a question to answer in words (`AiAnswer::message`), not something to allow.
-    pub question: bool,
+    /// Questions to answer (`AskUserQuestion`), not something to allow: their answers go back
+    /// with a yes, one for each (`AiAnswer::answers`).
+    pub questions: Vec<AiQuestion>,
+}
+
+/// One question an agent asks, with the answers it offers. The user may answer in their own
+/// words instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiQuestion {
+    /// A word or two naming it (a chip).
+    pub header: String,
+    pub question: String,
+    pub options: Vec<AiOption>,
+    /// Any number of the options may be picked, not just one.
+    pub multi: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiOption {
+    pub label: String,
+    /// What picking it means.
+    pub description: String,
+    /// Something to look at while it is considered (code, a mockup), shown monospaced.
+    pub preview: Option<String>,
 }
 
 /// One thing an agent does. nib only shows it: the harness runs it.
