@@ -231,8 +231,35 @@ fn read_clipboard() -> Clip {
             return Clip::Text(t);
         }
     }
-    let Ok(i) = c.get_image() else { return Clip::Nothing };
-    image::RgbaImage::from_raw(i.width as u32, i.height as u32, i.bytes.into_owned()).and_then(Pic::from_rgba).map_or(Clip::Nothing, Clip::Image)
+    if let Ok(i) = c.get_image() {
+        if let Some(pic) = image::RgbaImage::from_raw(i.width as u32, i.height as u32, i.bytes.into_owned()).and_then(Pic::from_rgba) {
+            return Clip::Image(pic);
+        }
+    }
+    windows_clipboard_image().map_or(Clip::Nothing, Clip::Image)
+}
+
+/// On WSL, the picture on the Windows clipboard (a Snipping Tool / Win+Shift+S snip): WSLg
+/// passes only text across to Linux, so arboard never sees it. Asks Windows PowerShell for it
+/// as PNG bytes on its stdout (about a second: PowerShell is slow to start). `None` off WSL, or
+/// when the Windows clipboard holds no picture.
+fn windows_clipboard_image() -> Option<Pic> {
+    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|r| r.to_ascii_lowercase().contains("microsoft"));
+    if !wsl {
+        return None;
+    }
+    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+        $i = [Windows.Forms.Clipboard]::GetImage(); if ($i) { $m = New-Object IO.MemoryStream; \
+        $i.Save($m, [Drawing.Imaging.ImageFormat]::Png); $o = [Console]::OpenStandardOutput(); \
+        $m.WriteTo($o); $o.Flush() }";
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", SCRIPT])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    Pic::from_rgba(image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Png).ok()?.to_rgba8())
 }
 
 pub struct Panel {
