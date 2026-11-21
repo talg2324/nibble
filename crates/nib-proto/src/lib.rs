@@ -16,6 +16,13 @@ pub use frame::{read_frame, write_frame, FrameError, MAX_FRAME};
 /// content-addressed and uploaded by the client, so they are always built from the same tree).
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Time of day in UTC, `HH:MM:SS.mmmZ`: the stamp on every line nib and nibd write to their logs.
+pub fn log_clock() -> String {
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let day = (ms / 1000) % 86_400;
+    format!("{:02}:{:02}:{:02}.{:03}Z", day / 3600, day / 60 % 60, day % 60, ms % 1000)
+}
+
 /// How often a client sends `ClientNotify::Ping`. A daemon that hears nothing from its client
 /// for a couple of minutes assumes it is gone and exits.
 pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(20);

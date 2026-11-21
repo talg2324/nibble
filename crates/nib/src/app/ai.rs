@@ -223,7 +223,7 @@ impl Side {
         match self {
             Side::Terminal => "terminal",
             Side::Skills => "skills",
-            Side::Prompt => "prompt",
+            Side::Prompt => "system",
         }
     }
 }
@@ -346,6 +346,8 @@ pub struct Panel {
     /// `prompt`): new agents start with them.
     last_effort: Option<String>,
     last_prompt: String,
+    /// Bumped by each edit of the system prompt: a save waits until the typing stops.
+    prompt_save_seq: u64,
     /// Every agent is paused and the dialog is up: each working chat's key and whether it is
     /// marked for stopping; the row the keyboard is on.
     panic: Option<(Vec<(u64, bool)>, usize)>,
@@ -417,6 +419,7 @@ impl Default for Panel {
             drawer: Some(Side::Terminal),
             last_effort: None,
             last_prompt: String::new(),
+            prompt_save_seq: 0,
             panic: None,
             ticking: false,
             follow: None,
@@ -498,6 +501,29 @@ impl Panel {
         let first = std::mem::take(&mut p.chats[0]);
         p.chats[0] = p.seeded(first);
         p
+    }
+
+    /// The remembered system prompt, `None` when empty.
+    fn last_prompt_opt(&self) -> Option<String> {
+        Some(self.last_prompt.clone()).filter(|p| !p.is_empty())
+    }
+
+    /// config.toml's `[ai] effort` / `prompt` changed: new agents start with them. The thinking
+    /// level is each agent's own, like its model, so open agents keep theirs; the prompt goes to
+    /// the agents that had the old one and haven't started talking.
+    pub(super) fn retune(&mut self, effort: Option<String>, prompt: Option<String>) {
+        self.last_effort = effort;
+        let old_prompt = std::mem::replace(&mut self.last_prompt, prompt.unwrap_or_default());
+        // A save on its way would write back the old prompt.
+        self.prompt_save_seq += 1;
+        for c in &mut self.chats {
+            if c.turns.iter().any(|t| t.who == Who::User) {
+                continue;
+            }
+            if c.prompt.text().trim() == old_prompt.trim() {
+                c.prompt = iced::widget::text_editor::Content::with_text(&self.last_prompt);
+            }
+        }
     }
 
     /// `c` with the thinking level and system prompt the last agent started with.
@@ -629,6 +655,8 @@ pub enum Msg {
     AskModel(bool),
     /// config.toml couldn't be written: why.
     Saved(Option<String>),
+    /// The system prompt was last edited at this `prompt_save_seq`: save it if nothing came after.
+    SavePrompt(u64),
     /// A picture in a reply was clicked: open it in a tab (URL as written).
     OpenImage(String),
     /// A mailbox message was clicked: show it in full, or clip it again (its number, see `mail_count`).
@@ -818,7 +846,7 @@ impl App {
                 self.ai.pick_model = on;
                 return self.ai_save_choice();
             }
-            Msg::Saved(Some(why)) => return self.flash_warn(format!("couldn't save the model picked: {why}")),
+            Msg::Saved(Some(why)) => return self.flash_warn(format!("couldn't save to config.toml: {why}")),
             Msg::Saved(None) => {}
             Msg::Setup(agent) => return self.ai_setup(agent, false),
             Msg::Update(agent) => return self.ai_update(agent),
@@ -876,12 +904,28 @@ impl App {
             }
             Msg::Effort(e) => {
                 self.ai.effort = e.level();
+                let save = self.ai_remember_tuning(self.ai.effort.clone(), self.ai.last_prompt_opt());
                 // The assistant takes it when its session starts (again, for a first message).
                 if self.ai_tuning_fixed() {
-                    return self.flash_info("thinking level: from this agent's next session (clear starts one)");
+                    return Task::batch([save, self.flash_info("thinking level: from this agent's next session (clear starts one)")]);
+                }
+                return save;
+            }
+            Msg::Prompt(action) => {
+                let edit = action.is_edit();
+                self.ai.prompt.perform(action);
+                if edit {
+                    self.ai.prompt_save_seq += 1;
+                    let seq = self.ai.prompt_save_seq;
+                    return Task::perform(super::async_sleep(std::time::Duration::from_millis(400)), move |_| Message::Ai(Msg::SavePrompt(seq)));
                 }
             }
-            Msg::Prompt(action) => self.ai.prompt.perform(action),
+            Msg::SavePrompt(seq) => {
+                if seq == self.ai.prompt_save_seq {
+                    let prompt = Some(self.ai.prompt.text().trim().to_string()).filter(|p| !p.is_empty());
+                    return self.ai_remember_tuning(self.ai.last_effort.clone(), prompt);
+                }
+            }
             Msg::Answer(allow) => self.ai_answer(allow, None),
             Msg::Pick(q, o) => return self.ai_pick_answer(q, o),
             Msg::Accept(yes) => return self.ai_accept(yes),
@@ -1004,8 +1048,9 @@ impl App {
         self.ai.prompt = iced::widget::text_editor::Content::with_text(text);
     }
 
-    /// An agent starts with this thinking level and system prompt: new agents start with them
-    /// too, and so does the next nib (config.toml, off the UI thread, only when they changed).
+    /// An agent starts with this thinking level and system prompt, or they were just set: new
+    /// agents start with them too, and so does the next nib (config.toml, off the UI thread,
+    /// only when they changed).
     fn ai_remember_tuning(&mut self, effort: Option<String>, prompt: Option<String>) -> Task<Message> {
         let text = prompt.clone().unwrap_or_default();
         if self.ai.last_effort == effort && self.ai.last_prompt == text {
@@ -3190,6 +3235,49 @@ mod tests {
         let _ = a.update(Message::Control(Command::NewAgent));
         assert!(!a.ai.picking);
         assert_eq!((a.ai.agent, a.ai.chosen.as_deref()), (Some(AiAgent::Codex), Some("gpt-6-sol")));
+    }
+
+    #[test]
+    fn thinking_and_prompt_are_remembered_as_set_and_follow_config() {
+        use iced::widget::text_editor::{Action, Edit};
+        let mut a = chatting();
+        let _ = a.update(Message::Ai(Msg::Effort(Effort::Level("high".into()))));
+        assert_eq!(a.ai.last_effort.as_deref(), Some("high"), "remembered without starting an agent");
+        for ch in "Be terse.".chars() {
+            let _ = a.update(Message::Ai(Msg::Prompt(Action::Edit(Edit::Insert(ch)))));
+        }
+        assert_eq!(a.ai.last_prompt, "", "saved once the typing stops");
+        let seq = a.ai.prompt_save_seq;
+        let _ = a.update(Message::Ai(Msg::SavePrompt(seq - 1)));
+        assert_eq!(a.ai.last_prompt, "", "a stale tick does nothing");
+        let _ = a.update(Message::Ai(Msg::SavePrompt(seq)));
+        assert_eq!(a.ai.last_prompt, "Be terse.");
+
+        // config.toml edited: an agent that hasn't talked takes the new prompt, but keeps its
+        // own thinking level; new agents start with both.
+        a.ai.retune(Some("low".into()), Some("Be kind.".into()));
+        assert_eq!((a.ai.effort.as_deref(), a.ai.prompt.text().trim()), (Some("high"), "Be kind."));
+        assert_eq!(a.ai.last_effort.as_deref(), Some("low"));
+        assert_eq!(a.ai.prompt_save_seq, seq + 1, "a pending save is dropped");
+        assert_eq!(Side::Prompt.name(), "system");
+    }
+
+    #[test]
+    fn each_agent_has_its_own_thinking_level_and_new_ones_start_with_the_last() {
+        let mut a = chatting();
+        let _ = a.update(Message::Ai(Msg::Effort(Effort::Level("high".into()))));
+        type_str(&mut a, "hi");
+        key(&mut a, "enter");
+        let first = a.ai.cur;
+        let _ = a.update(Message::Control(Command::NewAgent));
+        assert_ne!(a.ai.cur, first, "a second agent");
+        assert_eq!(a.ai.effort.as_deref(), Some("high"), "starts with the last level used");
+        let _ = a.update(Message::Ai(Msg::Effort(Effort::Level("low".into()))));
+        assert_eq!(a.ai.chats[first].effort.as_deref(), Some("high"), "the first keeps its own");
+        type_str(&mut a, "hi");
+        key(&mut a, "enter");
+        let _ = a.update(Message::Control(Command::NewAgent));
+        assert_eq!(a.ai.effort.as_deref(), Some("low"), "the next starts with the last one set");
     }
 
     #[test]

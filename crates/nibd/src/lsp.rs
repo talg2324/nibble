@@ -369,7 +369,7 @@ impl Client {
                 ),
                 _ => format!("starting {:?}: {e}", argv.join(" ")),
             })?;
-        eprintln!("nibd: started language server {:?}", argv.join(" "));
+        log!("started language server {:?}", argv.join(" "));
         let stdout = child.stdout.take().unwrap();
         let mut io = Io {
             stdin: child.stdin.take(),
@@ -642,7 +642,7 @@ fn read_loop(stdout: ChildStdout, io: Arc<Mutex<Io>>, docs: Docs, tx: Sender<Ser
 fn on_initialized(io: &Mutex<Io>, msg: &Value) {
     let mut io = io.lock().unwrap();
     if msg.get("error").is_some() {
-        eprintln!("nibd: language server failed to initialize: {}", msg["error"]);
+        log!("language server failed to initialize: {}", msg["error"]);
         io.dead = true;
         return;
     }
@@ -774,7 +774,7 @@ fn convert(q: &Query, result: &Value, enc: Encoding, lines: &mut Lines) -> Respo
             for dc in result.get("documentChanges").and_then(Value::as_array).into_iter().flatten() {
                 match dc["textDocument"]["uri"].as_str() {
                     Some(uri) => per_file.push((uri_to_path(uri), &dc["edits"])),
-                    None => eprintln!("nibd: rename: ignoring file operation {dc}"),
+                    None => log!("rename: ignoring file operation {dc}"),
                 }
             }
             let files = per_file

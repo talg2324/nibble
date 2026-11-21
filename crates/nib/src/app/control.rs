@@ -167,16 +167,16 @@ impl App {
                 t
             }
             "ai.side" => {
-                // The pane beside the steps: `side` (terminal, skills, prompt), or the older
+                // The pane beside the steps: `side` (terminal, skills, system; `prompt` too), or the older
                 // `skills` switch, or none (`"off": true`).
                 use super::ai::Side;
                 let off = call.req.get("off").and_then(Value::as_bool).unwrap_or(false);
                 let skills = call.req.get("skills").and_then(Value::as_bool).unwrap_or(false);
                 let side = match call.str_arg("side") {
-                    Some(s) => match [Side::Terminal, Side::Skills, Side::Prompt].into_iter().find(|x| x.name() == s) {
+                    Some(s) => match [Side::Terminal, Side::Skills, Side::Prompt].into_iter().find(|x| x.name() == s || (s == "prompt" && *x == Side::Prompt)) {
                         Some(x) => x,
                         None => {
-                            call.err("ai side needs one of: terminal, skills, prompt");
+                            call.err("ai side needs one of: terminal, skills, system");
                             return Task::none();
                         }
                     },

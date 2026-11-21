@@ -94,13 +94,10 @@ pub fn session() -> Option<&'static Value> {
 /// Append a line to `nib.log` (nothing when control is off).
 pub fn log(kind: &str, text: &str) {
     let Some(r) = RUN.get() else { return };
-    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let day = (ms / 1000) % 86_400;
-    let (h, m, s) = (day / 3600, day / 60 % 60, day % 60);
     let mut text: String = text.chars().take(400).collect();
     text = text.replace('\n', "\\n");
     use std::io::Write;
-    let _ = writeln!(r.log.lock().unwrap(), "{h:02}:{m:02}:{s:02}.{:03}Z {kind:<5} {text}", ms % 1000);
+    let _ = writeln!(r.log.lock().unwrap(), "{} {kind:<5} {text}", nib_proto::log_clock());
 }
 
 /// Next default snapshot file: `<run dir>/snapshots/001.png`, `002.png`, …
@@ -398,7 +395,7 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
   ai effort LEVEL      the shown agent's thinking level: default or one of its assistant's
                        (state.ai.efforts); taken when its session starts
   ai system-prompt TEXT  replace what the shown agent adds to its system prompt (empty: none)
-  ai prompt            show the system prompt pane beside the steps
+  ai system            show the system prompt pane beside the steps
   wait [SECS]          until nothing is waiting on the daemon (default 10 s)
   raw JSON             send one request as-is, e.g. raw '{\"cmd\":\"state\"}'
 
@@ -506,7 +503,7 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         ["ai", "skills"] => json!({ "cmd": "ai.side", "skills": true }),
         ["ai", "terminal"] => json!({ "cmd": "ai.side", "skills": false }),
         ["ai", "noside"] => json!({ "cmd": "ai.side", "off": true }),
-        ["ai", "prompt"] => json!({ "cmd": "ai.side", "side": "prompt" }),
+        ["ai", "system" | "prompt"] => json!({ "cmd": "ai.side", "side": "system" }),
         ["ai", "effort", level] => json!({ "cmd": "ai.effort", "level": level }),
         ["ai", "system-prompt", rest @ ..] => json!({ "cmd": "ai.prompt", "text": rest.join(" ") }),
         ["ai", "mode", mode] => json!({ "cmd": "ai.mode", "mode": mode }),
