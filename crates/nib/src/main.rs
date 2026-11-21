@@ -279,6 +279,14 @@ fn main() -> Result<()> {
         detach_own_console();
     }
 
+    // WSL usually has no colour-emoji font, so the AI chat's marks (🤖 🔧 ✅ …) draw as nothing.
+    // Windows' own is a mount away; text falls back to it when no Linux font has the glyph.
+    if cfg!(target_os = "linux") && std::path::Path::new("/dev/dxg").exists() {
+        if let (Ok(bytes), Ok(mut fs)) = (std::fs::read("/mnt/c/Windows/Fonts/seguiemj.ttf"), iced::advanced::graphics::text::font_system().write()) {
+            fs.load_font(bytes.into());
+        }
+    }
+
     iced::application(
         move || {
             let (init, syn_rx, ctl_rx) = init.lock().unwrap().take().expect("boot runs once");
