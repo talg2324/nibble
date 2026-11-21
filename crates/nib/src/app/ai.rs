@@ -661,6 +661,9 @@ pub enum Msg {
     OpenImage(String),
     /// A mailbox message was clicked: show it in full, or clip it again (its number, see `mail_count`).
     MailOpen(u64),
+    /// The copy button of turn `i` of the shown agent: its text to the clipboard (a reply as
+    /// the markdown it was written in).
+    CopyTurn(usize),
 }
 
 impl App {
@@ -944,6 +947,10 @@ impl App {
                 if !self.ai.mail_open.remove(&n) {
                     self.ai.mail_open.insert(n);
                 }
+            }
+            Msg::CopyTurn(i) => {
+                let Some(t) = self.ai.turns.get(i) else { return Task::none() };
+                return Task::batch([iced::clipboard::write(t.text.clone()), self.flash_info("copied")]);
             }
             Msg::HistoryClose => self.ai_history_close(),
             Msg::HistoryMail(on) => {
@@ -2678,6 +2685,16 @@ mod tests {
         assert!(a.ai.error.is_none() && !a.ai.busy);
         let s = a.ai_state_json();
         assert_eq!((&s["steps"][0]["running"], &s["steps"][0]["ok"]), (&json!(false), &json!(false)), "the step it was in is over");
+    }
+
+    #[test]
+    fn a_turns_copy_button_copies_it() {
+        let mut a = chatting();
+        say(&mut a, "first");
+        let _ = a.update(Message::Ai(Msg::CopyTurn(5)));
+        assert!(a.flash.is_none(), "no such turn: nothing happens");
+        let _ = a.update(Message::Ai(Msg::CopyTurn(0)));
+        assert_eq!(a.flash.as_ref().map(|f| f.0.as_str()), Some("copied"));
     }
 
     #[test]

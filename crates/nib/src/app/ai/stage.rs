@@ -1063,6 +1063,7 @@ impl App {
         let ai = &self.ai;
         let th = &self.theme;
         let (accent, dim, fg, sel_bg) = (th.accent, th.dim, th.foreground, th.selection);
+        let (panel, divider) = (th.panel, th.divider);
         let mut style = markdown::Style::from_palette(iced::Theme::Dark.palette());
         style.link_color = accent;
         style.inline_code_color = th.scope("string");
@@ -1082,6 +1083,27 @@ impl App {
             row![container(icon).width(Length::Fixed(MARK_WIDTH)).center_x(Length::Fixed(MARK_WIDTH)).padding(Padding { top: 2.0, ..Padding::ZERO }), body].spacing(4).into()
         };
         let emoji = |e: &'static str| -> Element<'a, Message> { text(e).size(12).into() };
+        // A box's own copy button, in its bottom-right corner, under what it says.
+        // `fill`: the box is as wide as the feed; the button goes to its right edge, not to
+        // that of the text (a reply's text is only as wide as its longest line).
+        let with_copy = |body: Element<'a, Message>, i: usize, fill: bool| -> Element<'a, Message> {
+            let copy = button(text("📋").size(12))
+                .on_press(Message::Ai(Msg::CopyTurn(i)))
+                .padding([0, 4])
+                .style(move |_: &iced::Theme, status: button::Status| button::Style {
+                    border: Border { color: if matches!(status, button::Status::Hovered) { dim } else { Color::TRANSPARENT }, width: 1.0, radius: 3.0.into() },
+                    ..Default::default()
+                });
+            let tip = container(text("copy").size(11).color(fg))
+                .padding([2, 6])
+                .style(move |_| container::Style { background: Some(panel.into()), border: Border { color: divider, width: 1.0, radius: 3.0.into() }, ..Default::default() });
+            let copy = tooltip(copy, tip, tooltip::Position::Left);
+            if fill {
+                column![body, container(copy).align_right(Length::Fill)].spacing(2).width(Length::Fill).into()
+            } else {
+                column![body, copy].spacing(2).align_x(Alignment::End).into()
+            }
+        };
         for (i, t) in ai.turns.iter().enumerate() {
             let turn: Element<'a, Message> = match (t.who, &t.step) {
                 (_, Some(s)) => {
@@ -1103,7 +1125,7 @@ impl App {
                 }
                 (Who::Mail, _) => {
                     let accent = th.accent;
-                    let card = container(text(t.text.as_str()).size(12).color(fg))
+                    let card = container(with_copy(text(t.text.as_str()).size(12).color(fg).into(), i, true))
                         .padding([4, 10])
                         .width(Length::Fill)
                         .style(move |_| container::Style { border: Border { color: accent, width: 1.0, radius: 3.0.into() }, ..Default::default() });
@@ -1115,7 +1137,7 @@ impl App {
                         let (head, rest) = line.split_once(": ").unwrap_or(("", line));
                         card = card.push(rich_text![span::<(), Font>(format!("{head}  ")).color(OK).font(Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT }), span(rest.to_string()).color(fg)].size(12));
                     }
-                    let card = container(card).padding([8, 10]).width(Length::Fill).style(move |_| container::Style {
+                    let card = container(with_copy(card.into(), i, true)).padding([8, 10]).width(Length::Fill).style(move |_| container::Style {
                         background: Some(Color { a: 0.10, ..OK }.into()),
                         border: Border { color: OK, width: 1.0, radius: 6.0.into() },
                         ..Default::default()
@@ -1124,7 +1146,7 @@ impl App {
                 }
                 (Who::Note, _) | (Who::Step, None) => container(text(t.text.as_str()).size(11).color(dim)).center_x(Length::Fill).into(),
                 (Who::User, _) => {
-                    let bubble = container(text(t.text.as_str()).size(size).color(fg)).padding([6, 10]).style(move |_| container::Style {
+                    let bubble = container(with_copy(text(t.text.as_str()).size(size).color(fg).into(), i, false)).padding([6, 10]).style(move |_| container::Style {
                         background: Some(sel_bg.into()),
                         border: Border { radius: 6.0.into(), ..Default::default() },
                         ..Default::default()
@@ -1135,7 +1157,7 @@ impl App {
                     let viewer = crate::app::code::MarkdownViewer { font: self.face.font, size, color: fg, math: Some(&t.math), images: Some(&t.images) };
                     // Outlined, on the feed's own background: the reply stands apart from the steps
                     // around it without competing with the user's filled bubble.
-                    let reply = container(markdown::view_with(t.md.items(), settings, &viewer)).padding([6, 10]).width(Length::Fill).style(move |_| container::Style {
+                    let reply = container(with_copy(markdown::view_with(t.md.items(), settings, &viewer), i, true)).padding([6, 10]).width(Length::Fill).style(move |_| container::Style {
                         border: Border { color: accent, width: 1.0, radius: 6.0.into() },
                         ..Default::default()
                     });
