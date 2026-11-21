@@ -198,7 +198,7 @@ impl State {
             };
             return lsp.request(id, path, pos, op).err().map(Err);
         }
-        if let Request::AiOpen { agent, model, tools, mode, resume } = req {
+        if let Request::AiOpen { agent, model, tools, mode, resume, effort, prompt } = req {
             let Some(root) = self.root.clone() else {
                 return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
             };
@@ -206,7 +206,7 @@ impl State {
             let (ai, tx) = (self.ai.clone(), self.tx.clone());
             let (scratch, nibdir) = (self.places.as_ref().map(|p| p.scratch.clone()), self.places.as_ref().map(|p| p.nibdir.clone()));
             thread::spawn(move || {
-                let result = ai::open(&ai, agent, model, tools, mode, resume.as_deref(), &root, ai::Dirs { scratch: scratch.as_deref(), nibdir: nibdir.as_deref() }, tx.clone()).map(|id| Response::AiOpened { id });
+                let result = ai::open(&ai, agent, model, ai::Tuning { effort, prompt }, tools, mode, resume.as_deref(), &root, ai::Dirs { scratch: scratch.as_deref(), nibdir: nibdir.as_deref() }, tx.clone()).map(|id| Response::AiOpened { id });
                 let _ = tx.send(ServerMsg::Response { id, result });
             });
             return None;

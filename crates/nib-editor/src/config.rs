@@ -71,6 +71,12 @@ pub struct AiConfig {
     /// A new agent opens the assistant / model dropdown. Off: it starts with the last one.
     #[serde(default = "yes")]
     pub pick_model: bool,
+    /// The thinking level last used (`high`, …): new agents start with it when their assistant
+    /// has that level. Unset: the assistant's own. Written by nib when an agent starts.
+    pub effort: Option<String>,
+    /// The system prompt last used: new agents start with it. Written by nib when an agent
+    /// starts.
+    pub prompt: Option<String>,
 }
 
 fn yes() -> bool {
@@ -79,7 +85,7 @@ fn yes() -> bool {
 
 impl Default for AiConfig {
     fn default() -> Self {
-        Self { cloud_models: false, agent: None, model: None, pick_model: true }
+        Self { cloud_models: false, agent: None, model: None, pick_model: true, effort: None, prompt: None }
     }
 }
 
@@ -703,6 +709,16 @@ impl Config {
                 set_or_default(doc, "ai", "model", model.map(toml_edit::value));
             }
             set_or_default(doc, "ai", "pick_model", (!pick_model).then(|| toml_edit::value(false)));
+            Ok(())
+        })
+    }
+
+    /// Write the thinking level and system prompt an agent last started with into `[ai]`
+    /// (`None`: removed).
+    pub fn save_ai_tuning(effort: Option<&str>, prompt: Option<&str>) -> anyhow::Result<PathBuf> {
+        Self::edit(|doc| {
+            set_or_default(doc, "ai", "effort", effort.map(toml_edit::value));
+            set_or_default(doc, "ai", "prompt", prompt.map(toml_edit::value));
             Ok(())
         })
     }

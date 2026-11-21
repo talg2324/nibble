@@ -80,6 +80,8 @@ root = "~/src/nibble"    # neither ssh nor wsl = local
 # pick_model = false    # new agents start with the last model instead of opening the dropdown
 # agent = "claude"      # nib writes these two when you pick a model: new agents start with it
 # model = "opus"
+# effort = "high"       # nib writes these two when an agent starts: its thinking level and the
+# prompt = "Be terse."  # system prompt added to the assistant's own (both set in the agents tab)
 
 # Override shortcuts: chord = command name, or "none" to unbind.
 # Command names: see `nib --commands`.

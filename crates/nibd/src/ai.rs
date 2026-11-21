@@ -660,6 +660,10 @@ struct PerTurn {
     exe: PathBuf,
     /// `None`: the one it's set up with.
     model: Option<String>,
+    /// Thinking level and system prompt, as `agent` takes them.
+    tuning: Tuning,
+    /// OpenCode: the system prompt, written out (its config takes instruction files).
+    prompt_file: Option<PathBuf>,
     root: PathBuf,
     tx: Sender<ServerMsg>,
     id: AiId,
@@ -676,6 +680,14 @@ struct PerTurn {
     /// The summary a compaction left: it goes in front of the next message, which starts a new
     /// session.
     carry: Mutex<Option<String>>,
+}
+
+impl Drop for PerTurn {
+    fn drop(&mut self) {
+        if let Some(f) = &self.prompt_file {
+            let _ = std::fs::remove_file(f);
+        }
+    }
 }
 
 /// What a Codex / Grok / OpenCode run is for.
@@ -907,16 +919,73 @@ fn route(shared: &Shared, dir: &Path, letter: mail::Letter) {
     }
 }
 
+/// Session `id`'s system prompt as a file, for OpenCode's `instructions`.
+fn prompt_file(id: AiId, prompt: &str) -> Option<PathBuf> {
+    let f = std::env::temp_dir().join(format!("nib-prompt-{}-{id}.md", std::process::id()));
+    match std::fs::write(&f, prompt) {
+        Ok(()) => Some(f),
+        Err(e) => {
+            eprintln!("nibd: system prompt: {}: {e}", f.display());
+            None
+        }
+    }
+}
+
 /// Where a session's agent finds its scratch and artifact folders.
 pub struct Dirs<'a> {
     pub scratch: Option<&'a Path>,
     pub nibdir: Option<&'a Path>,
 }
 
+/// What the user set for a session beside the model: how hard it thinks and what is added to
+/// the assistant's system prompt.
+#[derive(Default, Clone)]
+pub struct Tuning {
+    /// One of `AiAgent::efforts`; anything else is dropped.
+    pub effort: Option<String>,
+    pub prompt: Option<String>,
+}
+
+impl Tuning {
+    /// Only what `agent` takes: a level it has, a prompt with something in it.
+    fn for_agent(self, agent: AiAgent) -> Tuning {
+        Tuning {
+            effort: self.effort.filter(|e| agent.efforts().contains(&e.as_str())),
+            prompt: self.prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+        }
+    }
+
+    /// Claude Code's flags for it.
+    fn claude_args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(e) = &self.effort {
+            a.extend(["--effort".to_string(), e.clone()]);
+        }
+        if let Some(p) = &self.prompt {
+            a.extend(["--append-system-prompt".to_string(), p.clone()]);
+        }
+        a
+    }
+
+    /// Codex's config overrides for it (`-c key=value`, the value read as TOML: a JSON string
+    /// is a TOML basic string).
+    fn codex_args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(e) = &self.effort {
+            a.extend(["-c".to_string(), format!("model_reasoning_effort={}", Value::from(e.as_str()))]);
+        }
+        if let Some(p) = &self.prompt {
+            a.extend(["-c".to_string(), format!("developer_instructions={}", Value::from(p.as_str()))]);
+        }
+        a
+    }
+}
+
 /// Check that `agent` is there and signed in and start a chat at `root` with `model` (`None`:
 /// the one it's set up with); what it says streams to the client as `AiEvent`s.
 #[allow(clippy::too_many_arguments)]
-pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tools: bool, mode: AiMode, resume: Option<&str>, root: &Path, dirs: Dirs, tx: Sender<ServerMsg>) -> Result<AiId, RpcError> {
+pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tuning, tools: bool, mode: AiMode, resume: Option<&str>, root: &Path, dirs: Dirs, tx: Sender<ServerMsg>) -> Result<AiId, RpcError> {
+    let tuning = tuning.for_agent(agent);
     let Some(exe) = find(agent) else {
         return Err(not_ready(agent, ErrorKind::NotFound, "isn't installed"));
     };
@@ -967,7 +1036,7 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tools: boo
     };
     let watch = Watch { sessions: Arc::downgrade(sessions), busy: Arc::new(AtomicBool::new(false)), rec: Arc::new(Mutex::new(rec)) };
     let session = match agent {
-        AiAgent::Claude => open_claude(&exe, model.as_deref(), tools, mode, session.as_deref(), root, &env, watch.clone(), id, tx.clone())?,
+        AiAgent::Claude => open_claude(&exe, model.as_deref(), &tuning, tools, mode, session.as_deref(), root, &env, watch.clone(), id, tx.clone())?,
         AiAgent::Codex | AiAgent::Grok | AiAgent::OpenCode => Session::PerTurn(Arc::new(PerTurn {
             agent,
             tools,
@@ -980,6 +1049,8 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tools: boo
             cost: Mutex::new(0.0),
             rollout: Mutex::new(None),
             model: model.clone(),
+            prompt_file: (agent == AiAgent::OpenCode).then(|| tuning.prompt.as_deref().and_then(|p| prompt_file(id, p))).flatten(),
+            tuning: tuning.clone(),
             root: root.to_path_buf(),
             tx: tx.clone(),
             id,
@@ -1017,11 +1088,12 @@ fn stderr_tail(mut stderr: ChildStderr) -> thread::JoinHandle<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn open_claude(exe: &Path, model: Option<&str>, tools: bool, mode: AiMode, resume: Option<&str>, root: &Path, env: &[(&'static str, OsString)], watch: Watch, id: AiId, tx: Sender<ServerMsg>) -> Result<Session, RpcError> {
+fn open_claude(exe: &Path, model: Option<&str>, tuning: &Tuning, tools: bool, mode: AiMode, resume: Option<&str>, root: &Path, env: &[(&'static str, OsString)], watch: Watch, id: AiId, tx: Sender<ServerMsg>) -> Result<Session, RpcError> {
     let mut cmd = Command::new(exe);
     if let Some(m) = model {
         cmd.args(["--model", m]);
     }
+    cmd.args(tuning.claude_args());
     let mut child = cmd
         .args([
             "-p",
@@ -1764,15 +1836,34 @@ impl PerTurn {
         let resume = self.resume.lock().unwrap().clone();
         let mut cmd = Command::new(&self.exe);
         if self.agent == AiAgent::OpenCode {
-            let config = opencode_config(opencode_permissions(mode), self.model.as_deref().unwrap_or(""), &ollama::GpuSel::All);
+            let mut config = opencode_config(opencode_permissions(mode), self.model.as_deref().unwrap_or(""), &ollama::GpuSel::All);
+            if let Some(f) = &self.prompt_file {
+                let mut c: Value = serde_json::from_str(&config).unwrap_or_default();
+                c["instructions"] = serde_json::json!([f]);
+                config = c.to_string();
+            }
             cmd.env("OPENCODE_CONFIG_CONTENT", config);
             if self.local {
                 opencode_offline(&mut cmd);
             }
         }
+        // Grok takes no system prompt: it heads the first message instead.
+        let headed;
+        let text = match (&self.tuning.prompt, self.agent, &resume) {
+            (Some(p), AiAgent::Grok, None) => {
+                headed = format!("{p}\n\n{text}");
+                headed.as_str()
+            }
+            _ => text,
+        };
+        let mut args = one_shot_args(self.agent, self.model.as_deref(), resume.as_deref(), mode, images, text);
+        if self.agent == AiAgent::Codex {
+            // Right after `exec`: before `resume`, whose own options these aren't.
+            args.splice(1..1, self.tuning.codex_args());
+        }
         let spawned = cmd
             .envs(self.env.iter().map(|(k, v)| (*k, v.as_os_str())))
-            .args(one_shot_args(self.agent, self.model.as_deref(), resume.as_deref(), mode, images, text))
+            .args(args)
             .current_dir(&self.root)
             // Codex adds piped-in text to the prompt; there is none.
             .stdin(Stdio::null())

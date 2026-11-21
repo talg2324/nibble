@@ -215,7 +215,7 @@ impl App {
         let key = self.ai.next_key;
         self.ai.next_key += 1;
         let agent = past.agent;
-        let chat = revive(key, past, entries, &self.root);
+        let chat = self.ai.seeded(revive(key, past, entries, &self.root));
         // A blank agent makes way for it.
         match self.ai.chats.iter().position(Chat::blank) {
             Some(i) => self.ai.chats[i] = chat,
