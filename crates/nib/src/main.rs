@@ -9,6 +9,7 @@ mod color_picker;
 mod control;
 mod editor_view;
 mod gif;
+mod gpu_log;
 mod grammar_cli;
 mod headless;
 mod icons;
@@ -222,6 +223,9 @@ fn main() -> Result<()> {
         })
     };
 
+    if !headless {
+        gpu_log::init();
+    }
     let title = format!("nib — {}", launch.label);
     let window = cfg.window.clone();
     let init = Mutex::new(Some((

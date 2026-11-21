@@ -22,6 +22,8 @@ sha2.workspace = true
 vt100 = "0.18"
 # Task internals, to run the app's tasks without a window (`nib --headless`). Same crate iced uses.
 iced_runtime = "0.14"
+# iced reports the GPU adapter it picked only through `log` (see gpu_log.rs). Already in the tree via iced.
+log = "0.4"
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "advanced", "svg", "image-without-codecs", "markdown", "x11", "wayland", "thread-pool"] }
 # Decoders for the image viewer (iced only draws; codecs are picked here to keep the build lean).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "webp", "bmp"] }

@@ -2421,6 +2421,7 @@ dependencies = [
  "iced_runtime",
  "image",
  "libc",
+ "log",
  "nib-editor",
  "nib-proto",
  "nib-syntax",

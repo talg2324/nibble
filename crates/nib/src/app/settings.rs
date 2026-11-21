@@ -518,6 +518,7 @@ impl App {
             Msg::Noop => {}
             Msg::WindowFound(id) => {
                 self.settings.window.id = Some(id);
+                crate::gpu_log::window_up();
                 return Task::batch([
                     window::monitor_size(id).map(|m| s(Msg::Monitor(m))),
                     window::size(id).map(|z| s(Msg::WindowSize(z))),
