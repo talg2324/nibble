@@ -181,7 +181,7 @@ steps show when each ends); Grok only reads for now.
 | `run panic` | pause every working agent (their processes are frozen) and open the dialog; `key space` unmarks the row the keyboard is on (`key down` / `up` move), `key enter` releases: marked agents stop, the rest carry on. `state.ai.panic` lists the rows. Only when the user asked |
 | `run fold_agents` | hide / show the agent list |
 | `ai mode manual\|accept-edits\|plan\|auto` | how much the shown agent may do unasked (`state.ai.mode`) |
-| `ai allow` / `ai deny [WORDS]` | answer what the shown agent asked leave for (`state.ai.ask`: `tool`, `what`, `question`); words say what to do instead, or answer a question. Only when the user asked |
+| `ai allow` / `ai deny [WORDS]` / `ai answer A…` | answer what the shown agent asked leave for (`state.ai.ask`: `tool`, `what`, `questions`); deny's words say what to do instead. Its questions: `ai answer` with one answer per question, each an option's number or label, or words (`ai deny` skips them). Only when the user asked |
 | `ai accept` / `ai keep` | the shown agent said its job is done (`nib-mail done`; `state.ai.chats[].finished`, `state.ai.accepting` while the dialog is up): accept, which ends the agent, or keep it. Only when the user asked |
 | `ai image FILE` | attach a picture to the message being written, as pasting one does (`state.ai.images`) |
 | `ai follow` / `ai unfollow` | the editor follows the shown agent: its file comes forward, its edit is selected, the tab closes when it moves on (`state.ai.follow`) |

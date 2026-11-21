@@ -511,6 +511,7 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         ["ai", "system-prompt", rest @ ..] => json!({ "cmd": "ai.prompt", "text": rest.join(" ") }),
         ["ai", "mode", mode] => json!({ "cmd": "ai.mode", "mode": mode }),
         ["ai", "allow"] => json!({ "cmd": "ai.answer", "allow": true }),
+        ["ai", "answer", answers @ ..] if !answers.is_empty() => json!({ "cmd": "ai.answer", "allow": true, "answers": answers }),
         ["ai", "deny", rest @ ..] => json!({ "cmd": "ai.answer", "allow": false, "message": rest.join(" ") }),
         ["ai", "accept"] => json!({ "cmd": "ai.accept", "yes": true }),
         ["ai", "keep"] => json!({ "cmd": "ai.accept", "yes": false }),

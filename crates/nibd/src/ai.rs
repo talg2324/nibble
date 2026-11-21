@@ -16,7 +16,7 @@ use crate::history;
 use crate::mail;
 use crate::ollama;
 use nib_proto::{
-    AiAgent, AiAgentInfo, AiAsk, AiEvent, AiId, AiImage, AiLimit, AiMode, AiModel, AiSkill, AiStep, AiStepDone, AiStepKind, AiUsage, ErrorKind, RpcError, ServerMsg, ServerNotify, SkillGroup,
+    AiAgent, AiAgentInfo, AiAsk, AiEvent, AiOption, AiQuestion, AiId, AiImage, AiLimit, AiMode, AiModel, AiSkill, AiStep, AiStepDone, AiStepKind, AiUsage, ErrorKind, RpcError, ServerMsg, ServerNotify, SkillGroup,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1021,12 +1021,12 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
         env.push(("NIB_AGENT", name.clone().into()));
         env.push(("NIBD", me.into_os_string()));
         // `nib-mail` is in the mailbox's `bin`.
-        let mut path = dir.join("bin").into_os_string();
-        if let Some(rest) = std::env::var_os("PATH") {
-            path.push(":");
-            path.push(rest);
+        // `join_paths` uses the system's separator (`;` on Windows).
+        let rest = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = std::iter::once(dir.join("bin")).chain(std::env::split_paths(&rest));
+        if let Ok(path) = std::env::join_paths(dirs) {
+            env.push(("PATH", path));
         }
-        env.push(("PATH", path));
     }
     // A past conversation goes on in its own record, with the assistant's session of it.
     // It also keeps its task and the name made from it.
@@ -1289,15 +1289,11 @@ impl Turn {
                 let (Some(request), Some(r)) = (s(v, "request_id"), v.get("request")) else { return vec![] };
                 let tool = s(r, "tool_name").unwrap_or_default();
                 let input = r.get("input").cloned().unwrap_or(Value::Null);
-                let question = tool == "AskUserQuestion";
-                let what = if question {
-                    claude_questions(&input)
-                } else {
-                    // A plan to approve, or what the harness says the call is.
-                    s(&input, "plan").or_else(|| s(r, "description")).unwrap_or_default()
-                };
+                let questions = if tool == "AskUserQuestion" { claude_questions(&input) } else { vec![] };
+                // A plan to approve, or what the harness says the call is.
+                let what = if questions.is_empty() { s(&input, "plan").or_else(|| s(r, "description")).unwrap_or_default() } else { String::new() };
                 self.asks.lock().unwrap().insert(request.clone(), input);
-                vec![AiEvent::Ask(AiAsk { request, step: s(r, "tool_use_id"), tool, what, question })]
+                vec![AiEvent::Ask(AiAsk { request, step: s(r, "tool_use_id"), tool, what, questions })]
             }
             // The answer to `set_mode`.
             Some("control_response") => {
@@ -1351,21 +1347,20 @@ fn claude_mode(mode: AiMode) -> &'static str {
     }
 }
 
-/// The questions of an `AskUserQuestion` call as text: each with its options.
-fn claude_questions(input: &Value) -> String {
-    let mut out = String::new();
-    for q in input.get("questions").and_then(Value::as_array).into_iter().flatten() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(q.get("question").and_then(Value::as_str).unwrap_or(""));
-        for (i, o) in q.get("options").and_then(Value::as_array).into_iter().flatten().enumerate() {
-            let label = o.get("label").and_then(Value::as_str).unwrap_or("");
-            let about = o.get("description").and_then(Value::as_str).filter(|d| !d.is_empty()).map(|d| format!(": {d}")).unwrap_or_default();
-            out.push_str(&format!("\n  {}. {label}{about}", i + 1));
-        }
-    }
-    out
+/// The questions of an `AskUserQuestion` call.
+fn claude_questions(input: &Value) -> Vec<AiQuestion> {
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let questions = input.get("questions").and_then(Value::as_array).into_iter().flatten();
+    questions
+        .map(|q| AiQuestion {
+            header: text(q, "header"),
+            question: text(q, "question"),
+            options: (q.get("options").and_then(Value::as_array).into_iter().flatten())
+                .map(|o| AiOption { label: text(o, "label"), description: text(o, "description"), preview: o.get("preview").and_then(Value::as_str).map(str::to_string) })
+                .collect(),
+            multi: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+        })
+        .collect()
 }
 
 /// nib's own skills as a Claude Code plugin for one session: a folder under nib's cache with a
@@ -2147,17 +2142,35 @@ pub fn compact(sessions: &Shared, id: AiId, focus: Option<&str>) {
 
 /// The user's answer to what the agent asked leave for: yes (the call goes ahead as it was), or
 /// no, with what to do instead.
-pub fn answer(sessions: &Shared, id: AiId, request: &str, allow: bool, message: Option<&str>) {
+pub fn answer(sessions: &Shared, id: AiId, request: &str, allow: bool, message: Option<&str>, answers: &[String]) {
     let mut s = sessions.lock().unwrap();
     let Some(Session::Stream { stdin, asks, .. }) = s.map.get_mut(&id) else { return };
     let Some(input) = asks.lock().unwrap().remove(request) else { return };
     let response = if allow {
-        serde_json::json!({ "behavior": "allow", "updatedInput": input })
+        serde_json::json!({ "behavior": "allow", "updatedInput": with_answers(input, answers) })
     } else {
         serde_json::json!({ "behavior": "deny", "message": message.filter(|m| !m.trim().is_empty()).unwrap_or("The user refused this.") })
     };
     let msg = serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request, "response": response } });
     let _ = writeln!(stdin, "{msg}").and_then(|_| stdin.flush());
+}
+
+/// An `AskUserQuestion` call's input with the user's answers in it, the way Claude Code reads
+/// them: by question text. Any other call's input as it was.
+fn with_answers(mut input: Value, answers: &[String]) -> Value {
+    if answers.is_empty() {
+        return input;
+    }
+    let questions = input.get("questions").and_then(Value::as_array).into_iter().flatten();
+    let by_question: serde_json::Map<String, Value> = questions
+        .filter_map(|q| q.get("question")?.as_str())
+        .zip(answers)
+        .map(|(q, a)| (q.to_string(), Value::String(a.clone())))
+        .collect();
+    if let Some(o) = input.as_object_mut() {
+        o.insert("answers".into(), Value::Object(by_question));
+    }
+    input
 }
 
 /// Change the agent's mode. Claude Code switches at once and confirms (`AiEvent::Mode`); the
@@ -2362,12 +2375,21 @@ mod tests {
     fn claude_asks_leave_and_reports_its_mode() {
         let mut t = Turn::default();
         let ask = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/p/a.txt","content":"hi"},"description":"a.txt","tool_use_id":"t1"}}"#;
-        assert_eq!(read(&mut t, ask), [AiEvent::Ask(AiAsk { request: "r1".into(), step: Some("t1".into()), tool: "Write".into(), what: "a.txt".into(), question: false })]);
+        assert_eq!(read(&mut t, ask), [AiEvent::Ask(AiAsk { request: "r1".into(), step: Some("t1".into()), tool: "Write".into(), what: "a.txt".into(), questions: vec![] })]);
         assert_eq!(t.asks.lock().unwrap()["r1"]["content"], "hi", "the input is kept: it goes back with a yes");
         let plan = r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"1. Do it"},"tool_use_id":"t2"}}"#;
-        assert!(matches!(&read(&mut t, plan)[..], [AiEvent::Ask(a)] if a.what == "1. Do it" && !a.question));
+        assert!(matches!(&read(&mut t, plan)[..], [AiEvent::Ask(a)] if a.what == "1. Do it" && a.questions.is_empty()));
         let q = r#"{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Rename it too?","options":[{"label":"Yes","description":"keep an alias"},{"label":"No"}]}]}}}"#;
-        assert!(matches!(&read(&mut t, q)[..], [AiEvent::Ask(a)] if a.question && a.what == "Rename it too?\n  1. Yes: keep an alias\n  2. No"));
+        let [AiEvent::Ask(a)] = &read(&mut t, q)[..] else { panic!("a question") };
+        let yes = AiOption { label: "Yes".into(), description: "keep an alias".into(), preview: None };
+        let no = AiOption { label: "No".into(), description: String::new(), preview: None };
+        assert_eq!(a.questions, [AiQuestion { header: String::new(), question: "Rename it too?".into(), options: vec![yes, no], multi: false }]);
+        // The answers go back in the call's input, by question, with a yes.
+        let input = t.asks.lock().unwrap().remove("r3").unwrap();
+        let answered = with_answers(input, &["No".into()]);
+        assert_eq!(answered["answers"], serde_json::json!({ "Rename it too?": "No" }));
+        assert_eq!(answered["questions"][0]["options"][0]["label"], "Yes", "the rest stays");
+        assert_eq!(with_answers(serde_json::json!({ "content": "hi" }), &[]), serde_json::json!({ "content": "hi" }));
         let mode = r#"{"type":"control_response","response":{"subtype":"success","request_id":"m1","response":{"mode":"acceptEdits"}}}"#;
         assert_eq!(read(&mut t, mode), [AiEvent::Mode(AiMode::AcceptEdits)]);
         assert!(read(&mut t, r#"{"type":"control_response","response":{"subtype":"success","request_id":"i1","response":{"still_queued":[]}}}"#).is_empty());

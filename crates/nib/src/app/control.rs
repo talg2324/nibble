@@ -223,6 +223,15 @@ impl App {
                     call.err("the shown agent isn't waiting for an answer");
                     return Task::none();
                 }
+                // Answers to its questions, one each.
+                if let Some(given) = call.req.get("answers").and_then(Value::as_array) {
+                    let given: Vec<String> = given.iter().filter_map(Value::as_str).map(str::to_string).collect();
+                    match self.ai_answer_with(&given) {
+                        Ok(()) => call.ok(json!({ "answered": given.len() })),
+                        Err(e) => call.err(e),
+                    }
+                    return Task::none();
+                }
                 let allow = call.req.get("allow").and_then(Value::as_bool).unwrap_or(false);
                 let message = call.str_arg("message").filter(|m| !m.is_empty()).map(str::to_string);
                 self.ai_answer(allow, message);

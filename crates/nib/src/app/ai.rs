@@ -19,6 +19,7 @@ mod compose;
 mod follow;
 mod history;
 mod ink;
+mod question;
 mod stage;
 mod wait;
 
@@ -154,6 +155,11 @@ pub struct Chat {
     told_mode: AiMode,
     /// What it is waiting for leave to do.
     ask: Option<AiAsk>,
+    /// The answers being picked, when what it asks is questions.
+    form: question::Form,
+    /// What was answered (allowed, the answers): the tests' connection doesn't keep it.
+    #[cfg(test)]
+    answered: Vec<(bool, Vec<String>)>,
     /// It said its job is done, and the user hasn't answered: outlined green in the list.
     finished: Option<AiFinished>,
     /// The accept dialog is up for it (it is shown, and finished).
@@ -591,8 +597,11 @@ pub enum Msg {
     Effort(Effort),
     /// An edit in the system prompt pane.
     Prompt(iced::widget::text_editor::Action),
-    /// Allow (or refuse) what the shown agent asked leave for.
+    /// Allow (or refuse) what the shown agent asked leave for. Its questions: send the answers
+    /// (or skip them).
     Answer(bool),
+    /// Pick option `.1` of question `.0` of what the shown agent asks.
+    Pick(usize, usize),
     /// Accept the shown agent's word that its job is done, ending it (`true`), or go back to it.
     Accept(bool),
     /// Paste was pressed in the message box: what the clipboard held.
@@ -635,21 +644,113 @@ impl App {
         self.ai.tabs_seen = seen;
     }
 
-    /// Answer what the shown agent asked leave for. A question can't be allowed, only answered
-    /// in words.
+    /// Answer what the shown agent asked leave for. Questions are answered with a yes once
+    /// each has an answer (`form`); a no skips them.
     pub(super) fn ai_answer(&mut self, allow: bool, message: Option<String>) {
-        if allow && self.ai.ask.as_ref().is_some_and(|a| a.question) {
-            return;
-        }
+        let answers = match &self.ai.ask {
+            Some(a) if !a.questions.is_empty() && allow => {
+                if !self.ai.form.complete() {
+                    return;
+                }
+                self.ai.form.answers(&a.questions)
+            }
+            _ => vec![],
+        };
+        self.ai_send_answer(allow, message, answers);
+    }
+
+    /// Send the answer to what the shown agent asked; answers to its questions show in the
+    /// transcript as the user's.
+    fn ai_send_answer(&mut self, allow: bool, message: Option<String>, answers: Vec<String>) {
         let (Some(ask), Session::Ready(id)) = (self.ai.ask.take(), &self.ai.session) else { return };
         let id = *id;
-        // A question's answer goes back as the refusal's message: that is where the harness reads
-        // what the user said.
-        let message = match (ask.question, message) {
-            (true, Some(m)) => Some(format!("The user answered: {m}")),
-            (_, m) => m,
+        let message = match message {
+            None if !ask.questions.is_empty() => Some("The user chose not to answer.".to_string()),
+            m => m,
         };
-        self.notify(ClientNotify::AiAnswer { id, request: ask.request, allow, message });
+        if !answers.is_empty() {
+            let one = ask.questions.len() == 1;
+            let text = ask.questions.iter().zip(&answers).map(|(q, a)| if one { a.clone() } else { format!("{} → {a}", q.question) }).collect::<Vec<_>>().join("\n");
+            self.ai.turns.push(Turn { who: Who::User, md: markdown::Content::new(), text, math: Default::default(), images: Default::default(), step: None });
+        }
+        #[cfg(test)]
+        self.ai.answered.push((allow, answers.clone()));
+        self.notify(ClientNotify::AiAnswer { id, request: ask.request, allow, message, answers });
+    }
+
+    /// Answers given from outside (`nib ctl ai answer`), one per question: an option's number
+    /// or label, or words.
+    pub(super) fn ai_answer_with(&mut self, given: &[String]) -> Result<(), String> {
+        let Some(ask) = &self.ai.ask else { return Err("the shown agent isn't waiting for an answer".into()) };
+        if ask.questions.len() != given.len() {
+            return Err(format!("it asks {} question(s): give one answer for each", ask.questions.len()));
+        }
+        let answers = question::resolve(&ask.questions, given);
+        self.ai_send_answer(true, None, answers);
+        Ok(())
+    }
+
+    /// An option of the shown agent's questions was picked (a click, a number key). A single
+    /// question with a single choice goes at once; otherwise the keys move on to the next
+    /// question without an answer.
+    fn ai_pick_answer(&mut self, q: usize, o: usize) -> Task<Message> {
+        let chat: &mut Chat = &mut self.ai;
+        let Some(ask) = &chat.ask else { return Task::none() };
+        chat.form.pick(&ask.questions, q, o);
+        let multi = ask.questions.get(q).is_some_and(|x| x.multi);
+        if !multi {
+            if ask.questions.len() == 1 {
+                self.ai_answer(true, None);
+                return self.ai_scroll_to_end();
+            }
+            self.ai.form.advance();
+        }
+        Task::none()
+    }
+
+    /// A key while the shown agent asks questions and nothing is typed: a number picks that
+    /// option, ↑ / ↓ walk the options, Space picks the one they are on, Tab / Shift+Tab go to
+    /// the next / previous question, Enter answers. `None`: the key isn't one of these.
+    fn ai_question_key(&mut self, chord: KeyChord) -> Option<Task<Message>> {
+        let chat: &mut Chat = &mut self.ai;
+        let (ask, form) = (chat.ask.as_ref()?, &mut chat.form);
+        let n = ask.questions.len();
+        let (q, lit) = (form.q, form.lit);
+        match chord.key {
+            Key::Char(c @ '1'..='9') if !chord.shift => {
+                let o = c as usize - '1' as usize;
+                let there = ask.questions.get(q).is_some_and(|x| o < x.options.len());
+                return there.then(|| self.ai_pick_answer(q, o));
+            }
+            Key::Char(' ') => return Some(self.ai_pick_answer(q, lit)),
+            Key::Up => form.step(&ask.questions, -1),
+            Key::Down => form.step(&ask.questions, 1),
+            Key::Tab if n > 1 => form.focus(if chord.shift { (form.q + n - 1) % n } else { (form.q + 1) % n }),
+            Key::Enter if !chord.shift => return Some(self.ai_question_enter(None)),
+            _ => return None,
+        }
+        Some(Task::none())
+    }
+
+    /// Enter while the shown agent asks questions: what is typed answers the one the keys are
+    /// on (else the option the arrows are on is picked, if none is); then on to the next one
+    /// without an answer, or, all answered, they go.
+    fn ai_question_enter(&mut self, typed: Option<String>) -> Task<Message> {
+        let chat: &mut Chat = &mut self.ai;
+        let Some(ask) = &chat.ask else { return Task::none() };
+        let form = &mut chat.form;
+        let q = form.q;
+        match typed {
+            Some(t) => form.say(&ask.questions, t),
+            None if !form.answered(q) => form.pick(&ask.questions, q, form.lit),
+            None => {}
+        }
+        if self.ai.form.complete() {
+            self.ai_answer(true, None);
+            return self.ai_scroll_to_end();
+        }
+        self.ai.form.advance();
+        Task::none()
     }
 
     /// The shown agent is the one being followed.
@@ -782,6 +883,7 @@ impl App {
             }
             Msg::Prompt(action) => self.ai.prompt.perform(action),
             Msg::Answer(allow) => self.ai_answer(allow, None),
+            Msg::Pick(q, o) => return self.ai_pick_answer(q, o),
             Msg::Accept(yes) => return self.ai_accept(yes),
             Msg::Clip(Clip::Text(s)) => {
                 self.ai.insert(&s.replace("\r\n", "\n"));
@@ -1280,7 +1382,14 @@ impl App {
             "history": self.ai_history_json(),
             "follow": ai.follow.as_ref().map(|f| json!({ "chat": ai.chats.iter().position(|c| c.key == f.chat), "tab": f.tab, "queued": self.ai_follow_queued() })),
             "mode": ai.mode.name(),
-            "ask": ai.ask.as_ref().map(|a| json!({ "tool": a.tool, "what": a.what, "question": a.question, "step": a.step })),
+            "ask": ai.ask.as_ref().map(|a| json!({ "tool": a.tool, "what": a.what, "step": a.step, "questions": a.questions.iter().enumerate().map(|(i, q)| json!({
+                "header": q.header,
+                "question": q.question,
+                "multi": q.multi,
+                "options": q.options.iter().map(|o| json!({ "label": o.label, "description": o.description, "preview": o.preview })).collect::<Vec<_>>(),
+                "picked": ai.form.picks.get(i),
+                "own": ai.form.own.get(i),
+            })).collect::<Vec<_>>() })),
             "accepting": ai.accepting,
             "images": ai.images.iter().map(|p| json!({ "width": p.width, "height": p.height, "bytes": p.png.len() })).collect::<Vec<_>>(),
             "current": ai.cur,
@@ -1609,6 +1718,7 @@ impl App {
             }
             AiEvent::Ask(a) => {
                 ai.busy = true;
+                ai.form = question::Form::new(&a.questions);
                 ai.ask = Some(a);
             }
             AiEvent::Finished(f) => {
@@ -1675,6 +1785,10 @@ impl App {
         }
         // It is waiting for leave: what is typed is the answer (a question's), or a no with what
         // to do instead.
+        if self.ai.ask.as_ref().is_some_and(|a| !a.questions.is_empty()) {
+            self.ai.input.clear();
+            return self.ai_question_enter(Some(text));
+        }
         if self.ai.ask.is_some() {
             self.ai.input.clear();
             self.ai.turns.push(Turn { who: Who::User, md: markdown::Content::new(), text: text.clone(), math: Default::default(), images: Default::default(), step: None });
@@ -1821,10 +1935,16 @@ impl App {
             let offset = operation::scrollable::AbsoluteOffset { x: 0.0, y: -dy };
             operate(operation::scrollable::scroll_by(WidgetId::from(TRANSCRIPT_ID), offset))
         };
+        // Questions, with nothing typed: the keys pick the answers.
+        if self.ai.input.is_empty() && self.ai.images.is_empty() && !held && !chord.alt && self.ai.ask.as_ref().is_some_and(|a| !a.questions.is_empty()) {
+            if let Some(t) = self.ai_question_key(chord) {
+                return t;
+            }
+        }
         match chord.key {
             // Waiting for leave: Esc says no, Enter on an empty box says yes.
             Key::Esc if self.ai.ask.is_some() => self.ai_answer(false, None),
-            Key::Enter if self.ai.input.is_empty() && self.ai.images.is_empty() && self.ai.ask.as_ref().is_some_and(|a| !a.question) && !held && !chord.alt && !chord.shift => self.ai_answer(true, None),
+            Key::Enter if self.ai.input.is_empty() && self.ai.images.is_empty() && self.ai.ask.as_ref().is_some_and(|a| a.questions.is_empty()) && !held && !chord.alt && !chord.shift => self.ai_answer(true, None),
             Key::Esc if self.ai.selection().is_some() => self.ai.anchor = None,
             Key::Esc => self.ai_leave(),
             // With nothing typed, Tab walks the agents (with text it would be too easy to leave a
@@ -2374,7 +2494,7 @@ fn shown_models(info: &AiAgentInfo, cloud_models: bool) -> Vec<&AiModel> {
 mod tests {
     use super::super::tests::app;
     use super::*;
-    use nib_proto::{ReqId, ServerMsg, ServerNotify};
+    use nib_proto::{AiOption, AiQuestion, ReqId, ServerMsg, ServerNotify};
 
     fn key(a: &mut App, s: &str) {
         let _ = a.update(Message::Key { chord: KeyChord::parse(s).unwrap(), text: None, repeat: false });
@@ -2638,7 +2758,17 @@ mod tests {
     }
 
     fn ask(tool: &str, question: bool) -> AiEvent {
-        AiEvent::Ask(AiAsk { request: "r1".into(), step: None, tool: tool.into(), what: "rm -rf build".into(), question })
+        AiEvent::Ask(AiAsk { request: "r1".into(), step: None, tool: tool.into(), what: "rm -rf build".into(), questions: if question { questions(&[("Rename it?", false)]) } else { vec![] } })
+    }
+
+    fn questions(qs: &[(&str, bool)]) -> Vec<AiQuestion> {
+        let option = |l: &str| AiOption { label: l.into(), description: String::new(), preview: None };
+        qs.iter().map(|&(q, multi)| AiQuestion { header: String::new(), question: q.into(), options: vec![option("Yes"), option("No"), option("Maybe")], multi }).collect()
+    }
+
+    /// What went to the daemon last, if it was an answer: allowed, and the answers.
+    fn last_answer(a: &App) -> Option<(bool, Vec<String>)> {
+        a.ai.answered.last().cloned()
     }
 
     #[test]
@@ -2661,12 +2791,36 @@ mod tests {
         key(&mut a, "esc");
         assert!(a.ai.ask.is_none() && a.ai.shown(), "Esc refuses; it doesn't leave the tab");
 
-        // A question can't be allowed, only answered.
+        // A question is answered: Enter picks the option the arrows are on.
         event(&mut a, 7, ask("AskUserQuestion", true));
+        key(&mut a, "down");
         key(&mut a, "enter");
-        assert!(a.ai.ask.is_some());
-        say(&mut a, "the first one");
         assert!(a.ai.ask.is_none());
+        assert_eq!(last_answer(&a), Some((true, vec!["No".into()])));
+        // A number picks, and a single one goes at once.
+        event(&mut a, 7, ask("AskUserQuestion", true));
+        key(&mut a, "3");
+        assert_eq!(last_answer(&a), Some((true, vec!["Maybe".into()])));
+        // Words answer it too.
+        event(&mut a, 7, ask("AskUserQuestion", true));
+        say(&mut a, "only the module");
+        assert_eq!(last_answer(&a), Some((true, vec!["only the module".into()])));
+        assert_eq!(a.ai.turns.last().map(|t| t.text.as_str()), Some("only the module"));
+        // Esc skips it.
+        event(&mut a, 7, ask("AskUserQuestion", true));
+        key(&mut a, "esc");
+        assert_eq!(last_answer(&a), Some((false, vec![])));
+        // Several: each is answered before they go; a multiple choice takes several picks.
+        let several = AiAsk { request: "r2".into(), step: None, tool: "AskUserQuestion".into(), what: String::new(), questions: questions(&[("Rename?", false), ("Where?", true)]) };
+        event(&mut a, 7, AiEvent::Ask(several));
+        key(&mut a, "2");
+        assert_eq!(a.ai.form.q, 1, "on to the next question");
+        key(&mut a, "1");
+        key(&mut a, "3");
+        assert!(a.ai.ask.is_some(), "a multiple choice waits for Enter");
+        key(&mut a, "enter");
+        assert_eq!(last_answer(&a), Some((true, vec!["No".into(), "Yes, Maybe".into()])));
+        assert_eq!(a.ai.turns.last().map(|t| t.text.as_str()), Some("Rename? → No\nWhere? → Yes, Maybe"));
 
         // The harness says which mode it is in (a plan approved, a switch confirmed).
         event(&mut a, 7, AiEvent::Mode(AiMode::AcceptEdits));

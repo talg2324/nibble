@@ -97,17 +97,31 @@ pub fn dir(scratch: Option<&Path>) -> Option<PathBuf> {
         fs::create_dir_all(dir.join(sub)).ok()?;
     }
     // `nib-mail`: the command agents run (its folder goes on their PATH). One fixed name, so a
-    // harness can be told once that it is allowed.
-    #[cfg(unix)]
+    // harness can be told once that it is allowed. It runs this very exe, wherever it was built
+    // or installed. A `sh` script for Unix and for Git Bash (which is how Claude Code runs
+    // commands on Windows), and on Windows also a `.cmd` for cmd and PowerShell.
     if let Ok(me) = std::env::current_exe() {
-        use std::os::unix::fs::PermissionsExt;
-        let script = dir.join("bin").join("nib-mail");
-        let body = format!("#!/bin/sh\nexec '{}' mail \"$@\"\n", me.display().to_string().replace('\'', "'\\''"));
-        if fs::write(&script, body).is_ok() {
-            let _ = fs::set_permissions(&script, fs::Permissions::from_mode(0o755));
-        }
+        let _ = write_launchers(&dir.join("bin"), &me);
     }
     Some(dir)
+}
+
+/// Write `nib-mail` (and on Windows `nib-mail.cmd`) into `bin`, each running `exe mail ARGS`.
+fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
+    let exe = exe.display().to_string();
+    // `C:/…` is the form Git Bash and every MSYS tool take; on Unix there are no `\` to change.
+    let sh_exe = if cfg!(windows) { exe.replace('\\', "/") } else { exe.clone() };
+    let script = bin.join("nib-mail");
+    fs::write(&script, format!("#!/bin/sh\nexec '{}' mail \"$@\"\n", sh_exe.replace('\'', "'\\''")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    }
+    if cfg!(windows) {
+        fs::write(bin.join("nib-mail.cmd"), format!("@\"{exe}\" mail %*\r\n"))?;
+    }
+    Ok(())
 }
 
 /// What a `nib ai run` sub-agent is doing, for its owner's chat (D-061): a letter to `nib` from
@@ -350,6 +364,22 @@ pub fn run(dir: &Path, me: &str, args: &[String]) -> (String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_runs_this_exe() {
+        let bin = temp("launcher");
+        fs::create_dir_all(&bin).unwrap();
+        write_launchers(&bin, Path::new("/opt/it's nib/nibd")).unwrap();
+        let sh = fs::read_to_string(bin.join("nib-mail")).unwrap();
+        assert_eq!(sh, "#!/bin/sh\nexec '/opt/it'\\''s nib/nibd' mail \"$@\"\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(bin.join("nib-mail")).unwrap().permissions().mode() & 0o111, 0o111);
+        }
+        assert_eq!(bin.join("nib-mail.cmd").exists(), cfg!(windows));
+        let _ = fs::remove_dir_all(&bin);
+    }
 
     fn temp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("nibd-mail-test-{tag}-{}", std::process::id()));

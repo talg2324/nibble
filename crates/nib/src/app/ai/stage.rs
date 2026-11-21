@@ -108,6 +108,14 @@ pub(super) fn agent_name(c: &Chat) -> Option<String> {
     }
 }
 
+/// A small outlined button that answers what the agent asks.
+fn answer_key<'a>(label: &'static str, color: Color, msg: Msg) -> button::Button<'a, Message> {
+    button(text(label).size(11).color(color)).on_press(Message::Ai(msg)).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
+        border: Border { color, width: 1.0, radius: 3.0.into() },
+        ..Default::default()
+    })
+}
+
 /// The step still under way, if any (the latest one).
 fn running(c: &Chat) -> Option<&Step> {
     c.turns.iter().rev().filter_map(|t| t.step.as_ref()).find(|s| s.done.is_none())
@@ -971,6 +979,81 @@ impl App {
         head.into()
     }
 
+    /// The questions the shown agent asks, as a form: each with its options to pick (a click or
+    /// its number), the preview of the one the arrows are on, and what the user typed instead.
+    fn ai_questions<'a>(&'a self, ask: &'a nib_proto::AiAsk) -> Element<'a, Message> {
+        let th = &self.theme;
+        let (accent, dim, fg, warn, sel_bg) = (th.accent, th.dim, th.foreground, th.warn, th.selection);
+        let form = &self.ai.form;
+        let many = ask.questions.len() > 1;
+        let title = if many { format!("{} questions for you", ask.questions.len()) } else { "Question for you".to_string() };
+        let mut card = column![text(title).size(12).color(warn)].spacing(8);
+        for (q, question) in ask.questions.iter().enumerate() {
+            let on = q == form.q;
+            // With several, the one the keys work on is marked.
+            let mut head = row![].spacing(6).align_y(Alignment::Center);
+            if many {
+                head = head.push(text(if on { "▸" } else { " " }).size(12).color(accent).font(self.face.font));
+            }
+            if !question.header.is_empty() {
+                let chip = container(text(question.header.as_str()).size(10).color(accent)).padding([1, 6]).style(move |_| container::Style {
+                    border: Border { color: accent, width: 1.0, radius: 8.0.into() },
+                    ..Default::default()
+                });
+                head = head.push(chip);
+            }
+            head = head.push(text(question.question.as_str()).size(13).color(fg).font(Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT }));
+            if question.multi {
+                head = head.push(text("pick any").size(10).color(dim));
+            }
+            let mut block = column![head].spacing(4);
+            for (o, option) in question.options.iter().enumerate() {
+                let picked = form.picks.get(q).is_some_and(|p| p.contains(&o));
+                let lit = on && o == form.lit;
+                let tick = match (question.multi, picked) {
+                    (true, true) => "☑",
+                    (true, false) => "☐",
+                    (false, true) => "●",
+                    (false, false) => "○",
+                };
+                let mut words = column![text(option.label.as_str()).size(12).color(if picked { accent } else { fg })];
+                if !option.description.is_empty() {
+                    words = words.push(text(option.description.as_str()).size(11).color(dim));
+                }
+                let number = text(if o < 9 { format!("{}", o + 1) } else { " ".into() }).size(11).color(dim).font(self.face.font);
+                let line = row![number, text(tick).size(12).color(if picked { accent } else { dim }), words].spacing(8).align_y(Alignment::Start);
+                let b = button(line).width(Length::Fill).padding([3, 8]).on_press(Message::Ai(Msg::Pick(q, o))).style(move |_: &iced::Theme, status: button::Status| button::Style {
+                    background: (lit || matches!(status, button::Status::Hovered)).then_some(Background::Color(sel_bg)),
+                    border: Border { color: if picked { accent } else { Color::TRANSPARENT }, width: 1.0, radius: 4.0.into() },
+                    ..Default::default()
+                });
+                block = block.push(b);
+            }
+            if let Some(own) = form.own.get(q).and_then(Option::as_deref) {
+                block = block.push(row![text("✎").size(12).color(accent), text(own).size(12).color(accent)].spacing(8).padding([0, 8]));
+            } else if on {
+                block = block.push(text("…or type your own answer below").size(11).color(dim));
+            }
+            let preview = on.then(|| question.options.get(form.lit).and_then(|o| o.preview.as_deref())).flatten();
+            if let Some(p) = preview {
+                block = block.push(container(text(p).size(12).font(self.face.font).color(fg)).padding(8).width(Length::Fill).style(move |_| container::Style {
+                    border: Border { color: dim, width: 1.0, radius: 3.0.into() },
+                    ..Default::default()
+                }));
+            }
+            card = card.push(block);
+        }
+        let ready = form.complete();
+        let send: Element<'a, Message> = if ready {
+            answer_key("send · ↵", OK, Msg::Answer(true)).into()
+        } else {
+            text(if many { "answer each to send" } else { "pick one" }).size(11).color(dim).into()
+        };
+        let hint = if many { "1–9 pick · ↑↓ · space · tab next question" } else { "1–9 pick · ↑↓ · space" };
+        card = card.push(row![send, answer_key("skip · esc", dim, Msg::Answer(false)), text(hint).size(11).color(dim)].spacing(12).align_y(Alignment::Center));
+        container(card).padding(10).width(Length::Fill).style(move |_| container::Style { border: Border { color: warn, width: 1.0, radius: 3.0.into() }, ..Default::default() }).into()
+    }
+
     fn ai_feed<'a>(&'a self) -> Element<'a, Message> {
         let ai = &self.ai;
         let th = &self.theme;
@@ -1056,28 +1139,18 @@ impl App {
             };
             feed = feed.push(self.search_outline(ai.key, i, turn));
         }
-        if let Some(ask) = &ai.ask {
+        if let Some(ask) = ai.ask.as_ref().filter(|a| !a.questions.is_empty()) {
+            feed = feed.push(mark(emoji("❓"), self.ai_questions(ask)));
+        } else if let Some(ask) = &ai.ask {
             let warn = th.warn;
-            let title = match (ask.question, ask.tool.as_str()) {
-                (true, _) => "Question for you".to_string(),
-                (_, "ExitPlanMode") => "Plan to approve".to_string(),
-                (_, tool) => format!("{} wants to use {tool}", self.ai_name()),
+            let title = match ask.tool.as_str() {
+                "ExitPlanMode" => "Plan to approve".to_string(),
+                tool => format!("{} wants to use {tool}", self.ai_name()),
             };
             let mut card = column![text(title).size(12).color(warn), text(ask.what.as_str()).size(12).font(self.face.font).color(fg)].spacing(6);
-            let key = |label: &'static str, color: Color, allow: bool| {
-                button(text(label).size(11).color(color)).on_press(Message::Ai(Msg::Answer(allow))).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
-                    border: Border { color, width: 1.0, radius: 3.0.into() },
-                    ..Default::default()
-                })
-            };
-            card = card.push(if ask.question {
-                row![text("Type your answer below and press ↵.").size(11).color(dim), key("skip · esc", dim, false)].spacing(12).align_y(Alignment::Center)
-            } else {
-                row![key("allow · ↵", OK, true), key("refuse · esc", BAD, false), text("or type what to do instead").size(11).color(dim)].spacing(12).align_y(Alignment::Center)
-            });
+            card = card.push(row![answer_key("allow · ↵", OK, Msg::Answer(true)), answer_key("refuse · esc", BAD, Msg::Answer(false)), text("or type what to do instead").size(11).color(dim)].spacing(12).align_y(Alignment::Center));
             let card = container(card).padding(10).width(Length::Fill).style(move |_| container::Style { border: Border { color: warn, width: 1.0, radius: 3.0.into() }, ..Default::default() });
-            // A question waits for words; anything else waits for a yes or no.
-            feed = feed.push(mark(emoji(if ask.question { "❓" } else { "✋" }), card.into()));
+            feed = feed.push(mark(emoji("✋"), card.into()));
         }
         let waiting = ai.busy && ai.ask.is_none() && running(ai).is_none() && !ai.turns.last().is_some_and(|t| t.who == Who::Assistant);
         // Only the model at work gets a mark; pauses and errors stay plain.
@@ -1150,7 +1223,7 @@ impl App {
         // What a message does depends on what the agent is doing.
         let steers = ai.busy && ai.agent == Some(AiAgent::Claude);
         let caption = if let Some(ask) = &ai.ask {
-            if ask.question { "Your answer…".to_string() } else { "↵ allows, esc refuses, or say what to do instead…".to_string() }
+            if ask.questions.is_empty() { "↵ allows, esc refuses, or say what to do instead…".to_string() } else { "Or answer in your own words…".to_string() }
         } else if steers {
             format!("Steer {name}: it reads this after its current step")
         } else if ai.busy {
