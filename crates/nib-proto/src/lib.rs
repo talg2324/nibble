@@ -103,6 +103,9 @@ pub enum Request {
         /// Which directory to list.
         #[serde(default)]
         place: Place,
+        /// Ignored folders to list the contents of (otherwise listed without them).
+        #[serde(default)]
+        open: Vec<String>,
     },
     /// Create, rename or delete under the project root (or `place`) -> `Ok`.
     Fs {

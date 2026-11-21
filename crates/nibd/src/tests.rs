@@ -239,7 +239,7 @@ fn tree_snapshot_file_operations_and_staging() {
     let paths = |s: &nib_proto::TreeSnapshot| s.entries.as_ref().unwrap().iter().map(|e| e.path.clone()).collect::<Vec<_>>();
 
     // Without git: everything, breadth first.
-    let plain = tree::snapshot(&work, None, true);
+    let plain = tree::snapshot(&work, None, true, &[]);
     if !plain.repo {
         assert_eq!(paths(&plain), [".gitignore", "src", "target", "src/a.rs", "src/deep", "target/debug", "src/deep/b.rs", "target/debug/big"]);
     }
@@ -252,26 +252,32 @@ fn tree_snapshot_file_operations_and_staging() {
     for args in [&["config", "user.name", "Nib Tester"][..], &["config", "user.email", "nib@example.com"], &["config", "commit.gpgsign", "false"]] {
         assert!(sh(args));
     }
-    let snap = tree::snapshot(&work, None, true);
+    let snap = tree::snapshot(&work, None, true, &[]);
     assert!(snap.repo && !snap.truncated);
     assert_eq!(paths(&snap), [".gitignore", "src", "target", "src/a.rs", "src/deep", "src/deep/b.rs"]);
     let target = &snap.entries.as_ref().unwrap()[2];
     assert!(target.dir && target.ignored);
+    // An unfolded ignored folder: one level, everything in it ignored too.
+    let opened = tree::snapshot(&work, None, true, &["target".into()]);
+    assert_eq!(paths(&opened), [".gitignore", "src", "target", "src/a.rs", "src/deep", "target/debug", "src/deep/b.rs"]);
+    assert!(opened.entries.as_ref().unwrap()[5].ignored);
+    let deeper = tree::snapshot(&work, None, true, &["target".into(), "target/debug".into()]);
+    assert_eq!(paths(&deeper).last().map(String::as_str), Some("target/debug/big"));
     let codes = |s: &nib_proto::TreeSnapshot| s.changes.iter().map(|c| (c.code.clone(), c.path.clone())).collect::<Vec<_>>();
     assert_eq!(codes(&snap).len(), 3, "{:?}", snap.changes);
     // Same listing: not sent again.
-    assert_eq!(tree::snapshot(&work, Some(snap.stamp), true).entries, None);
+    assert_eq!(tree::snapshot(&work, Some(snap.stamp), true, &[]).entries, None);
 
     // Stage one file before the first commit, take it back, then commit everything.
     let stage = |p: &str| git::run(&work, &GitOp::Stage { paths: vec![p.into()] });
     assert!(stage("src/a.rs").0);
-    assert!(codes(&tree::snapshot(&work, None, true)).contains(&("A ".into(), "src/a.rs".into())));
+    assert!(codes(&tree::snapshot(&work, None, true, &[])).contains(&("A ".into(), "src/a.rs".into())));
     assert!(git::run(&work, &GitOp::Unstage { paths: vec!["src/a.rs".into()] }).0);
-    assert!(codes(&tree::snapshot(&work, None, true)).contains(&("??".into(), "src/a.rs".into())));
+    assert!(codes(&tree::snapshot(&work, None, true, &[])).contains(&("??".into(), "src/a.rs".into())));
     assert!(git::run(&work, &GitOp::Stage { paths: vec![] }).0);
-    assert!(tree::snapshot(&work, None, true).changes.iter().all(|c| !c.staged), "no paths must stage nothing");
+    assert!(tree::snapshot(&work, None, true, &[]).changes.iter().all(|c| !c.staged), "no paths must stage nothing");
     assert!(git::run(&work, &GitOp::Commit { message: "first".into() }).0);
-    assert_eq!(tree::snapshot(&work, None, true).changes, vec![]);
+    assert_eq!(tree::snapshot(&work, None, true, &[]).changes, vec![]);
 
     // Over the wire, from a subfolder of the repository: paths are relative to that folder.
     let res = run(vec![
@@ -286,7 +292,7 @@ fn tree_snapshot_file_operations_and_staging() {
     assert!(res[2].is_err(), "creating over an existing file must fail");
     assert_eq!((&res[3], &res[4]), (&Ok(Response::Ok), &Ok(Response::Ok)));
     assert!(res[5].is_err() && !work.join("escape").exists());
-    let res = run(vec![hello(&work.join("src")), Request::Tree { known: None, place: Default::default() }]);
+    let res = run(vec![hello(&work.join("src")), Request::Tree { known: None, place: Default::default(), open: vec![] }]);
     let Ok(Response::Tree(snap)) = &res[1] else { panic!("{:?}", res[1]) };
     assert_eq!(paths(snap), ["ui", "z.rs", "ui/panel.rs"]);
     let mut got = codes(snap);
@@ -296,7 +302,7 @@ fn tree_snapshot_file_operations_and_staging() {
 
     // Unstage with a HEAD: the rename falls apart into a deletion and a new file.
     assert!(git::run(&work.join("src"), &GitOp::Unstage { paths: vec!["z.rs".into(), "a.rs".into()] }).0);
-    assert!(tree::snapshot(&work.join("src"), None, true).changes.iter().all(|c| !c.staged));
+    assert!(tree::snapshot(&work.join("src"), None, true, &[]).changes.iter().all(|c| !c.staged));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -315,7 +321,7 @@ fn scratch_and_nibdir() {
         fs(Place::Nibdir, FsOp::CreateDir { path: "../escape".into() }),
     ]);
     // Tree answers come from threads, in any order: one per run.
-    let tree = |place| run(vec![hello(&dir), Request::Tree { known: None, place }]).pop().unwrap();
+    let tree = |place| run(vec![hello(&dir), Request::Tree { known: None, place, open: vec![] }]).pop().unwrap();
     let Ok(Response::Hello { scratch, nibdir, .. }) = &res[0] else { panic!("{:?}", res[0]) };
     let (scratch, nibdir) = (std::path::PathBuf::from(scratch), std::path::PathBuf::from(nibdir));
     assert!(nibdir.join("plots/loss.png").is_file() && scratch.join("try.py").is_file());

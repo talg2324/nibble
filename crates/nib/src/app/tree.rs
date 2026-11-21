@@ -181,6 +181,9 @@ pub struct Tree {
     opened: HashSet<String>,
     /// Folders folded in the git lenses (which unfold everything that matches).
     folded: HashSet<String>,
+    /// The ignored folders unfolded when the last snapshot was asked for (the daemon lists
+    /// what's in an ignored folder only when asked to).
+    asked_open: Vec<String>,
     /// Cursor and selection anchor: indices into `rows()`.
     cur: usize,
     anchor: usize,
@@ -511,6 +514,18 @@ impl Tree {
         }
     }
 
+    /// Ignored folders unfolded in the files lens, sorted.
+    fn open_ignored(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .opened
+            .iter()
+            .filter(|p| self.index.get(*p).is_some_and(|i| self.entries[*i].dir && self.entries[*i].ignored))
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
     fn toggle_fold(&mut self, path: &str) {
         let Some(e) = self.index.get(path).map(|i| &self.entries[*i]) else { return };
         if e.dir {
@@ -574,7 +589,7 @@ impl Tree {
     /// the file under it.
     fn start_new(&mut self, folder: bool) {
         let dir = match self.cursor_entry() {
-            Some(e) if e.dir && !e.gone && !e.ignored => e.path.clone(),
+            Some(e) if e.dir && !e.gone => e.path.clone(),
             Some(e) => parent_of(&e.path).to_string(),
             None => String::new(),
         };
@@ -620,7 +635,17 @@ impl App {
         }
         self.tree.asking = true;
         self.tree.asked = self.tree.place;
-        self.request(Request::Tree { known: self.tree.stamp, place: self.tree.place }, Pending::Tree)
+        let open = self.tree.open_ignored();
+        self.tree.asked_open = open.clone();
+        self.request(Request::Tree { known: self.tree.stamp, place: self.tree.place, open }, Pending::Tree)
+    }
+
+    /// An ignored folder was unfolded or folded: ask for a listing with (or without) its contents.
+    fn tree_fetch_unfolded(&mut self) -> Task<Message> {
+        if self.tree.open_ignored() == self.tree.asked_open {
+            return Task::none();
+        }
+        self.tree_refresh()
     }
 
     pub(super) fn on_tree(&mut self, result: Result<Response, RpcError>) -> Task<Message> {
@@ -889,7 +914,7 @@ impl App {
             _ => {}
         }
         self.tree_follow();
-        Task::none()
+        self.tree_fetch_unfolded()
     }
 
     /// "⋯ n clean" in folder `parent`: show that folder whole, in the files lens.
@@ -1037,7 +1062,7 @@ impl App {
             }
         }
         self.tree_follow();
-        Task::none()
+        self.tree_fetch_unfolded()
     }
 
     /// Switch lens. Upstream shows what the last fetch knew (fetching is the Git panel's).
@@ -1136,7 +1161,7 @@ impl App {
             Msg::Focus | Msg::Scroll(_) | Msg::Pasted(_) => {}
         }
         self.tree_follow();
-        Task::none()
+        self.tree_fetch_unfolded()
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1371,7 +1396,7 @@ impl App {
         } else {
             letters.into()
         };
-        let twisty: Element<'_, Message> = if e.dir && !e.ignored {
+        let twisty: Element<'_, Message> = if e.dir {
             let mark = if t.expanded(e) { "▾" } else { "▸" };
             button(container(text(mark).size(11).color(fade(dim))).center_x(14).height(ROW).align_y(Alignment::Center))
                 .on_press(Message::Tree(Msg::Twisty(path())))

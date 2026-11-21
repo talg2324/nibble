@@ -13,10 +13,12 @@ use std::path::Path;
 const MAX_ENTRIES: usize = 20_000;
 
 /// `with_git: false` for directories outside the project (scratch, NIBDIR): a repository that
-/// happens to contain them (dotfiles in `~`) is not theirs.
-pub fn snapshot(root: &Path, known: Option<u64>, with_git: bool) -> TreeSnapshot {
+/// happens to contain them (dotfiles in `~`) is not theirs. `open`: ignored folders the user
+/// unfolded, whose contents are listed too.
+pub fn snapshot(root: &Path, known: Option<u64>, with_git: bool, open: &[String]) -> TreeSnapshot {
     let git = if with_git { git::tree_state(root) } else { None };
-    let (entries, truncated) = walk(root, git.as_ref().map(|g| &g.ignored), MAX_ENTRIES, true);
+    let open: HashSet<String> = open.iter().cloned().collect();
+    let (entries, truncated) = walk(root, git.as_ref().map(|g| &g.ignored), &open, MAX_ENTRIES, true);
     let mut h = DefaultHasher::new();
     entries.hash(&mut h);
     let stamp = h.finish();
@@ -40,16 +42,25 @@ pub fn snapshot(root: &Path, known: Option<u64>, with_git: bool) -> TreeSnapshot
 /// `.`, at most `max` of them (`true`: there were more).
 pub fn files(root: &Path, max: usize) -> (Vec<String>, bool) {
     let git = git::tree_state(root);
-    let (entries, truncated) = walk(root, git.as_ref().map(|g| &g.ignored), max, false);
+    let (entries, truncated) = walk(root, git.as_ref().map(|g| &g.ignored), &HashSet::new(), max, false);
     (entries.into_iter().filter(|e| !e.dir && !e.ignored).map(|e| e.path).collect(), truncated)
 }
 
-/// Everything under `root` except `.git`; ignored folders are listed but not entered.
-/// `dot_dirs: false`: folders whose name starts with `.` are left out altogether.
-fn walk(root: &Path, ignored: Option<&HashSet<String>>, max: usize, dot_dirs: bool) -> (Vec<TreeEntry>, bool) {
+/// Everything under `root` except `.git`; ignored folders are listed but not entered unless
+/// they are in `open` (everything inside an ignored folder is ignored too, so a folder in there
+/// is entered only when it is open as well). `dot_dirs: false`: folders whose name starts with
+/// `.` are left out altogether.
+fn walk(
+    root: &Path,
+    ignored: Option<&HashSet<String>>,
+    open: &HashSet<String>,
+    max: usize,
+    dot_dirs: bool,
+) -> (Vec<TreeEntry>, bool) {
     let mut out = Vec::new();
-    let mut queue = VecDeque::from([String::new()]);
-    while let Some(rel) = queue.pop_front() {
+    // (folder, it is ignored)
+    let mut queue = VecDeque::from([(String::new(), false)]);
+    while let Some((rel, in_ignored)) = queue.pop_front() {
         let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(&rel) };
         let Ok(read) = fs::read_dir(&dir) else { continue };
         // (name, shown as a folder, a real folder: entered)
@@ -73,9 +84,9 @@ fn walk(root: &Path, ignored: Option<&HashSet<String>>, max: usize, dot_dirs: bo
                 return (out, true);
             }
             let path = if rel.is_empty() { name } else { format!("{rel}/{name}") };
-            let is_ignored = ignored.is_some_and(|s| s.contains(&path));
-            if enter && !is_ignored {
-                queue.push_back(path.clone());
+            let is_ignored = in_ignored || ignored.is_some_and(|s| s.contains(&path));
+            if enter && (!is_ignored || open.contains(&path)) {
+                queue.push_back((path.clone(), is_ignored));
             }
             out.push(TreeEntry { path, dir: is_dir, ignored: is_ignored });
         }

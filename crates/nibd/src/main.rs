@@ -308,8 +308,8 @@ impl State {
             let tx = self.tx.clone();
             thread::spawn(move || {
                 let resp = match req {
-                    Request::Tree { known, place } => {
-                        Response::Tree(tree::snapshot(&tree_root, known, place == Place::Project))
+                    Request::Tree { known, place, open } => {
+                        Response::Tree(tree::snapshot(&tree_root, known, place == Place::Project, &open))
                     }
                     Request::GitDetails { log_limit } => {
                         let (commits, changes) = git::details(&root, log_limit);
