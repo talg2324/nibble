@@ -160,9 +160,66 @@ pub struct Chat {
     accepting: bool,
     /// Pictures pasted into the message being written.
     images: Vec<Pic>,
+    /// How hard its model thinks: one of its assistant's `efforts`; `None`: the assistant's own.
+    effort: Option<String>,
+    /// What its sessions add to the assistant's system prompt.
+    prompt: iced::widget::text_editor::Content,
+    /// The thinking level and prompt its session started with.
+    told_tuning: (Option<String>, Option<String>),
     /// Files dropped on the chat, read on this machine: `@` name -> contents. They go with the
     /// message instead of what the daemon would read (it may be on another machine).
     pub(super) dropped: HashMap<String, String>,
+}
+
+/// What the pane beside an agent's steps shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The agent's commands and what came back.
+    Terminal,
+    /// What it can load.
+    Skills,
+    /// Its system prompt, to edit.
+    Prompt,
+}
+
+/// One entry of the thinking dropdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effort {
+    /// The assistant's own setting.
+    Default,
+    Level(String),
+}
+
+impl Effort {
+    fn of(e: &Option<String>) -> Effort {
+        e.clone().map_or(Effort::Default, Effort::Level)
+    }
+
+    fn level(self) -> Option<String> {
+        match self {
+            Effort::Default => None,
+            Effort::Level(l) => Some(l),
+        }
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Effort::Default => f.write_str("default"),
+            Effort::Level(l) => f.write_str(l),
+        }
+    }
+}
+
+impl Side {
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Terminal => "terminal",
+            Side::Skills => "skills",
+            Side::Prompt => "prompt",
+        }
+    }
 }
 
 impl Chat {
@@ -277,9 +334,12 @@ pub struct Panel {
     next_key: u64,
     /// The agent list is folded away: one agent at a time.
     fold: bool,
-    /// The pane beside the steps: the skills drawer (`Some(true)`), the terminal (`Some(false)`),
-    /// or none, and the chat takes the whole width.
-    drawer: Option<bool>,
+    /// The pane beside the steps; `None`: none, and the chat takes the whole width.
+    drawer: Option<Side>,
+    /// The thinking level and system prompt an agent last started with (`[ai] effort` /
+    /// `prompt`): new agents start with them.
+    last_effort: Option<String>,
+    last_prompt: String,
     /// Every agent is paused and the dialog is up: each working chat's key and whether it is
     /// marked for stopping; the row the keyboard is on.
     panic: Option<(Vec<(u64, bool)>, usize)>,
@@ -348,7 +408,9 @@ impl Default for Panel {
             cur: 0,
             next_key: 1,
             fold: false,
-            drawer: Some(false),
+            drawer: Some(Side::Terminal),
+            last_effort: None,
+            last_prompt: String::new(),
             panic: None,
             ticking: false,
             follow: None,
@@ -422,12 +484,21 @@ struct Pull {
 impl Panel {
     pub fn new(cfg: nib_editor::config::AiConfig) -> Self {
         let last = cfg.agent.as_deref().and_then(AiAgent::from_id).map(|a| (a, cfg.model.clone()));
-        let mut p = Self { cloud_models: cfg.cloud_models, pick_model: cfg.pick_model, last: last.clone(), ..Default::default() };
+        let mut p = Self { cloud_models: cfg.cloud_models, pick_model: cfg.pick_model, last: last.clone(), last_effort: cfg.effort, last_prompt: cfg.prompt.unwrap_or_default(), ..Default::default() };
         // The first chat is with the one picked last time.
         if let Some((agent, model)) = last {
             (p.chats[0].agent, p.chats[0].chosen) = (Some(agent), model);
         }
+        let first = std::mem::take(&mut p.chats[0]);
+        p.chats[0] = p.seeded(first);
         p
+    }
+
+    /// `c` with the thinking level and system prompt the last agent started with.
+    pub(super) fn seeded(&self, mut c: Chat) -> Chat {
+        c.effort = self.last_effort.clone();
+        c.prompt = iced::widget::text_editor::Content::with_text(&self.last_prompt);
+        c
     }
 }
 
@@ -504,9 +575,8 @@ pub enum Msg {
     Stop,
     /// Fold / unfold the agent list.
     Fold,
-    /// What the pane beside the steps shows: the skills drawer (`Some(true)`), the terminal
-    /// (`Some(false)`), or nothing (`None`).
-    Side(Option<bool>),
+    /// What the pane beside the steps shows; `None`: nothing.
+    Side(Option<Side>),
     /// Pause every agent and ask which to stop.
     Panic,
     /// Mark / unmark this row of the panic dialog.
@@ -517,6 +587,10 @@ pub enum Msg {
     Clock,
     /// How much the shown agent may do without asking.
     Mode(AiMode),
+    /// How hard the shown agent's model thinks (`Effort::Default`: the assistant's own).
+    Effort(Effort),
+    /// An edit in the system prompt pane.
+    Prompt(iced::widget::text_editor::Action),
     /// Allow (or refuse) what the shown agent asked leave for.
     Answer(bool),
     /// Accept the shown agent's word that its job is done, ending it (`true`), or go back to it.
@@ -699,6 +773,14 @@ impl App {
                     self.notify(ClientNotify::AiSetMode { id, mode });
                 }
             }
+            Msg::Effort(e) => {
+                self.ai.effort = e.level();
+                // The assistant takes it when its session starts (again, for a first message).
+                if self.ai_tuning_fixed() {
+                    return self.flash_info("thinking level: from this agent's next session (clear starts one)");
+                }
+            }
+            Msg::Prompt(action) => self.ai.prompt.perform(action),
             Msg::Answer(allow) => self.ai_answer(allow, None),
             Msg::Accept(yes) => return self.ai_accept(yes),
             Msg::Clip(Clip::Text(s)) => {
@@ -792,6 +874,44 @@ impl App {
                 let pick = last.as_ref().map(|(a, m)| (a.id(), m.as_deref()));
                 nib_editor::Config::save_ai_choice(pick, pick_model).err().map(|e| format!("{e:#}"))
             },
+            |e| Message::Ai(Msg::Saved(e)),
+        )
+    }
+
+    /// The thinking levels the shown agent's assistant takes (none: no dropdown).
+    pub(super) fn ai_efforts(&self) -> &'static [&'static str] {
+        self.ai.agent.map_or(&[], AiAgent::efforts)
+    }
+
+    /// The thinking level and system prompt the shown agent's next session gets with `agent`.
+    /// A level this assistant doesn't have (one picked for another) is left to it.
+    fn ai_tuning(&self, agent: AiAgent) -> (Option<String>, Option<String>) {
+        let effort = self.ai.effort.clone().filter(|e| agent.efforts().contains(&e.as_str()));
+        let prompt = Some(self.ai.prompt.text().trim().to_string()).filter(|p| !p.is_empty());
+        (effort, prompt)
+    }
+
+    /// Something was said in the shown agent's session: its thinking level and system prompt
+    /// can't change until the next one.
+    pub(super) fn ai_tuning_fixed(&self) -> bool {
+        matches!(self.ai.session, Session::Starting | Session::Ready(_)) && self.ai.turns.iter().any(|t| t.who == Who::User)
+    }
+
+    /// Replace the shown agent's system prompt.
+    pub(super) fn ai_set_prompt(&mut self, text: &str) {
+        self.ai.prompt = iced::widget::text_editor::Content::with_text(text);
+    }
+
+    /// An agent starts with this thinking level and system prompt: new agents start with them
+    /// too, and so does the next nib (config.toml, off the UI thread, only when they changed).
+    fn ai_remember_tuning(&mut self, effort: Option<String>, prompt: Option<String>) -> Task<Message> {
+        let text = prompt.clone().unwrap_or_default();
+        if self.ai.last_effort == effort && self.ai.last_prompt == text {
+            return Task::none();
+        }
+        (self.ai.last_effort, self.ai.last_prompt) = (effort.clone(), text);
+        Task::perform(
+            async move { nib_editor::Config::save_ai_tuning(effort.as_deref(), prompt.as_deref()).err().map(|e| format!("{e:#}")) },
             |e| Message::Ai(Msg::Saved(e)),
         )
     }
@@ -945,6 +1065,10 @@ impl App {
         ai.tab = None;
         ai.setup_failed = None;
         ai.chosen = model;
+        // Another assistant's levels are its own: one this one hasn't goes back to its default.
+        if ai.effort.as_deref().is_some_and(|e| !agent.efforts().contains(&e)) {
+            ai.effort = None;
+        }
         self.ai_start(agent)
     }
 
@@ -1161,7 +1285,10 @@ impl App {
             "images": ai.images.iter().map(|p| json!({ "width": p.width, "height": p.height, "bytes": p.png.len() })).collect::<Vec<_>>(),
             "current": ai.cur,
             "fold": ai.fold,
-            "drawer": ai.drawer, "side": match ai.drawer { Some(true) => "skills", Some(false) => "terminal", None => "none" },
+            "side": ai.drawer.map_or("none", Side::name),
+            "effort": ai.effort,
+            "efforts": self.ai_efforts(),
+            "prompt": ai.prompt.text().trim_end(),
             "panic": ai.panic.as_ref().map(|(rows, _)| rows.iter().map(|(key, marked)| json!({ "chat": ai.chats.iter().position(|c| c.key == *key), "marked": marked })).collect::<Vec<_>>()),
             "chats": ai.chats.iter().map(|c| json!({
                 "agent": c.agent.map(AiAgent::name),
@@ -1254,7 +1381,11 @@ impl App {
         let _ = AiAgent::Claude;
         let (mode, chat) = (self.ai.mode, self.ai.key);
         self.ai.told_mode = mode;
-        let t = Task::batch([self.request(Request::AiOpen { agent, model, tools: true, mode, resume: self.ai.past.clone() }, Pending::AiOpen { chat }), skills]);
+        let (effort, prompt) = self.ai_tuning(agent);
+        self.ai.told_tuning = (effort.clone(), prompt.clone());
+        let remember = self.ai_remember_tuning(effort.clone(), prompt.clone());
+        let open = Request::AiOpen { agent, model, tools: true, mode, resume: self.ai.past.clone(), effort, prompt };
+        let t = Task::batch([self.request(open, Pending::AiOpen { chat }), skills, remember]);
         if !self.pending.values().any(|p| matches!(p, Pending::AiOpen { chat: c } if *c == chat)) {
             self.ai.session = Session::Failed(format!("not connected to {}", self.label));
             self.ai.busy = false;
@@ -1582,6 +1713,13 @@ impl App {
         self.ai.busy = true;
         // Told to keep going: it isn't done any more.
         self.ai.finished = None;
+        // The thinking level or system prompt changed after the session started, before
+        // anything was said in it: a new one starts with them, for this message.
+        let first = self.ai.turns.iter().filter(|t| t.who == Who::User).count() == 1;
+        if first && matches!(self.ai.session, Session::Ready(_)) && self.ai.told_tuning != self.ai_tuning(agent) {
+            self.ai_end_session();
+            self.ai.busy = true;
+        }
         let started = match self.ai.session {
             Session::Ready(id) => {
                 self.ai_send_now(id, text);
@@ -2898,6 +3036,29 @@ mod tests {
         let _ = a.update(Message::Control(Command::NewAgent));
         assert!(!a.ai.picking);
         assert_eq!((a.ai.agent, a.ai.chosen.as_deref()), (Some(AiAgent::Codex), Some("gpt-6-sol")));
+    }
+
+    #[test]
+    fn thinking_and_prompt_set_before_the_first_message_restart_the_session() {
+        let mut a = chatting();
+        assert_eq!(a.ai_efforts(), AiAgent::Claude.efforts());
+        let _ = a.update(Message::Ai(Msg::Effort(Effort::Level("high".into()))));
+        a.ai_set_prompt("Be terse.");
+        assert!(!a.ai_tuning_fixed(), "nothing said yet");
+        type_str(&mut a, "hi");
+        key(&mut a, "enter");
+        let req = opening(&a).expect("a new session, with them");
+        assert_eq!(a.ai.told_tuning, (Some("high".into()), Some("Be terse.".into())));
+        assert_eq!(a.ai.queued.as_deref(), Some("hi"));
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::AiOpened { id: 8 }) });
+        assert!(matches!(a.ai.session, Session::Ready(8)));
+        // Under way now: a change waits for the next session.
+        assert!(a.ai_tuning_fixed());
+        let _ = a.update(Message::Ai(Msg::Effort(Effort::Level("low".into()))));
+        assert!(opening(&a).is_none() && matches!(a.ai.session, Session::Ready(8)));
+        // Another assistant doesn't get a level it hasn't got.
+        a.ai.effort = Some("max".into());
+        assert_eq!(a.ai_tuning(AiAgent::Codex).0, None);
     }
 
     #[test]

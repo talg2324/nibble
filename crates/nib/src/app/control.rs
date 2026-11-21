@@ -167,12 +167,45 @@ impl App {
                 t
             }
             "ai.side" => {
-                // The pane beside the steps: the skills drawer, the terminal, or none (`"off": true`).
+                // The pane beside the steps: `side` (terminal, skills, prompt), or the older
+                // `skills` switch, or none (`"off": true`).
+                use super::ai::Side;
                 let off = call.req.get("off").and_then(Value::as_bool).unwrap_or(false);
                 let skills = call.req.get("skills").and_then(Value::as_bool).unwrap_or(false);
-                let t = self.handle(Message::Ai(super::ai::Msg::Side((!off).then_some(skills))));
+                let side = match call.str_arg("side") {
+                    Some(s) => match [Side::Terminal, Side::Skills, Side::Prompt].into_iter().find(|x| x.name() == s) {
+                        Some(x) => x,
+                        None => {
+                            call.err("ai side needs one of: terminal, skills, prompt");
+                            return Task::none();
+                        }
+                    },
+                    None if skills => Side::Skills,
+                    None => Side::Terminal,
+                };
+                let t = self.handle(Message::Ai(super::ai::Msg::Side((!off).then_some(side))));
                 call.ok(json!({}));
                 t
+            }
+            "ai.effort" => {
+                // The thinking dropdown, for the shown agent: one of its assistant's levels, or `default`.
+                let level = call.str_arg("level").unwrap_or_default().to_string();
+                let levels = self.ai_efforts();
+                if level != "default" && !levels.iter().any(|l| *l == level) {
+                    call.err(format!("ai effort needs one of: default, {}", levels.join(", ")));
+                    return Task::none();
+                }
+                let e = if level == "default" { super::ai::Effort::Default } else { super::ai::Effort::Level(level.clone()) };
+                let t = self.handle(Message::Ai(super::ai::Msg::Effort(e)));
+                call.ok(json!({ "effort": level }));
+                t
+            }
+            "ai.prompt" => {
+                // Replace the shown agent's system prompt.
+                let text = call.str_arg("text").unwrap_or_default().to_string();
+                self.ai_set_prompt(&text);
+                call.ok(json!({}));
+                Task::none()
             }
             "ai.mode" => {
                 // The agents tab's mode switch, for the shown agent.

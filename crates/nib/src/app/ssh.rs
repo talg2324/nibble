@@ -25,7 +25,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 const WIDTH: f32 = 440.0;
-const PLACEHOLDER: &str = "user@host or IP address, then ↵";
+/// The command key, as a hint shows it before another key.
+const MOD_PLUS: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+const PLACEHOLDER: &str = "user@host or IP, then ↵ (asks for a password if it needs one)";
 
 /// What the keyboard walks, in the order the panel shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +141,10 @@ const EDIT_FIELDS: [(&str, &str); 7] = [
     ("nibd", "a nibd on the host (default: upload one)"),
 ];
 
+/// The fields the form shows (name, host, user). The rest (port, key file, jump host, nibd)
+/// are for ~/.ssh/config or config.toml: they're kept as they are, not shown.
+const EDIT_SHOWN: usize = 3;
+
 struct Edit {
     /// The saved connection being changed (None: saving a ~/.ssh/config host as one).
     orig: Option<String>,
@@ -147,6 +153,17 @@ struct Edit {
     /// The changes, shown before writing config.toml (y saves).
     confirm: Option<Vec<String>>,
     error: Option<String>,
+}
+
+impl Edit {
+    fn new(orig: Option<String>, fields: [String; 7]) -> Edit {
+        Edit { orig, fields, sel: 1, confirm: None, error: None }
+    }
+
+    /// How many fields the form shows.
+    fn shown(&self) -> usize {
+        EDIT_SHOWN
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -275,7 +292,7 @@ impl App {
             }
             Msg::Answer(yes) => return self.ssh_answer(yes),
             Msg::BrowseInto(i) => {
-                self.ssh_focus();
+                self.focus = Focus::Tree;
                 if let Some(b) = &mut self.ssh.browse {
                     b.sel = i;
                 }
@@ -286,7 +303,7 @@ impl App {
             Msg::EditField(i) => {
                 self.ssh_focus();
                 if let Some(e) = &mut self.ssh.edit {
-                    e.sel = i.min(EDIT_FIELDS.len() - 1);
+                    e.sel = i.min(e.shown() - 1);
                     e.confirm = None;
                 }
             }
@@ -321,7 +338,6 @@ impl App {
         self.ssh.open = false;
         self.ssh.armed = None;
         self.ssh.forgetting = None;
-        self.ssh.browse = None;
         self.ssh.edit = None;
         if self.focus != Focus::Ssh {
             return;
@@ -409,9 +425,6 @@ impl App {
                 _ => {}
             }
             return Task::none();
-        }
-        if self.ssh.browse.is_some() {
-            return self.ssh_browse_key(chord, text);
         }
         if self.ssh.edit.is_some() {
             return self.ssh_edit_key(chord, text);
@@ -659,16 +672,23 @@ impl App {
     // folder browser
     // -----------------------------------------------------------------------------------------
 
-    /// Show the subfolders of `dir` (absolute, on the connected machine) in the SSH panel.
+    /// The folder browser is up, where the file tree is.
+    pub(super) fn ssh_browsing(&self) -> bool {
+        self.ssh.browse.is_some()
+    }
+
+    /// Show the subfolders of `dir` (absolute, on the connected machine) where the file tree
+    /// is, with the keyboard: picking one makes it the root, and the tree comes back.
     pub(super) fn ssh_browse(&mut self, dir: String) -> Task<Message> {
         if !self.connected || self.disconnected {
             return self.flash_warn("not connected");
         }
-        if !self.ssh.open {
-            self.ssh_open();
+        // The SSH panel brought us here (a new host): it's done.
+        if self.ssh.open {
+            self.ssh_close();
         }
-        self.ssh_focus();
-        self.ssh.edit = None;
+        self.tree.open = true;
+        self.focus = Focus::Tree;
         let b = self.ssh.browse.get_or_insert_with(Default::default);
         b.dir = dir.clone();
         b.filter.clear();
@@ -728,7 +748,6 @@ impl App {
     fn ssh_browse_open(&mut self) -> Task<Message> {
         let Some(dir) = self.ssh_browse_target() else { return Task::none() };
         self.ssh.browse = None;
-        self.ssh_close();
         if dir == self.root {
             self.tree.open = true;
             self.focus = Focus::Tree;
@@ -737,7 +756,7 @@ impl App {
         self.change_root(dir)
     }
 
-    fn ssh_browse_key(&mut self, chord: KeyChord, text: Option<String>) -> Task<Message> {
+    pub(super) fn ssh_browse_key(&mut self, chord: KeyChord, text: Option<String>) -> Task<Message> {
         let held = chord.ctrl || chord.logo;
         let paste = self.keymap.lookup(&chord) == Some(Command::Paste);
         let Some(b) = &mut self.ssh.browse else { return Task::none() };
@@ -754,10 +773,8 @@ impl App {
                 b.filter.clear();
                 b.sel = 0;
             }
-            Key::Esc => {
-                self.ssh.browse = None;
-                self.ssh_close();
-            }
+            // Back to the tree, the root as it was.
+            Key::Esc => self.ssh.browse = None,
             Key::Backspace if b.filter.is_empty() => return self.ssh_browse_up(),
             Key::Backspace if held || chord.alt => b.filter.clear(),
             Key::Backspace => {
@@ -810,7 +827,7 @@ impl App {
             p.jump.clone().unwrap_or_default(),
             p.nibd.clone().unwrap_or_default(),
         ];
-        self.ssh.edit = Some(Edit { orig, fields, sel: 1, confirm: None, error: None });
+        self.ssh.edit = Some(Edit::new(orig, fields));
         Task::none()
     }
 
@@ -919,7 +936,7 @@ impl App {
             e.confirm = None;
             return Task::none();
         }
-        let last = EDIT_FIELDS.len() - 1;
+        let last = e.shown() - 1;
         match chord.key {
             Key::Esc => self.ssh.edit = None,
             _ if cmd == Some(Command::Save) => return self.ssh_edit_confirm(),
@@ -1206,10 +1223,6 @@ impl App {
             body = body.push(self.ssh_ask_box(a, focused));
         }
 
-        if let Some(b) = &ui.browse {
-            body = body.push(self.ssh_browse_view(b, focused));
-            return Some(self.ssh_frame(header, body, focused));
-        }
         if let Some(e) = &ui.edit {
             body = body.push(self.ssh_edit_view(e, focused));
             return Some(self.ssh_frame(header, body, focused));
@@ -1321,17 +1334,20 @@ impl App {
         mouse_area(panel).on_press(Message::Ssh(Msg::Focus)).into()
     }
 
-    fn ssh_browse_view<'a>(&'a self, b: &'a Browse, focused: bool) -> Element<'a, Message> {
+    /// The folder browser, in the file tree's place.
+    pub(super) fn ssh_browse_view(&self) -> Option<Element<'_, Message>> {
+        let b = self.ssh.browse.as_ref()?;
+        let focused = self.focus == Focus::Tree;
         let th = &self.theme;
         let (accent, dim, fg, sel_bg) = (th.accent, th.dim, th.foreground, th.selection);
         let mut c = column![text(format!("Open a folder on {}", self.label)).size(12).color(fg)].spacing(6);
         let up = button(text("↑ up").size(11).color(dim)).on_press(Message::Ssh(Msg::BrowseUp)).padding([1, 6]).style(|_, _| button::Style::default());
         c = c.push(
-            row![container(text(short_path(&self.tilde(&b.dir), 44)).size(12).color(accent).wrapping(text::Wrapping::None)).width(Length::Fill).clip(true), up]
+            row![container(text(short_path(&self.tilde(&b.dir), 32)).size(12).color(accent).wrapping(text::Wrapping::None)).width(Length::Fill).clip(true), up]
                 .align_y(Alignment::Center),
         );
         c = c.push(self.ssh_box(b.filter.clone(), "type to filter", true, focused));
-        let item = |i: usize, label: String, color: Color| -> Element<'a, Message> {
+        let item = |i: usize, label: String, color: Color| -> Element<'_, Message> {
             let selected = b.sel == i;
             let r = container(text(label).size(12).color(color).wrapping(text::Wrapping::None))
                 .padding([3, 6])
@@ -1344,26 +1360,28 @@ impl App {
                 });
             mouse_area(r).on_press(Message::Ssh(Msg::BrowseInto(i))).into()
         };
-        c = c.push(item(0, "·  this folder".into(), fg));
+        let mut list = column![item(0, "·  this folder".into(), fg)].spacing(2);
         if b.loading {
-            c = c.push(text("reading…").size(11).color(dim));
+            list = list.push(text("reading…").size(11).color(dim));
         } else if let Some(e) = &b.error {
-            c = c.push(text(e.clone()).size(11).color(th.warn));
+            list = list.push(text(e.clone()).size(11).color(th.warn));
         } else {
             let shown = b.shown();
             if shown.is_empty() {
-                c = c.push(text(if b.filter.is_empty() { "no folders here" } else { "no folder matches" }).size(11).color(dim));
+                list = list.push(text(if b.filter.is_empty() { "no folders here" } else { "no folder matches" }).size(11).color(dim));
             }
             for (i, (name, link)) in shown.into_iter().enumerate() {
-                c = c.push(item(i + 1, format!("{name}/{}", if *link { "  →" } else { "" }), fg));
+                list = list.push(item(i + 1, format!("{name}/{}", if *link { "  →" } else { "" }), fg));
             }
         }
+        c = c.push(scrollable(list).style(crate::theme::scrollbar).height(Length::Fill));
         let open = self.ssh_button("Open as project", Some(Message::Ssh(Msg::BrowseOpen)), false);
-        c = c.push(space().height(4)).push(open);
+        c = c.push(open);
         if focused {
-            c = c.push(row![self.hint("↵", "go in"), self.hint("⌘↵", "open as project"), self.hint("←", "up"), self.hint("esc", "close")].spacing(10));
+            c = c.push(row![self.hint("↵", "go in"), self.hint("←", "up")].spacing(10));
+            c = c.push(row![self.hint(&format!("{MOD_PLUS}↵"), "open"), self.hint("esc", "back")].spacing(10));
         }
-        c.into()
+        Some(container(c).padding(Padding { left: 10.0, right: 10.0, top: 10.0, bottom: 10.0 }).height(Length::Fill).into())
     }
 
     fn ssh_edit_view<'a>(&'a self, e: &'a Edit, focused: bool) -> Element<'a, Message> {
@@ -1374,7 +1392,7 @@ impl App {
             None => format!("Save {} as a connection", e.fields[1]),
         };
         let mut c = column![text(title).size(12).color(fg)].spacing(6);
-        for (i, (label, hint)) in EDIT_FIELDS.iter().enumerate() {
+        for (i, (label, hint)) in EDIT_FIELDS.iter().enumerate().take(e.shown()) {
             let selected = e.sel == i && e.confirm.is_none();
             let r = row![text(*label).size(11).color(if selected { fg } else { dim }).width(70), self.ssh_box(e.fields[i].clone(), hint, selected, focused)]
                 .spacing(8)
@@ -1411,7 +1429,7 @@ impl App {
                         .spacing(8),
                 );
                 if focused {
-                    c = c.push(row![self.hint("↑↓", "field"), self.hint("⌘S", "save"), self.hint("esc", "cancel")].spacing(12));
+                    c = c.push(row![self.hint("↑↓", "field"), self.hint(&format!("{MOD_PLUS}S"), "save"), self.hint("esc", "cancel")].spacing(12));
                 }
             }
         }
@@ -1664,6 +1682,10 @@ mod tests {
         let _ = a.ssh_edit_confirm();
         let changes = a.ssh.edit.as_ref().unwrap().confirm.clone().unwrap();
         assert_eq!(changes, ["host: gpu-box → gpu-box2", "user: (not set) → tal"]);
+        key(&mut a, "n");
+        key(&mut a, "down");
+        assert_eq!(a.ssh.edit.as_ref().unwrap().sel, 2, "user is the last field shown");
+        let _ = a.ssh_edit_confirm();
         key(&mut a, "n"); // back to the form, nothing written
         assert!(a.ssh.edit.as_ref().unwrap().confirm.is_none());
         key(&mut a, "esc");

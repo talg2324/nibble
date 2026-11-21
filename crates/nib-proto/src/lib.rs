@@ -141,6 +141,13 @@ pub enum Request {
         /// own session of it, and what follows is added to its record.
         #[serde(default)]
         resume: Option<String>,
+        /// How hard the model thinks: one of `AiAgent::efforts`; `None`: the assistant's own
+        /// setting.
+        #[serde(default)]
+        effort: Option<String>,
+        /// Added to the assistant's own system prompt for the whole session.
+        #[serde(default)]
+        prompt: Option<String>,
     },
     /// This project's past conversations with agents, the latest first -> `AiHistory`.
     /// `query`: only the ones with this somewhere in them (asked, said, run, changed).
@@ -388,6 +395,18 @@ impl AiAgent {
 
     pub fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|a| a.id() == id)
+    }
+
+    /// The thinking levels it takes (`AiOpen::effort`), least first. Empty: it has no such
+    /// setting (or nib doesn't pass one yet).
+    pub fn efforts(self) -> &'static [&'static str] {
+        match self {
+            // `claude --effort`.
+            AiAgent::Claude => &["low", "medium", "high", "xhigh", "max"],
+            // Codex's `model_reasoning_effort`.
+            AiAgent::Codex => &["minimal", "low", "medium", "high", "xhigh"],
+            AiAgent::Grok | AiAgent::OpenCode => &[],
+        }
     }
 }
 

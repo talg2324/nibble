@@ -1,0 +1,3 @@
+// Windows resources for nib.exe (compiled by build.rs). The first icon is the one Explorer,
+// shortcuts and the taskbar show. Regenerate icon.ico from icon.svg when the logo changes.
+1 ICON "../../assets/icon.ico"

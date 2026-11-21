@@ -14,7 +14,7 @@
 use super::act::Act;
 use super::ink::{self, Ink};
 use super::caret::next_char;
-use super::{compose, wait, Chat, Msg, Session, Step, Turn, Who, TRANSCRIPT_ID};
+use super::{compose, wait, Chat, Effort, Msg, Session, Side, Step, Turn, Who, TRANSCRIPT_ID};
 use crate::app::{async_sleep, App, Focus, Message};
 use iced::advanced::widget::{operate, operation, Id as WidgetId};
 
@@ -272,7 +272,7 @@ impl App {
                     None => (self.ai.agent, self.ai.chosen.clone()),
                 };
                 let skills = if agent == self.ai.agent { self.ai.skills.clone() } else { Vec::new() };
-                let chat = Chat { key, agent, chosen, skills, ..Default::default() };
+                let chat = self.ai.seeded(Chat { key, agent, chosen, skills, ..Default::default() });
                 self.ai.chats.push(chat);
                 self.ai.chats.len() - 1
             }
@@ -306,7 +306,8 @@ impl App {
         if self.ai.chats.is_empty() {
             let key = self.ai.next_key;
             self.ai.next_key += 1;
-            self.ai.chats.push(Chat { key, agent, chosen: model.clone(), ..Default::default() });
+            let chat = self.ai.seeded(Chat { key, agent, chosen: model.clone(), ..Default::default() });
+            self.ai.chats.push(chat);
         }
         if self.ai.cur > i {
             self.ai.cur -= 1;
@@ -815,20 +816,88 @@ impl App {
         container(text(about).size(11).color(self.theme.dim)).padding([4, 8]).into()
     }
 
-    /// The header's switches for the pane beside the steps: the agent's terminal or its skills,
-    /// the one showing lit. Pressing the lit one closes the pane and the chat takes its width.
+    /// The header's switches for the pane beside the steps: the agent's terminal, its skills or
+    /// its system prompt, the one showing lit. Pressing the lit one closes the pane and the chat
+    /// takes its width. The prompt's switch is marked when there is one.
     fn ai_side_tabs(&self) -> Element<'_, Message> {
         let th = &self.theme;
         let (fg, dim, accent, divider) = (th.foreground, th.dim, th.accent, th.divider);
-        let tab = |label: &'static str, skills: bool| {
-            let on = self.ai.drawer == Some(skills);
-            let msg = Msg::Side(if on { None } else { Some(skills) });
+        let tab = |side: Side| {
+            let on = self.ai.drawer == Some(side);
+            let msg = Msg::Side(if on { None } else { Some(side) });
+            let set = side == Side::Prompt && !self.ai.prompt.text().trim().is_empty();
+            let label = if set { format!("{} •", side.name()) } else { side.name().to_string() };
             button(text(label).size(11).color(if on { fg } else { dim })).on_press(Message::Ai(msg)).padding([1, 6]).style(move |_: &iced::Theme, _: button::Status| button::Style {
                 border: Border { color: if on { accent } else { divider }, width: 1.0, radius: 3.0.into() },
                 ..Default::default()
             })
         };
-        row![tab("terminal", false), tab("skills", true)].spacing(8).align_y(Alignment::Center).into()
+        row![tab(Side::Terminal), tab(Side::Skills), tab(Side::Prompt)].spacing(8).align_y(Alignment::Center).into()
+    }
+
+    /// The system prompt pane: what the agent's sessions add to its assistant's own, to edit.
+    /// It is taken when a session starts, so a change to a running agent waits for the next.
+    fn ai_prompt_pane(&self) -> Element<'_, Message> {
+        let th = &self.theme;
+        let (dim, fg, divider, accent, sel) = (th.dim, th.foreground, th.divider, th.accent, th.selection);
+        let who = self.ai_name();
+        let title = self.ai_pane_title(format!("system prompt · added to {who}'s own"));
+        let editor = iced::widget::text_editor(&self.ai.prompt)
+            .placeholder("Instructions every message of this agent gets, e.g. “Answer tersely. Never commit.”")
+            .on_action(|a| Message::Ai(Msg::Prompt(a)))
+            .font(self.face.font)
+            .size(12)
+            .padding(8)
+            .height(Length::Fill)
+            .style(move |_: &iced::Theme, status| {
+                let focused = matches!(status, iced::widget::text_editor::Status::Focused { .. });
+                iced::widget::text_editor::Style {
+                    background: Color::TRANSPARENT.into(),
+                    border: Border { color: if focused { accent } else { divider }, width: 1.0, radius: 3.0.into() },
+                    placeholder: dim,
+                    value: fg,
+                    selection: sel,
+                }
+            });
+        let note = match (self.ai_tuning_fixed(), self.ai.agent) {
+            (true, _) => "This agent is under way: a change applies from its next session (clear starts one).",
+            (false, Some(AiAgent::Grok)) => "Grok has no system prompt: this goes at the top of the first message.",
+            _ => "Used from the first message; new agents start with the last one used.",
+        };
+        column![title, self.hrule(), container(editor).padding(8).height(Length::Fill), container(text(note).size(11).color(dim)).padding(Padding { left: 10.0, right: 10.0, top: 0.0, bottom: 8.0 })].into()
+    }
+
+    /// The thinking dropdown: the levels the shown agent's assistant has, and its own default.
+    /// `None` when it has none.
+    fn ai_effort_pick(&self) -> Option<Element<'_, Message>> {
+        let levels = self.ai_efforts();
+        if levels.is_empty() {
+            return None;
+        }
+        let th = &self.theme;
+        let (fg, dim, panel, divider, sel) = (th.foreground, th.dim, th.panel, th.divider, th.selection);
+        let options: Vec<Effort> = std::iter::once(Effort::Default).chain(levels.iter().map(|l| Effort::Level(l.to_string()))).collect();
+        // One picked for another assistant shows as the default, which is what this one gets.
+        let current = Effort::of(&self.ai.effort.clone().filter(|e| levels.contains(&e.as_str())));
+        let pick = pick_list(options, Some(current), |e| Message::Ai(Msg::Effort(e)))
+            .text_size(11)
+            .padding([2, 8])
+            .style(move |_: &iced::Theme, _| pick_list::Style {
+                text_color: fg,
+                placeholder_color: dim,
+                handle_color: dim,
+                background: Color::TRANSPARENT.into(),
+                border: Border { color: divider, width: 1.0, radius: 3.0.into() },
+            })
+            .menu_style(move |_: &iced::Theme| iced::overlay::menu::Style {
+                background: panel.into(),
+                border: Border { color: divider, width: 1.0, radius: 3.0.into() },
+                text_color: fg,
+                selected_text_color: Color::WHITE,
+                selected_background: sel.into(),
+                shadow: Default::default(),
+            });
+        Some(row![text("thinking").size(11).color(dim), pick].spacing(8).align_y(Alignment::Center).into())
     }
 
     fn ai_header(&self) -> Element<'_, Message> {
@@ -885,7 +954,11 @@ impl App {
                 selected_background: sel.into(),
                 shadow: Default::default(),
             });
-        head = head.push(self.ai_side_tabs()).push(text("mode").size(11).color(dim)).push(modes);
+        head = head.push(self.ai_side_tabs());
+        if let Some(effort) = self.ai_effort_pick() {
+            head = head.push(effort);
+        }
+        head = head.push(text("mode").size(11).color(dim)).push(modes);
         let following = self.ai_following() == Some(ai.key);
         head = head.push(key(if following { "◉ following".into() } else { "◉ follow".into() }, if following { th.accent } else { dim }, Msg::Follow));
         if ai.busy && matches!(ai.session, Session::Ready(_)) {
@@ -1324,8 +1397,12 @@ impl App {
         let feed = container(self.ai_feed()).width(Length::FillPortion(5)).height(Length::Fill);
         let body = match ai.drawer {
             None => row![feed],
-            Some(skills) => {
-                let side = if skills { self.ai_drawer() } else { self.ai_terminal() };
+            Some(s) => {
+                let side = match s {
+                    Side::Skills => self.ai_drawer(),
+                    Side::Terminal => self.ai_terminal(),
+                    Side::Prompt => self.ai_prompt_pane(),
+                };
                 row![feed, self.vrule(), container(side).width(Length::FillPortion(4)).height(Length::Fill)]
             }
         };

@@ -26,7 +26,8 @@ iced_runtime = "0.14"
 log = "0.4"
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "advanced", "svg", "image-without-codecs", "markdown", "x11", "wayland", "thread-pool"] }
 # Decoders for the image viewer (iced only draws; codecs are picked here to keep the build lean).
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "webp", "bmp"] }
+# ico also decodes the window icon (main.rs).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "webp", "bmp", "ico"] }
 csv = "1"
 htmd = "0.5"
 usvg = { version = "0.45.1", default-features = false }
@@ -51,6 +52,10 @@ libc = "0.2"
 uds_windows = "1"
 # Letting go of the console window when started from Explorer (main.rs). Already in the tree.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Builds nib.rc into nib.exe: the icon Explorer and the taskbar show (build.rs).
+embed-resource = "3.0.12"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Where the mouse is when a file is dropped on the window (see `drop.rs`). Same versions winit uses.
