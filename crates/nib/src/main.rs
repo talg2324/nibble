@@ -295,6 +295,7 @@ fn main() -> Result<()> {
     .subscription(app::App::subscription)
     .window(iced::window::Settings {
         size: iced::Size::new(window.width, window.height),
+        icon: window_icon(),
         // macOS: no grey system title bar; the app's own black strip shows through (app::TITLEBAR_H).
         #[cfg(target_os = "macos")]
         platform_specific: iced::window::settings::PlatformSpecific {
@@ -316,6 +317,17 @@ fn main() -> Result<()> {
     .antialiasing(false)
     .run()
     .map_err(|e| anyhow::anyhow!("{title}: {e}"))
+}
+
+/// The window's own icon: the title bar and Alt-Tab on Windows, _NET_WM_ICON on X11. (The exe's
+/// icon resource, build.rs, covers Explorer and the taskbar; Wayland and macOS ignore this.)
+fn window_icon() -> Option<iced::window::Icon> {
+    // The largest image in the .ico (256 px).
+    let img = image::load_from_memory_with_format(include_bytes!("../../../assets/icon.ico"), image::ImageFormat::Ico)
+        .ok()?
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    iced::window::icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
 /// Windows: nib.exe is a console program (so `nib ctl` and the other subcommands print, and
