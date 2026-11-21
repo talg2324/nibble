@@ -66,4 +66,4 @@ switch ($What) {
     'client' { Build-Client }
     'daemons' { Build-Daemons }
 }
-Write-Host "done: $((Get-ChildItem dist -Recurse -File -Filter 'nib*' | ForEach-Object { $_.FullName.Substring($NibRoot.Length + 1) }) -join ' ')"
+Write-Host "done: $((Get-ChildItem dist -Recurse -File -Filter 'nib*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($NibRoot.Length + 1) }) -join ' ')"

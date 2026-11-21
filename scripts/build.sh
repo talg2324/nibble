@@ -87,4 +87,8 @@ case "$what" in
   daemons) build_daemons ;;
   *) sed -n '2,20p' "$0"; exit 1 ;;
 esac
-echo "done: $(cd dist && find . -name 'nib*' -type f | sort | tr '\n' ' ')"
+if [ -d dist ]; then
+  echo "done: $(cd dist && find . -name 'nib*' -type f | sort | tr '\n' ' ')"
+else
+  echo "done: nothing built"
+fi

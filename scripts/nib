@@ -22,11 +22,16 @@ command -v cargo >/dev/null || { echo "nib: cargo not found (brew install rustup
 cargo build --quiet --profile fast -p nib -p nibd --manifest-path "$ROOT/Cargo.toml"
 
 # Remote daemons are uploaded by content hash, so a stale one is reused silently and the remote
-# refuses the handshake. Rebuild them when nibd's sources are newer than any of them.
+# refuses the handshake. Rebuild them when nibd's sources are newer than any of them. None built
+# yet: build them once the musl targets are installed, else stay quiet (local use doesn't need
+# them; scripts/build.sh daemons says what to install).
 daemons_stale() {
   local d
   for d in "$ROOT"/dist/daemons/*/nibd; do
-    [ -f "$d" ] || return 0
+    if [ ! -f "$d" ]; then
+      rustup target list --installed 2>/dev/null | grep -q -- '-unknown-linux-musl$'
+      return
+    fi
     [ -n "$(find "$ROOT/crates/nibd" "$ROOT/crates/nib-proto" "$ROOT/Cargo.lock" -newer "$d" -type f -print -quit)" ] && return 0
   done
   return 1
