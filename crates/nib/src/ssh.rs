@@ -123,7 +123,7 @@ pub fn probe(host: &SshHost, root: &str, nibd: Option<&str>) -> Probe {
     let tmp = temp_file("probe");
     let mut files = vec![tmp.to_string_lossy().into_owned()];
     files.extend(resolved.known_hosts.iter().cloned());
-    let mut c = Command::new("ssh");
+    let mut c = crate::transport::command("ssh");
     c.arg("-T")
         .args(["-o", "StrictHostKeyChecking=accept-new", "-o"])
         .arg(format!("UserKnownHostsFile={}", files.join(" ")))
@@ -347,7 +347,7 @@ struct Resolved {
 
 /// What ssh's own config says for `host` (`ssh -G`).
 fn resolve(host: &SshHost) -> Resolved {
-    let out = Command::new("ssh").arg("-G").args(host.args()).arg(&host.host).output();
+    let out = crate::transport::command("ssh").arg("-G").args(host.args()).arg(&host.host).output();
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     let known_hosts = text
         .lines()
@@ -358,7 +358,7 @@ fn resolve(host: &SshHost) -> Resolved {
 }
 
 fn fingerprints(file: &Path) -> Vec<String> {
-    Command::new("ssh-keygen")
+    crate::transport::command("ssh-keygen")
         .arg("-lf")
         .arg(file)
         .output()

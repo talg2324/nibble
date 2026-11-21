@@ -164,14 +164,8 @@ fn out_dir(path: &Path, out: Option<PathBuf>) -> Result<PathBuf, String> {
     Ok(base.join("gif").join(stem))
 }
 
-#[cfg(unix)]
 fn base_dir() -> Result<PathBuf, String> {
     crate::control::run_base().map_err(|e| e.to_string())
-}
-
-#[cfg(not(unix))]
-fn base_dir() -> Result<PathBuf, String> {
-    Ok(std::env::temp_dir().join("nib"))
 }
 
 fn run(args: &[String]) -> Result<Value, String> {

@@ -20,7 +20,7 @@ use nib_editor::keymap::{Key, KeyChord};
 use nib_editor::Command;
 use nib_proto::{FsOp, GitChange, GitInfo, GitOp, Place, Request, Response, RpcError, TreeEntry, TreeSnapshot};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const WIDTH: f32 = 320.0;
@@ -782,12 +782,22 @@ impl App {
 
     /// Open tabs of a renamed file (or of files in a renamed folder) follow it.
     fn tabs_renamed(&mut self, from: &str, to: &str) {
-        let (from, to) = (PathBuf::from(self.tree_abs(from)), PathBuf::from(self.tree_abs(to)));
+        // Daemon paths, `/`-separated (nib_proto::path): matched and joined as strings, since
+        // `PathBuf` would split and join them the local way (`\` on Windows).
+        let (from, to) = (self.tree_abs(from), self.tree_abs(to));
+        let under = format!("{}/", from.trim_end_matches('/'));
         for i in 0..self.tabs.len() {
-            let Some(rest) = self.tabs[i].doc.path.as_ref().filter(|_| !self.tabs[i].local).and_then(|p| p.strip_prefix(&from).ok()) else {
+            let Some(p) = self.tabs[i].doc.path.as_ref().filter(|_| !self.tabs[i].local).map(|p| p.to_string_lossy().into_owned()) else {
                 continue;
             };
-            let new = if rest == Path::new("") { to.clone() } else { to.join(rest) };
+            let new = if p == from {
+                to.clone()
+            } else if let Some(rest) = p.strip_prefix(&under) {
+                format!("{}/{rest}", to.trim_end_matches('/'))
+            } else {
+                continue;
+            };
+            let new = PathBuf::from(new);
             // The language server knows the buffer by its old path.
             self.lsp_close(i);
             let t = &mut self.tabs[i];
@@ -1737,7 +1747,7 @@ mod tests {
         key(&mut a, "enter");
         let id = sent(&a, |p| matches!(p, Pending::TreeFs { renamed: Some(_), .. }));
         let _ = a.on_server(nib_proto::ServerMsg::Response { id, result: Ok(Response::Ok) });
-        assert_eq!(a.tabs[0].doc.path.as_deref(), Some(Path::new("/tmp/src/start.rs")));
+        assert_eq!(a.tabs[0].doc.path.as_deref(), Some(std::path::Path::new("/tmp/src/start.rs")));
 
         // d asks first; a folder and a file inside it are one deletion.
         a.tree.go_to("src/app");

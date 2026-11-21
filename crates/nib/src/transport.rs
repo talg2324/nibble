@@ -149,7 +149,7 @@ pub fn daemon_for(uname: &str) -> std::result::Result<PathBuf, String> {
 /// carries end: a window leaving a host leaves no logged-in connection behind (another window
 /// still connected there keeps its session). Without this the master lingers `ControlPersist`.
 fn stop_mux(host: &SshHost) {
-    let _ = Command::new("ssh")
+    let _ = command("ssh")
         .args(["-o", "ControlPath=~/.ssh/nib-%C", "-O", "stop"])
         .args(host.args())
         .arg(&host.host)
@@ -184,6 +184,7 @@ impl Launch {
 }
 
 fn launch(mut cmd: Command, label: String) -> Result<Launch> {
+    no_console_window(&mut cmd);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr_log(&label));
@@ -233,6 +234,26 @@ fn launch(mut cmd: Command, label: String) -> Result<Launch> {
         Conn::new(child, stdin, label),
         stdout,
     ))
+}
+
+/// Windows: start `cmd` without a console window of its own. The window may have no console to
+/// share (see `detach_own_console` in main.rs), and every background `ssh` or `nibd` would flash
+/// one. What it starts in turn (git, shells, language servers) shares its hidden console.
+pub fn no_console_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// `Command::new` for something run in the background (see `no_console_window`).
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut c = Command::new(program);
+    no_console_window(&mut c);
+    c
 }
 
 fn local_nibd() -> Result<PathBuf> {
@@ -309,7 +330,7 @@ fn stderr_log(label: &str) -> Stdio {
 ///   never waits on a terminal nobody is looking at.
 /// `extra` goes first: for ssh the first value given for an option wins.
 pub fn ssh_command(host: &SshHost, env: &SshEnv, extra: &[&str]) -> Command {
-    let mut c = Command::new("ssh");
+    let mut c = command("ssh");
     c.arg("-T").args(extra).args(["-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15"]);
     if env.batch {
         c.args(["-o", "BatchMode=yes"]);
@@ -548,10 +569,18 @@ pub fn read_loop(
     }
 }
 
-/// A connection to `cat` (discards everything): lets tests drive the real `App`.
+/// A connection to a process that reads and discards everything (`cat`; `findstr` on Windows,
+/// which has no `cat`): lets tests drive the real `App`.
 #[cfg(test)]
 pub fn sink() -> Conn {
-    let mut child = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("findstr");
+        c.arg("^");
+        c
+    } else {
+        Command::new("cat")
+    };
+    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
     let stdin = child.stdin.take().unwrap();
     Conn::new(child, stdin, "test".into())
 }
@@ -560,7 +589,9 @@ pub fn sink() -> Conn {
 mod tests {
     use super::*;
 
+    // The remote bootstrap is POSIX sh run on the remote; these run it with a local `sh`.
     #[test]
+    #[cfg(unix)]
     fn paths_quoted_for_sh_keep_the_home_tilde() {
         assert_eq!(sh_path("~"), "\"$HOME\"");
         assert_eq!(sh_path("~/bin/nibd"), "\"$HOME\"'/bin/nibd'");
@@ -579,6 +610,7 @@ mod tests {
 
     /// Runs the bootstrap snippet with a local `sh`, simulating a remote with a fake HOME.
     #[test]
+    #[cfg(unix)]
     fn bootstrap_fast_path_and_miss() {
         let home = std::env::temp_dir().join(format!("nib-boot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);

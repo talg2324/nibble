@@ -344,7 +344,7 @@ impl State {
                     ));
                 }
                 let root = fs_ops::expand_home(&root);
-                let root = root.canonicalize().map_err(|e| {
+                let root = nib_proto::path::canonical(&root).map_err(|e| {
                     RpcError::new(
                         ErrorKind::NotFound,
                         format!("project root {}: {e}", root.display()),
@@ -355,11 +355,11 @@ impl State {
                     .inspect_err(|e| eprintln!("nibd: scratch / NIBDIR: {e}"))
                     .ok();
                 let lsp = lsp::Lsp::new(root.clone(), &lsp, self.tx.clone());
-                let path_of = |p: Option<&PathBuf>| p.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                let path_of = |p: Option<&PathBuf>| p.map(|p| nib_proto::path::to_wire(p)).unwrap_or_default();
                 let resp = Response::Hello {
                     protocol: PROTOCOL_VERSION,
                     daemon_version: env!("CARGO_PKG_VERSION").into(),
-                    root: root.to_string_lossy().into_owned(),
+                    root: nib_proto::path::to_wire(&root),
                     scratch: path_of(self.places.as_ref().map(|p| &p.scratch)),
                     nibdir: path_of(self.places.as_ref().map(|p| &p.nibdir)),
                     hostname: fs_ops::hostname(),

@@ -251,7 +251,7 @@ impl App {
                     call.err("open needs \"path\"");
                     return Task::none();
                 };
-                let path = if p.starts_with('/') { p.to_owned() } else { format!("{}/{p}", self.root.trim_end_matches('/')) };
+                let path = nib_proto::path::join(&self.root, p);
                 // `line` (1-based): the cursor goes there, scrolled into view.
                 let goto = call.req.get("line").and_then(Value::as_u64).map(|l| nib_proto::Pos { line: (l as u32).saturating_sub(1), col: 0 });
                 let t = self.open_path_at(path.clone(), true, goto);

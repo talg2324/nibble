@@ -528,8 +528,7 @@ fn find_exe(root: &Path, name: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&p));
     }
-    if let Some(h) = std::env::var_os("HOME") {
-        let h = PathBuf::from(h);
+    if let Some(h) = nib_proto::path::home_dir() {
         dirs.extend([h.join(".local/bin"), h.join(".cargo/bin"), h.join("go/bin")]);
     }
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
@@ -699,7 +698,7 @@ impl<'a> Lines<'a> {
         let start = self.pos(&path, &range["start"], enc);
         let end = self.pos(&path, &range["end"], enc);
         let line_text = self.line(&path, start.line).unwrap_or_default().to_string();
-        Location { path: path.to_string_lossy().into_owned(), start, end, line_text }
+        Location { path: nib_proto::path::to_wire(&path), start, end, line_text }
     }
 }
 
@@ -791,7 +790,7 @@ fn convert(q: &Query, result: &Value, enc: Encoding, lines: &mut Lines) -> Respo
                             new_text: e["newText"].as_str().unwrap_or_default().to_string(),
                         })
                         .collect();
-                    FileEdit { path: path.to_string_lossy().into_owned(), edits }
+                    FileEdit { path: nib_proto::path::to_wire(&path), edits }
                 })
                 .collect();
             Response::Edits(files)
@@ -933,9 +932,12 @@ fn uri_to_path(uri: &str) -> PathBuf {
         i += 1;
     }
     let s = String::from_utf8_lossy(&out).into_owned();
-    // file:///C:/x -> C:/x
+    // file:///C:/x -> C:/x; servers may send a lowercase drive (file:///c%3A/x), and the client
+    // compares paths as strings, so make it the uppercase one canonicalize gives.
     if cfg!(windows) && s.len() > 2 && s.as_bytes()[2] == b':' {
-        return PathBuf::from(&s[1..]);
+        let mut d = s[1..].to_string();
+        d[..1].make_ascii_uppercase();
+        return PathBuf::from(d);
     }
     PathBuf::from(s)
 }
@@ -1032,7 +1034,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nibd-lsp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = dir.canonicalize().unwrap();
+        // As the daemon makes a root: `canonicalize` alone gives `\\?\C:\…` on Windows.
+        let dir = nib_proto::path::canonical(&dir).unwrap();
         if find_ty(&dir).is_none() {
             eprintln!("ty not installed; skipping");
             return;

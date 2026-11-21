@@ -262,6 +262,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if !bench {
+        detach_own_console();
+    }
+
     iced::application(
         move || {
             let (init, syn_rx, ctl_rx) = init.lock().unwrap().take().expect("boot runs once");
@@ -293,5 +297,31 @@ fn main() -> Result<()> {
     .run()
     .map_err(|e| anyhow::anyhow!("{title}: {e}"))
 }
+
+/// Windows: nib.exe is a console program (so `nib ctl` and the other subcommands print, and
+/// shells wait for them), which gives it a console window of its own when started from Explorer
+/// or a shortcut. The editor window doesn't need one: let it go when nothing else is using it.
+/// Started from a terminal, the terminal is shared and stays. What nib starts later (nibd, git,
+/// ssh) is started without a console window (`transport::no_console_window`).
+#[cfg(windows)]
+fn detach_own_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    let mut pids = [0u32; 2];
+    // SAFETY: plain Win32 calls; the buffer is as long as the count passed.
+    unsafe {
+        if GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) != 1 {
+            return;
+        }
+        FreeConsole();
+        // The old handles now point at nothing; with none at all, Rust's stdout and stderr
+        // discard writes instead of failing.
+        for h in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            SetStdHandle(h, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn detach_own_console() {}
 
 use iced::Task;

@@ -1151,7 +1151,7 @@ impl App {
             call.err("ssh.root needs \"path\"");
             return Task::none();
         };
-        let abs = if p.starts_with('/') {
+        let abs = if nib_proto::path::is_abs(&p) {
             p
         } else if p.starts_with('~') {
             if self.remote_home.is_none() {

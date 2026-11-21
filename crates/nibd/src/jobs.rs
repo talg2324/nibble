@@ -355,7 +355,8 @@ fn edit_patterns(cwd: &Path, write: &[String]) -> Vec<String> {
         let abs = resolve(cwd, p);
         let abs = abs.to_string_lossy().replace('\\', "/");
         let mut bases: Vec<PathBuf> = repo_root(cwd).into_iter().collect();
-        bases.push(PathBuf::from("/"));
+        // The filesystem root: `/`, or the drive (`C:/`) on Windows.
+        bases.push(Path::new(&abs).ancestors().last().map_or_else(|| PathBuf::from("/"), Path::to_path_buf));
         for base in bases {
             let base = base.to_string_lossy().replace('\\', "/");
             let base = base.trim_end_matches('/');

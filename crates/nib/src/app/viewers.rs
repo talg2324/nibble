@@ -490,7 +490,7 @@ impl App {
         }
         if Kind::of(Path::new(&path)) == Kind::Video {
             // Not read: videos are large and nothing here can decode them.
-            let abs = if path.starts_with('/') { path } else { format!("{}/{}", self.root, path) };
+            let abs = nib_proto::path::join(&self.root, &path);
             self.put_media(PathBuf::from(abs), Media::Unsupported("Video"), new_tab);
             return Task::none();
         }

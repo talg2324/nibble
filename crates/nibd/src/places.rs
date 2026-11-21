@@ -10,6 +10,9 @@
 //! - **scratch** (`$NIB_SCRATCH`): one per daemon session:
 //!   `<XDG_CACHE_HOME or ~/.cache>/nib/scratch/<project name>-<pid>/`. Deleted once its daemon is
 //!   gone and nothing in it changed for a day.
+//!
+//! On Windows (no XDG variables set) both live under `%LOCALAPPDATA%\nib\`: `data\nibdir\…` and
+//! `cache\scratch\…`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -30,6 +33,14 @@ pub(crate) fn xdg(var: &str, fallback: &[&str]) -> PathBuf {
     // Tests send Hello many times: keep them out of the real home directory.
     if cfg!(test) {
         return std::env::temp_dir().join("nibd-test-places").join(var);
+    }
+    // Windows: `%LOCALAPPDATA%\nib\cache` / `\data` unless XDG is set on purpose (next to the
+    // logs nib keeps in `%LOCALAPPDATA%\nib`; dot-folders in the profile are a Unix habit).
+    if cfg!(windows) && std::env::var_os(var).is_none() {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let kind = if var == "XDG_CACHE_HOME" { "cache" } else { "data" };
+            return PathBuf::from(local).join("nib").join(kind);
+        }
     }
     std::env::var_os(var)
         .map(PathBuf::from)
@@ -57,7 +68,8 @@ const TEMP_NIBDIR: &str = ".nibdir";
 /// `root` (canonical) is inside a temp directory.
 fn in_temp(root: &Path) -> bool {
     let tmp = std::env::temp_dir();
-    let tmp = tmp.canonicalize().unwrap_or(tmp);
+    // Canonical the way the root is (no `\\?\` on Windows), or the two never match.
+    let tmp = nib_proto::path::canonical(&tmp).unwrap_or(tmp);
     root.starts_with(&tmp)
         || ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/private/var/folders"].iter().any(|t| root.starts_with(t))
 }
@@ -122,6 +134,24 @@ fn alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
     }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: plain Win32 calls on a handle we open and close here.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                // No such process; or one we may not query (another user's), which is not ours.
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code) != 0;
+            CloseHandle(h);
+            return ok && code == STILL_ACTIVE as u32;
+        }
+    }
+    #[allow(unreachable_code)]
     if Path::new("/proc/self").exists() {
         return Path::new(&format!("/proc/{pid}")).exists();
     }
@@ -168,7 +198,7 @@ mod tests {
 
     #[test]
     fn temp_projects() {
-        assert!(in_temp(&std::env::temp_dir().canonicalize().unwrap().join("x")));
+        assert!(in_temp(&nib_proto::path::canonical(&std::env::temp_dir()).unwrap().join("x")));
         assert!(in_temp(Path::new("/tmp/proj")));
         assert!(!in_temp(Path::new("/Users/me/src/nibble")) && !in_temp(Path::new("/home/me/src/nibble")));
     }

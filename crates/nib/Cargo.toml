@@ -44,6 +44,12 @@ raw-window-handle = "0.6"
 # getuid, for the control socket's private directory.
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# AF_UNIX sockets on Windows 10 1803+ (std has them on Unix only): the control socket.
+uds_windows = "1"
+# Letting go of the console window when started from Explorer (main.rs). Already in the tree.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Where the mouse is when a file is dropped on the window (see `drop.rs`). Same versions winit uses.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow"] }

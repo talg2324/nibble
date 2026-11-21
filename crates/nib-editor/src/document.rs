@@ -31,6 +31,9 @@ pub struct Document {
     pub syntax: Option<Syntax>,
     pub read_only: bool,
     pub tab_width: usize,
+    /// What Enter and paste insert: the file's own line ending (`"\r\n"` for a CRLF file, as git
+    /// checks text out on Windows), so editing never mixes the two. `"\n"` for new files.
+    pub line_ending: &'static str,
     history: History,
     pending: Option<(Transaction, State, Instant)>,
     saved_revision: usize,
@@ -38,6 +41,18 @@ pub struct Document {
     goal_col: Option<usize>,
     /// Bumped on every text change (edits, undo, redo); lets derived views know when to refresh.
     version: u64,
+}
+
+/// `"\r\n"` when the text's first line break is CRLF, else `"\n"`.
+fn detect_line_ending(text: &Rope) -> &'static str {
+    let mut prev = '\0';
+    for c in text.chars().take(64 * 1024) {
+        if c == '\n' {
+            return if prev == '\r' { "\r\n" } else { "\n" };
+        }
+        prev = c;
+    }
+    "\n"
 }
 
 impl Document {
@@ -51,7 +66,9 @@ impl Document {
 
     /// Without syntax; call `attach_syntax` later (keeps first paint off the query-compile path).
     pub fn new_plain(text: Rope, path: Option<PathBuf>) -> Self {
+        let line_ending = detect_line_ending(&text);
         Self {
+            line_ending,
             text,
             selection: Selection::point(0),
             path,
@@ -246,6 +263,7 @@ impl Document {
         let text = self.text.slice(..);
         let is_py = self.language_name() == "python";
         let tab = self.tab_width;
+        let le = self.line_ending;
         let tx = Transaction::change_by_selection(&self.text, &self.selection, |r| {
             let line = text.char_to_line(r.from());
             let line_start = text.line_to_char(line);
@@ -257,7 +275,7 @@ impl Document {
             if is_py && before.trim_end().ends_with(':') {
                 indent.push_str(&" ".repeat(tab));
             }
-            (r.from(), r.to(), Some(format!("\n{indent}").into()))
+            (r.from(), r.to(), Some(format!("{le}{indent}").into()))
         });
         let sel = self
             .selection
@@ -489,19 +507,23 @@ impl Document {
 
     pub fn paste(&mut self, s: &str) {
         self.commit_pending();
-        let s = s.replace("\r\n", "\n");
+        let mut s = s.replace("\r\n", "\n");
+        if self.line_ending != "\n" {
+            s = s.replace('\n', self.line_ending);
+        }
         self.insert(&s, EditKind::Discrete);
     }
 
     pub fn duplicate_line(&mut self) {
         let lines = self.selected_lines();
         let text = self.text.slice(..);
+        let le = self.line_ending;
         let tx = Transaction::change(
             &self.text,
             lines.iter().map(|&l| {
                 let mut s: String = text.line(l).chars().collect();
                 if !s.ends_with('\n') {
-                    s.insert(0, '\n');
+                    s.insert_str(0, le);
                 }
                 let p = if l + 1 < text.len_lines() || text.line(l).chars().last() == Some('\n') {
                     text.line_to_char(l + 1)

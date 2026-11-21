@@ -140,9 +140,12 @@ fn install_dirs(agent: AiAgent) -> Vec<PathBuf> {
 /// Where the assistant's binary is: on `PATH`, or where its installer puts it.
 fn find(agent: AiAgent) -> Option<PathBuf> {
     let exe = spec(agent).exe;
-    let exe = if cfg!(windows) { format!("{exe}.exe") } else { exe.to_string() };
+    // Windows: the native installers make `.exe`s; npm makes `.cmd` shims, which `Command` runs
+    // through cmd.exe (with the arguments escaped for it).
+    let names: Vec<String> = if cfg!(windows) { vec![format!("{exe}.exe"), format!("{exe}.cmd")] } else { vec![exe.to_string()] };
     let on_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
-    on_path.into_iter().chain(install_dirs(agent)).map(|d| d.join(&exe)).find(|p| p.is_file())
+    let dirs: Vec<PathBuf> = on_path.into_iter().chain(install_dirs(agent)).collect();
+    names.iter().find_map(|n| dirs.iter().map(|d| d.join(n)).find(|p| p.is_file()))
 }
 
 /// `PATH` with every assistant's install folder in front, for the setup terminal: what it
@@ -1322,9 +1325,35 @@ fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
     Some(dir.to_path_buf())
 }
 
+/// Windows: symlinks need Developer Mode or admin, so the skill folders are copied instead.
 #[cfg(not(unix))]
-fn link_plugin(_dir: &Path, _skills: &[AiSkill]) -> Option<PathBuf> {
-    None
+fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
+    fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            if e.file_type()?.is_dir() {
+                copy_dir(&e.path(), &to.join(e.file_name()))?;
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name()))?;
+            }
+        }
+        Ok(())
+    }
+    // Not offered unless the user opted in at install (D-044).
+    let skills: Vec<&AiSkill> = skills.iter().filter(|s| s.name != "nib-upstream").collect();
+    if skills.is_empty() {
+        return None;
+    }
+    std::fs::create_dir_all(dir.join(".claude-plugin")).ok()?;
+    std::fs::write(dir.join(".claude-plugin/plugin.json"), r#"{"name":"nib","description":"Skills for working in the nibble editor","version":"0.1.0"}"#).ok()?;
+    let copies = dir.join("skills");
+    let _ = std::fs::remove_dir_all(&copies);
+    for s in skills {
+        let folder = Path::new(&s.path).parent()?;
+        copy_dir(folder, &copies.join(folder.file_name()?)).ok()?;
+    }
+    Some(dir.to_path_buf())
 }
 
 /// Base64, for pictures in a message.
@@ -2084,6 +2113,7 @@ fn pid(session: &Session) -> Option<u32> {
 }
 
 /// `pid` and everything it started, parents first, from `ps`'s `pid ppid` lines.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn descendants(pid: u32, table: &str) -> Vec<u32> {
     let pairs: Vec<(u32, u32)> = table
         .lines()

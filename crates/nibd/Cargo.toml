@@ -14,3 +14,7 @@ portable-pty = "0.9"
 serde = { workspace = true, features = ["derive"] }
 # Fuzzy file-name matching for search (the version helix-core uses, so it builds once).
 nucleo = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+# Process liveness (places.rs) and hiding child consoles. Already in the tree via other crates.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

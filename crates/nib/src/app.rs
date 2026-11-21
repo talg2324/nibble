@@ -217,6 +217,24 @@ const HIDE_TERMS_KEY: Key = Key::Char('h');
 /// Ctrl+B (`Command::FocusToolbar` on macOS) belongs to the shell.
 const TOOLBAR_KEY: Key = Key::Char('b');
 
+/// What a terminal asks of its emulator in `data` and vt100 doesn't answer: the cursor position
+/// (`ESC[6n` → `ESC[row;colR`, 1-based) and device status (`ESC[5n` → `ESC[0n`). Windows' ConPTY
+/// asks for the cursor when a shell starts and shows nothing until it hears back.
+fn status_replies(data: &[u8], screen: &vt100::Screen) -> Vec<u8> {
+    let mut out = Vec::new();
+    for w in data.windows(4) {
+        match w {
+            b"\x1b[6n" => {
+                let (row, col) = screen.cursor_position();
+                out.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+            }
+            b"\x1b[5n" => out.extend_from_slice(b"\x1b[0n"),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Commands that work wherever keyboard focus is (terminal, explorer, toolbar).
 /// One line of a text box that doesn't wrap: when it's wider than the box, the box shows its end
 /// (where the caret is) instead of clipping it off.
@@ -789,8 +807,13 @@ impl App {
             ServerMsg::Notify(ServerNotify::Log { msg, .. }) => return self.flash_info(msg),
             ServerMsg::Notify(ServerNotify::Pong { .. }) => return Task::none(),
             ServerMsg::Notify(ServerNotify::PtyOutput { id, data }) => {
+                let mut reply = Vec::new();
                 if let Some(t) = self.terms.iter_mut().find(|t| t.id == Some(id)) {
                     t.parser.process(&data);
+                    reply = status_replies(&data, t.parser.screen());
+                }
+                if !reply.is_empty() {
+                    self.notify(ClientNotify::PtyInput { id, data: reply });
                 }
                 return Task::none();
             }
@@ -897,7 +920,7 @@ impl App {
             (Pending::Lsp { tab, version, op }, result) => self.on_lsp(tab, version, op, result),
             (Pending::ApplyEdits, Ok(_)) => Task::none(),
             (Pending::Open { path, new_tab, .. }, Err(e)) if e.kind == ErrorKind::NotFound => {
-                let abs = if path.starts_with('/') { path.clone() } else { format!("{}/{}", self.root, path) };
+                let abs = nib_proto::path::join(&self.root, &path);
                 let mut doc = Document::new(Default::default(), Some(PathBuf::from(abs)));
                 doc.tab_width = self.tab_width;
                 self.put_doc(doc, new_tab);

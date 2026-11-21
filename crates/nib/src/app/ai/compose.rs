@@ -17,7 +17,7 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Border, Element, Length, Task};
 use nib_editor::keymap::{Key, KeyChord};
 use nib_proto::{AiAgent, AiAttach, AiSkill, ClientNotify, SkillGroup, TreeEntry};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub(super) struct SlashCmd {
     pub name: &'static str,
@@ -414,7 +414,7 @@ impl App {
 
     /// Where a `@` mention points.
     fn mention_path(&self, path: &str) -> PathBuf {
-        if path.starts_with('/') { PathBuf::from(path) } else { Path::new(&self.root).join(path.trim_end_matches('/')) }
+        PathBuf::from(nib_proto::path::join(&self.root, path.trim_end_matches('/')))
     }
 
     /// Each GIF the message mentions goes with it as a sheet of its distinct frames (models see

@@ -8,7 +8,7 @@ use iced::widget::markdown::{self, Bullet, Item};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 /// HTML -> Markdown. Never fails: unparseable input falls back to the raw text.
 pub fn html_to_markdown(html: &str) -> String {
@@ -527,21 +527,31 @@ pub fn resolve(doc: &Path, url: &str) -> Target {
     if path.is_empty() {
         return Target::Other;
     }
-    let joined = doc.parent().unwrap_or(Path::new("")).join(path);
+    // `file:///C:/x` → `C:/x`.
+    let path = match path.as_bytes() {
+        [b'/', d, b':', b'/', ..] if d.is_ascii_alphabetic() => path[1..].to_string(),
+        _ => path,
+    };
+    // Paths are the daemon's (`/`-separated, see nib_proto::path), not this machine's: joined as
+    // strings, since `Path::join` would put `\` in them on Windows.
+    let doc = doc.to_string_lossy();
+    let dir = doc.rfind('/').map_or("", |i| &doc[..i]);
+    let joined = nib_proto::path::join(dir, &path);
     // Fold `.` and `..` so the same file always has the same name.
-    let mut out = PathBuf::new();
-    for c in joined.components() {
+    let abs = joined.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for c in joined.split('/') {
         match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
+            "" | "." => {}
+            ".." if out.last().is_some_and(|l| *l != "..") => {
+                out.pop();
             }
+            ".." if abs => {}
             c => out.push(c),
         }
     }
-    Target::File(out.to_string_lossy().into_owned())
+    let s = out.join("/");
+    Target::File(if abs { format!("/{s}") } else { s })
 }
 
 #[cfg(test)]
@@ -653,6 +663,10 @@ End `<img src="code.png">`.
         assert_eq!(resolve(doc, "./other.md"), file("/proj/docs/other.md"));
         assert_eq!(resolve(doc, "/abs/x.png"), file("/abs/x.png"));
         assert_eq!(resolve(doc, "file:///abs/x.png"), file("/abs/x.png"));
+        // A Windows daemon's paths, whatever this machine is.
+        let win = Path::new("C:/proj/docs/readme.md");
+        assert_eq!(resolve(win, "../img/a.png"), file("C:/proj/img/a.png"));
+        assert_eq!(resolve(win, "file:///D:/x/y.png"), file("D:/x/y.png"));
         assert_eq!(resolve(doc, "HTTPS://example.com/a"), Target::External("HTTPS://example.com/a".into()));
         assert_eq!(resolve(doc, "mailto:a@b.c"), Target::External("mailto:a@b.c".into()));
         assert_eq!(resolve(doc, "#section"), Target::Other);

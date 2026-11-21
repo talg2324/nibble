@@ -11,7 +11,9 @@
 //! dead and whose log is older than a day are pruned. The protocol is JSON lines: one request
 //! object per line (`{"cmd": "state"}`), one reply per line (`{"ok": true, ...}` or
 //! `{"ok": false, "error": "..."}`). `nib ctl` is the client; `App::on_control` answers.
-//! Everything is private to the user (0700 directories, 0600 socket). Unix only for now.
+//! Everything is private to the user (0700 directories, 0600 socket). On Windows the socket is
+//! an AF_UNIX one too (Windows 10 1803+), in the per-user temp directory, whose ACL keeps it
+//! private.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -19,7 +21,6 @@ use std::sync::{mpsc, Arc, Mutex};
 
 /// How long a connection waits for the app to answer one request. A person typing a password,
 /// and ssh connecting (and uploading nibd), take longer than the rest.
-#[cfg(unix)]
 fn reply_timeout(req: &Value) -> std::time::Duration {
     let secs = match req.get("cmd").and_then(Value::as_str).unwrap_or("") {
         "askpass" => 600,
@@ -138,18 +139,39 @@ impl Drop for Guard {
     }
 }
 
-#[cfg(unix)]
 mod sys {
     use super::*;
     use anyhow::{bail, Context, Result};
     use std::io::{BufRead, BufReader, Write};
+    #[cfg(unix)]
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    #[cfg(unix)]
     use std::os::unix::net::{UnixListener, UnixStream};
+    #[cfg(windows)]
+    use uds_windows::{UnixListener, UnixStream};
 
     /// Run directories older than this, with a dead socket, are deleted.
     const KEEP: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+    /// Directory holding every window's run directory: `%TEMP%\nib`, which is per-user
+    /// (`%LOCALAPPDATA%\Temp`, readable by this user only).
+    #[cfg(windows)]
+    pub fn base() -> Result<PathBuf> {
+        let d = std::env::temp_dir().join("nib");
+        std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
+        Ok(d)
+    }
+
+    /// A new private directory (0700 on Unix; Windows: inherits the per-user temp ACL).
+    fn private_dir(d: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        return std::fs::DirBuilder::new().mode(0o700).create(d);
+        #[cfg(not(unix))]
+        std::fs::create_dir(d)
+    }
+
     /// Directory holding every window's run directory, created private to this user.
+    #[cfg(unix)]
     pub fn base() -> Result<PathBuf> {
         let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         // SAFETY: getuid has no preconditions and cannot fail.
@@ -192,9 +214,9 @@ mod sys {
         prune(&base);
         let dir = base.join(std::process::id().to_string());
         let _ = std::fs::remove_dir_all(&dir); // a previous process with the same pid
-        std::fs::DirBuilder::new().mode(0o700).create(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        private_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let sock = custom.unwrap_or_else(|| dir.join("ctl.sock"));
-        // sun_path is 104 bytes on macOS, 108 on Linux, including the NUL.
+        // sun_path is 104 bytes on macOS, 108 on Linux and Windows, including the NUL.
         if sock.as_os_str().len() > 103 {
             bail!("socket path {} is too long for a unix socket (max 103 bytes); pick a shorter NIB_CONTROL", sock.display());
         }
@@ -203,6 +225,7 @@ mod sys {
         }
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).with_context(|| format!("binding {}", sock.display()))?;
+        #[cfg(unix)]
         std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
 
         let log_path = dir.join("nib.log");
@@ -324,34 +347,17 @@ mod sys {
     }
 }
 
-#[cfg(unix)]
 pub use sys::serve;
-#[cfg(unix)]
 pub use sys::base as run_base;
 
 /// Send one request to a window's socket and read its reply.
-#[cfg(unix)]
 pub fn request(sock: &Path, req: &Value) -> anyhow::Result<Value> {
     sys::call(sock, req)
-}
-
-#[cfg(not(unix))]
-pub fn request(_sock: &Path, _req: &Value) -> anyhow::Result<Value> {
-    anyhow::bail!("the control socket is not available on this OS yet")
 }
 
 /// This window's socket, if it has one (the askpass helper reports back to it).
 pub fn socket() -> Option<PathBuf> {
     session()?.get("socket")?.as_str().map(PathBuf::from)
-}
-
-#[cfg(not(unix))]
-pub fn serve<M: Send + 'static>(
-    _out: iced::futures::channel::mpsc::UnboundedSender<M>,
-    _wrap: fn(Call) -> M,
-    _meta: Value,
-) -> anyhow::Result<Option<Guard>> {
-    Ok(None)
 }
 
 pub const CTL_USAGE: &str = "\
@@ -423,12 +429,6 @@ pub fn ctl_main(args: &[String]) -> i32 {
     }
 }
 
-#[cfg(not(unix))]
-fn ctl(_args: &[String]) -> anyhow::Result<bool> {
-    anyhow::bail!("the control socket is not available on this OS yet")
-}
-
-#[cfg(unix)]
 fn ctl(args: &[String]) -> anyhow::Result<bool> {
     use anyhow::{bail, Context};
     use std::path::PathBuf;
@@ -555,7 +555,6 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
 }
 
 /// `nib ctl ssh …` as a request.
-#[cfg(unix)]
 fn ssh_request(a: &[&str]) -> anyhow::Result<Value> {
     use anyhow::{bail, Context};
     let (verb, rest) = a.split_first().context("ssh: list, add, update, remove, test, connect or cancel")?;
@@ -598,7 +597,6 @@ fn ssh_request(a: &[&str]) -> anyhow::Result<Value> {
 }
 
 /// `\n`, `\t` and `\\` in `type` text, so a shell argument can carry Enter and Tab.
-#[cfg(unix)]
 fn unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();

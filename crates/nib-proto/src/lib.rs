@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 pub mod frame;
+pub mod path;
 pub mod skills;
 pub use frame::{read_frame, write_frame, FrameError, MAX_FRAME};
 

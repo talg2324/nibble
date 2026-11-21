@@ -1,3 +1,4 @@
+use nib_proto::path::{canonical, to_wire};
 use nib_proto::{DirEntry, EntryKind, ErrorKind, FsOp, Response, RpcError};
 use std::fs;
 use std::io::Write;
@@ -5,9 +6,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 pub fn expand_home(p: &str) -> PathBuf {
-    if p == "~" || p.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(p.trim_start_matches('~').trim_start_matches('/'));
+    if p == "~" || p.starts_with("~/") || (cfg!(windows) && p.starts_with("~\\")) {
+        if let Some(home) = nib_proto::path::home_dir() {
+            return home.join(p[1..].trim_start_matches(['/', '\\']));
         }
     }
     PathBuf::from(p)
@@ -19,6 +20,7 @@ pub fn hostname() -> String {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
         .or_else(|| {
             std::process::Command::new("hostname")
                 .output()
@@ -40,7 +42,7 @@ pub fn read_file(path: &Path) -> Result<Response, RpcError> {
     let data = fs::read(path)?;
     let meta = fs::metadata(path)?;
     Ok(Response::File {
-        path: path.to_string_lossy().into_owned(),
+        path: to_wire(path),
         data,
         mtime_ns: mtime_ns(&meta),
     })
@@ -53,7 +55,7 @@ pub fn write_file(
     data: &[u8],
     expected_mtime_ns: Option<u128>,
 ) -> Result<Response, RpcError> {
-    let target = match fs::canonicalize(path) {
+    let target = match canonical(path) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
         Err(e) => return Err(e.into()),
@@ -91,13 +93,13 @@ pub fn write_file(
     }
     let meta = fs::metadata(&target)?;
     Ok(Response::Written {
-        path: target.to_string_lossy().into_owned(),
+        path: to_wire(&target),
         mtime_ns: mtime_ns(&meta),
     })
 }
 
 pub fn list_dir(path: &Path) -> Result<Response, RpcError> {
-    let path = &path.canonicalize()?;
+    let path = &canonical(path)?;
     let mut entries = Vec::new();
     for e in fs::read_dir(path)? {
         let e = e?;
@@ -120,7 +122,7 @@ pub fn list_dir(path: &Path) -> Result<Response, RpcError> {
         (a.kind != EntryKind::Dir, &a.name).cmp(&(b.kind != EntryKind::Dir, &b.name))
     });
     Ok(Response::Dir {
-        path: path.to_string_lossy().into_owned(),
+        path: to_wire(path),
         entries,
     })
 }

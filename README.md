@@ -19,7 +19,7 @@ Agents get API access to the editor with no MCP needed.
   </tr>
 </table>
 
-> **Status: v0.1.** Early, used daily, moving fast. Expect rough edges and breaking changes. macOS and Linux only for now, and you build it yourself (see [Roadmap](#roadmap)).
+> **Status: v0.1.** Early, used daily, moving fast. Expect rough edges and breaking changes. macOS and Linux; Windows works for local projects (SSH/WSL remotes from Windows not yet). You build it yourself (see [Roadmap](#roadmap)).
 
 ## Ideology
 
@@ -62,6 +62,13 @@ scripts/nib .                 # build (incrementally) and open the current folde
 ```
 
 `scripts/nib` runs nibble straight from the source tree and rebuilds only what changed. Put it on your `PATH` (or alias it) and use it like any editor command: `nib file.py`, `nib ~/project`.
+
+On **Windows** (10 1803 or later), use the PowerShell scripts; the `.cmd` wrappers run from cmd or PowerShell without changing the execution policy. You also need the MSVC C++ build tools: [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload, or, without admin rights, any script that puts `cl.exe` / `link.exe` on `PATH`, named by `NIB_MSVC_ENV`.
+
+```powershell
+scripts\nib.cmd .             # build (incrementally) and open the current folder
+scripts\build.cmd client      # release nib.exe + nibd.exe into dist\x86_64-pc-windows-msvc\
+```
 
 To work on Linux servers over SSH, also build the static daemons that nibble uploads to them:
 
@@ -157,7 +164,7 @@ Agents started from the agents tab get the skills automatically (`nib-upstream` 
 
 ## Scripting nibble with `nib ctl`
 
-Every nibble window listens on a private Unix socket. Anything with a shortcut is also a named command, and `nib ctl` exposes it, along with the window's whole state:
+Every nibble window listens on a private Unix socket (an AF_UNIX socket under `%TEMP%\nib` on Windows). Anything with a shortcut is also a named command, and `nib ctl` exposes it, along with the window's whole state:
 
 ```bash
 nib ctl state                     # the window as JSON: tabs, cursor, terminals, agents, …
@@ -242,7 +249,7 @@ Editing is built on [helix-core](https://github.com/helix-editor/helix) (rope, s
 ## Roadmap
 
 - [x] **v0.1**: the editor, SSH remotes, the agents tab with Follow and the mailbox, `nib ctl`, `nib ai`, runtime grammars and language servers. macOS and Linux.
-- [ ] **v0.2**: Windows support.
+- [ ] **v0.2**: Windows support, including WSL, and a revamped diff experience. Native Windows already works for local projects (editor, tree, search, git, terminals, language servers, `nib ctl`).
 - [ ] **v0.3**: localhost integration: see web servers running on the remote (dev servers, notebooks, dashboards) inside nibble, with agents able to read and act on the page.
 - [ ] **v0.4**: GitHub Actions that build and publish binaries. Until then, you build nibble yourself.
 

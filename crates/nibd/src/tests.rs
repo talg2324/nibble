@@ -92,13 +92,24 @@ fn hello_required_first() {
 fn pty_runs_command_and_reports_exit() {
     let (tx, rx) = mpsc::channel();
     let mut ptys = pty::Ptys::default();
-    let cmd = Some(vec!["sh".into(), "-c".into(), "printf hi-from-pty".into()]);
+    let cmd = if cfg!(windows) {
+        Some(vec!["cmd.exe".into(), "/C".into(), "echo hi-from-pty".into()])
+    } else {
+        Some(vec!["sh".into(), "-c".into(), "printf hi-from-pty".into()])
+    };
     let id = ptys.open(&std::env::temp_dir(), cmd, 80, 24, &[], tx).unwrap();
     let mut out = Vec::new();
     let mut exited = false;
     while let Ok(m) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
         match m {
-            ServerMsg::Notify(ServerNotify::PtyOutput { id: i, data }) if i == id => out.extend(data),
+            ServerMsg::Notify(ServerNotify::PtyOutput { id: i, data }) if i == id => {
+                // Windows' ConPTY asks where the cursor is and waits for the answer (the client
+                // gives it; see nib's `status_replies`).
+                if data.windows(4).any(|w| w == b"\x1b[6n") {
+                    ptys.input(id, b"\x1b[1;1R");
+                }
+                out.extend(data);
+            }
             ServerMsg::Notify(ServerNotify::PtyExit { id: i, code }) if i == id => {
                 assert_eq!(code, Some(0));
                 exited = true;

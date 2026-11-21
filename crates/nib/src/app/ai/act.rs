@@ -63,7 +63,7 @@ fn abs_path(p: &str, cwd: &str) -> Option<String> {
         return None;
     }
     let p = p.strip_prefix("./").unwrap_or(p);
-    Some(if p.starts_with('/') { p.to_string() } else { format!("{cwd}/{p}") })
+    Some(nib_proto::path::join(cwd, p))
 }
 
 /// Split a shell command into words and operators, and the heredocs' bodies. Quotes are removed;
