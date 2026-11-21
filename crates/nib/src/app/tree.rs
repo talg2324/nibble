@@ -1001,6 +1001,9 @@ impl App {
     // -----------------------------------------------------------------------------------------
 
     pub(super) fn tree_key(&mut self, chord: KeyChord, text: Option<String>) -> Task<Message> {
+        if self.ssh_browsing() {
+            return self.ssh_browse_key(chord, text);
+        }
         let held = chord.ctrl || chord.logo;
         let cmd = self.keymap.lookup(&chord);
         if let Some(input) = &mut self.tree.input {
@@ -1183,6 +1186,11 @@ impl App {
         let th = &self.theme;
         let (fg, dim, accent, panel, divider, sel_bg) = (th.foreground, th.dim, th.accent, th.panel, th.divider, th.selection);
         let focused = self.focus == Focus::Tree;
+        // Picking another root (open folder): the browser stands where the tree is.
+        if let Some(browser) = self.ssh_browse_view() {
+            let body = container(browser).clip(true).style(move |_| container::Style::default().background(panel));
+            return self.pane(body.into(), focused).id(super::drop::TREE).width(WIDTH).into();
+        }
         let mono = self.face.font;
         let small = |s: String, c: Color| text(s).size(11).color(c).wrapping(text::Wrapping::None);
         let chip = |label: &str, msg: Msg| {
