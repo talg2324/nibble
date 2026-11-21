@@ -391,7 +391,7 @@ fn last_line(err: &str) -> Option<&str> {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    nib_proto::path::home_dir().unwrap_or_default()
 }
 
 fn expand_home(p: &str) -> PathBuf {
