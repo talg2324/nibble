@@ -1409,10 +1409,12 @@ impl App {
         let ready = |a: AiAgent| agents.iter().any(|i| i.agent == a && i.ready());
         ai.setup_failed = then.filter(|a| !ready(*a));
         let running = matches!(ai.session, Session::Ready(_) | Session::Starting);
+        // Refreshing the picker must leave an exited or disconnected conversation intact.
+        let continuing = running || !ai.turns.is_empty() || ai.retired.is_some() || ai.past.is_some();
         // Just set up: chat with it, wherever the keyboard went meanwhile.
         let pick = match then.filter(|a| ready(*a)) {
             Some(a) => Some(a),
-            None if running => None,
+            None if continuing => None,
             None => ai.agent.filter(|a| ready(*a)).or_else(|| agents.iter().find(|i| i.ready()).map(|i| i.agent)),
         };
         let none_ready = !agents.iter().any(|i| i.ready());
@@ -1435,7 +1437,7 @@ impl App {
                 // Started on its own (the panel just opened): a dropdown the user opened
                 // meanwhile stays open, on the tab they were looking at.
                 let (picking, tab) = (self.ai.picking && then.is_none(), self.ai.tab);
-                let t = self.ai_new_chat(agent, model);
+                let t = if continuing { self.ai_use_model(agent, model) } else { self.ai_new_chat(agent, model) };
                 if picking {
                     (self.ai.picking, self.ai.tab) = (true, tab);
                 }
@@ -3738,6 +3740,76 @@ mod tests {
         assert_eq!(a.ai.input, "continue");
         assert_eq!(a.ai.turns.len(), 1);
         assert_eq!(a.ai.error.as_deref(), Some("Codex is unavailable"));
+    }
+
+    #[test]
+    fn opening_the_model_picker_after_exit_preserves_the_conversation_and_work() {
+        let mut a = chatting();
+        say(&mut a, "fix the parser");
+        event(&mut a, 7, AiEvent::Text("Tests remain.".into()));
+        event(&mut a, 7, AiEvent::Exit { msg: Some("usage limit".into()) });
+        let work = nib_proto::AiWork { branch: Some("nib/feat/parser".into()), dir: Some("/work/parser".into()), base: Some("main".into()), plan: None, review: None };
+        let _ = a.diff_work(7, work);
+        a.ai.name = Some("parser".into());
+        type_str(&mut a, "continue with the tests");
+        let chat = a.ai.key;
+        let _ = a.on_ai_msg(Msg::Switch);
+        let _ = a.on_ai_msg(Msg::Tab(AiAgent::Codex));
+        agents(&mut a, vec![info(AiAgent::Claude, true, Some(true)), info(AiAgent::Codex, true, Some(true))]);
+        assert!(opening(&a).is_none(), "opening the picker must not start a new chat");
+        assert_eq!((a.ai.picking, a.ai.tab), (true, Some(AiAgent::Codex)));
+        assert_eq!(a.ai.retired, Some(7));
+        assert_eq!(a.ai.turns.len(), 2);
+        assert_eq!(a.ai.input, "continue with the tests");
+        assert_eq!(a.ai.name.as_deref(), Some("parser"));
+        let _ = a.on_ai_msg(Msg::Use(AiAgent::Codex, None));
+        assert_eq!(a.ai.switching.as_ref().map(|s| s.0), Some(7));
+        let req = opening(&a).unwrap();
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::AiOpened { id: 8 }) });
+        assert!(matches!(a.ai.session, Session::Ready(8)));
+        assert_eq!(a.ai.key, chat);
+        assert_eq!(a.ai.turns.len(), 2);
+        assert_eq!(a.diff_branch(8).unwrap().0, "nib/feat/parser");
+    }
+
+    #[test]
+    fn refreshing_agents_keeps_disconnected_chats_and_empty_retired_sessions() {
+        for disconnected in [true, false] {
+            let mut a = chatting();
+            if disconnected {
+                say(&mut a, "keep this conversation");
+                a.ai_disconnected();
+            } else {
+                event(&mut a, 7, AiEvent::Exit { msg: None });
+            }
+            let turns = a.ai.turns.len();
+            let _ = a.on_ai_msg(Msg::Switch);
+            agents(&mut a, vec![info(AiAgent::Claude, true, Some(true))]);
+            assert!(opening(&a).is_none());
+            assert!(matches!(a.ai.session, Session::Failed(_)));
+            assert_eq!(a.ai.turns.len(), turns);
+            assert_eq!(a.ai.retired, (!disconnected).then_some(7));
+        }
+    }
+
+    #[test]
+    fn finishing_provider_setup_continues_the_existing_conversation() {
+        for exited in [false, true] {
+            let mut a = chatting();
+            say(&mut a, "fix it");
+            event(&mut a, 7, AiEvent::TurnDone { error: None });
+            if exited {
+                event(&mut a, 7, AiEvent::Exit { msg: None });
+            }
+            type_str(&mut a, "my draft");
+            let _ = a.ai_check(Some(AiAgent::Codex));
+            agents(&mut a, vec![info(AiAgent::Claude, true, Some(true)), info(AiAgent::Codex, true, Some(true))]);
+            assert_eq!(a.ai.agent, Some(AiAgent::Codex));
+            assert_eq!(a.ai.switching.as_ref().map(|s| s.0), Some(7));
+            assert_eq!(a.ai.turns.len(), 1);
+            assert_eq!(a.ai.input, "my draft");
+            assert!(opening(&a).is_some());
+        }
     }
 
     #[test]
