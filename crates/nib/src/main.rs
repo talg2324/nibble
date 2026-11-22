@@ -27,6 +27,7 @@ mod terminal_view;
 mod theme;
 mod timing;
 mod transport;
+mod zoom;
 
 use anyhow::{bail, Context, Result};
 use nib_editor::{Command, Config, Keymap, Target};

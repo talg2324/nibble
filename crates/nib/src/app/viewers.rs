@@ -1,12 +1,13 @@
 //! Non-text views of a tab: images, the CSV table, and the Markdown / HTML preview.
 
 use super::{App, Focus, Message, Pending, Tab};
-use crate::editor_view::EditorView;
+use crate::editor_view::{EditorView, Typeface};
 use crate::math;
 use crate::media::{self, Kind, Media};
 use crate::preview::{self, block_key, Place, SourceMap, Target, WIDTH_TITLE};
 use crate::table::Table;
 use crate::table_view::{total_cols, TableEvent, TableView};
+use crate::zoom::{Zone, ZoomZone};
 use iced::widget::image::Handle;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Tree, Widget};
@@ -53,6 +54,11 @@ pub(super) struct PreviewScroll {
 
 /// The rendered body sits this far inside the scrollable.
 const PREVIEW_PAD: f32 = 18.0;
+
+/// Preview zoom: the factor per step, and its range.
+const PREVIEW_ZOOM_STEP: f32 = 1.1;
+const MIN_PREVIEW_ZOOM: f32 = 0.5;
+const MAX_PREVIEW_ZOOM: f32 = 3.0;
 
 fn preview_id() -> iced::widget::Id {
     iced::widget::Id::new("nib-preview")
@@ -270,6 +276,8 @@ struct Viewer<'a> {
     images: &'a HashMap<String, Option<PreviewImage>>,
     /// The editor's code font and size, for code blocks.
     code: (iced::Font, f32),
+    /// The preview's zoom, for images given a width.
+    zoom: f32,
     code_color: iced::Color,
     /// Source position of each block, by `preview::block_key`.
     targets: &'a HashMap<usize, usize>,
@@ -364,7 +372,7 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
         }
         let el = match self.images.get(url) {
             // Intrinsic size (an SVG's width/height attributes), shrunk to fit the pane.
-            Some(Some(img)) => img.view_at(title.strip_prefix(WIDTH_TITLE).and_then(|w| w.parse().ok())),
+            Some(Some(img)) => img.view_at(title.strip_prefix(WIDTH_TITLE).and_then(|w| w.parse::<f32>().ok()).map(|w| w * self.zoom)),
             _ => {
                 container(iced::widget::rich_text(alt.spans(settings.style)).on_link_click(Self::on_link_click))
                     .padding(settings.spacing.0)
@@ -535,6 +543,37 @@ impl App {
         let id = tab.id;
         let Some(m) = tab.media.as_mut() else { return Task::none() };
         Task::batch(m.tick().into_iter().map(|(i, h)| iced_runtime::image::allocate(h).map(move |r| Message::MediaPinned(id, i, r))))
+    }
+
+    /// Whether the main pane shows the active tab's rendered view (preview, table or picture).
+    pub(super) fn preview_shown(&self) -> bool {
+        !self.ai.shown() && self.tab().is_some_and(|t| t.rendered && !t.diff && t.media.is_none() && t.kind.has_preview())
+    }
+
+    /// Zoom the rendered views by `steps`, leaving the code font (editor, terminals, agents) alone.
+    pub(super) fn zoom_preview(&mut self, steps: i32) -> Task<Message> {
+        let z = (self.preview_zoom * PREVIEW_ZOOM_STEP.powi(steps)).clamp(MIN_PREVIEW_ZOOM, MAX_PREVIEW_ZOOM);
+        // Steps there and back land on 100% again.
+        self.preview_zoom = if (z - 1.0).abs() < 0.02 { 1.0 } else { z };
+        self.flash_info(format!("preview {:.0}%", self.preview_zoom * 100.0))
+    }
+
+    /// The code font one point bigger / smaller per step: everything but the rendered views' own zoom.
+    pub(super) fn zoom_font(&mut self, steps: i32) -> Task<Message> {
+        let size = (self.face.size + steps as f32).clamp(8.0, 32.0);
+        self.update(Message::Settings(super::settings::Msg::FontSize(size)))
+    }
+
+    /// Cmd / Ctrl / Shift + wheel: the pane under the pointer zooms.
+    pub(super) fn wheel_zoom(&mut self, zone: Option<Zone>, steps: i32) -> Task<Message> {
+        match zone {
+            Some(Zone::Preview) if self.preview_shown() => self.zoom_preview(steps),
+            Some(Zone::Pdf) => {
+                let c = if steps > 0 { Command::FontBigger } else { Command::FontSmaller };
+                Task::batch((0..steps.unsigned_abs()).filter_map(|_| self.pdf_command(c)).collect::<Vec<_>>())
+            }
+            _ => self.zoom_font(steps),
+        }
     }
 
     pub(super) fn toggle_preview(&mut self) -> Task<Message> {
@@ -773,7 +812,7 @@ impl App {
         }
         if let Some(m) = &tab.media {
             if let Some(v) = m.pdf() {
-                return v.view(th).map(Message::Pdf);
+                return ZoomZone::new(Zone::Pdf, v.view(th).map(Message::Pdf)).into();
             }
             return m.view(th, Message::MediaClick);
         }
@@ -786,11 +825,33 @@ impl App {
             return editor();
         }
         if let (Kind::Svg, Some(p)) = (tab.kind, &tab.svg) {
+            let z = self.preview_zoom;
             let pic: Element<'a, Message> = match &p.handle {
-                Some(h) => svg(h.clone()).width(Length::Fill).height(Length::Fill).content_fit(ContentFit::Contain).into(),
+                Some(h) if z == 1.0 => {
+                    let pic = svg(h.clone()).width(Length::Fill).height(Length::Fill).content_fit(ContentFit::Contain);
+                    container(pic).center(Length::Fill).padding(12).into()
+                }
+                // Zoomed: the fitted picture times the zoom, scrolled when it outgrows the pane.
+                Some(h) => {
+                    let h = h.clone();
+                    iced::widget::responsive(move |size| {
+                        let (w, ht) = ((size.width - 24.0).max(1.0) * z, (size.height - 24.0).max(1.0) * z);
+                        let pic = svg(h.clone()).width(w).height(ht).content_fit(ContentFit::Contain);
+                        scrollable(container(pic).padding(12).center_x(size.width.max(w + 24.0)).center_y(size.height.max(ht + 24.0)))
+                            .direction(scrollable::Direction::Both {
+                                vertical: scrollable::Scrollbar::default(),
+                                horizontal: scrollable::Scrollbar::default(),
+                            })
+                            .style(crate::theme::scrollbar)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .into()
+                    })
+                    .into()
+                }
                 None => space().into(),
             };
-            let mut pane = column![container(pic).center(Length::Fill).padding(12)];
+            let mut pane = column![ZoomZone::new(Zone::Preview, pic)];
             if let Some(e) = &p.error {
                 let what = if p.handle.is_some() { "Not valid SVG (showing the last valid version)" } else { "Not valid SVG" };
                 pane = pane.push(container(text(format!("{what}: {e}")).size(12).color(th.dim)).padding([6, 12]));
@@ -804,7 +865,8 @@ impl App {
         }
         match (&tab.table, &tab.preview) {
             (Some(table), _) if tab.kind == Kind::Csv => {
-                TableView::new(table, th, tab.top, tab.left, self.face, Message::Table).into()
+                let face = Typeface { size: self.face.size * self.preview_zoom, ..self.face };
+                ZoomZone::new(Zone::Preview, TableView::new(table, th, tab.top, tab.left, face, Message::Table)).into()
             }
             (_, Some(p)) => {
                 let mut style = markdown::Style::from_palette(iced::Theme::Dark.palette());
@@ -812,10 +874,12 @@ impl App {
                 style.inline_code_color = th.scope("string");
                 style.inline_code_font = self.face.font;
                 style.code_block_font = self.face.font;
-                let settings = markdown::Settings::with_text_size(self.face.size + 1.0, style);
+                let z = self.preview_zoom;
+                let settings = markdown::Settings::with_text_size((self.face.size + 1.0) * z, style);
                 let viewer = Viewer {
                     images: &p.images,
-                    code: (self.face.font, self.face.size),
+                    code: (self.face.font, self.face.size * z),
+                    zoom: z,
                     code_color: th.foreground,
                     targets: &p.map.targets,
                     math: &p.math,
@@ -838,7 +902,7 @@ impl App {
                 row![
                     container(editor()).width(Length::FillPortion(1)),
                     self.vrule(),
-                    container(pane).width(Length::FillPortion(1)),
+                    container(ZoomZone::new(Zone::Preview, pane)).width(Length::FillPortion(1)),
                 ]
                 .into()
             }

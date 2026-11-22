@@ -27,6 +27,7 @@ use crate::table_view::TableEvent;
 use crate::terminal_view::{key_bytes, TermEvent, TerminalView};
 use crate::theme::Theme;
 use crate::transport::Conn;
+use crate::zoom;
 use iced::keyboard::{self, key::Named, Key as IKey};
 use iced::widget::{button, column, container, mouse_area, progress_bar, row, space, svg, text, tooltip};
 use iced::{Border, Color, Element, Font, Length, Subscription, Task};
@@ -66,6 +67,8 @@ pub enum Message {
     SelectTab(usize),
     CloseTabAt(usize),
     Control(Command),
+    /// Cmd / Ctrl / Shift + wheel over a zone (`None`: anywhere else), in steps (+: bigger).
+    WheelZoom(Option<zoom::Zone>, i32),
     FlashExpired(u64),
     Frame,
     Settings(settings::Msg),
@@ -348,6 +351,8 @@ pub struct App {
     tab_width: usize,
     /// Code font (editor, terminal, file browser).
     face: Typeface,
+    /// Scale of the rendered views (preview, CSV table, SVG), on top of `face`; theirs alone.
+    preview_zoom: f32,
     /// `[editor] font`; None = system monospace.
     font_name: Option<String>,
     /// The `[theme]` overrides `theme` was built from (edited live in Settings).
@@ -476,6 +481,7 @@ impl App {
             icons,
             tab_width,
             face: Typeface { font: settings::font_for(font.as_deref()), size: font_size, line_height },
+            preview_zoom: 1.0,
             font_name: font,
             theme_cfg,
             beginner: beginner_mode,
@@ -778,6 +784,7 @@ impl App {
             }
             Message::Control(Command::ToggleTerminal) => self.toggle_terminal(true),
             Message::Control(c) => self.exec(c),
+            Message::WheelZoom(zone, steps) => self.wheel_zoom(zone, steps),
             Message::Frame => self.bench_frame(),
             Message::Settings(m) => self.on_settings(m),
             Message::Table(ev) => self.on_table(ev),
@@ -1627,11 +1634,10 @@ impl App {
             FontBigger | FontSmaller | TogglePreview if self.pdf_active() => {
                 return self.pdf_command(c).unwrap_or_else(Task::none);
             }
-            FontBigger | FontSmaller => {
-                let d = if c == FontBigger { 1.0 } else { -1.0 };
-                let size = (self.face.size + d).clamp(8.0, 32.0);
-                return self.update(Message::Settings(settings::Msg::FontSize(size)));
+            FontBigger | FontSmaller if self.preview_shown() && self.focus == Focus::Main => {
+                return self.zoom_preview(if c == FontBigger { 1 } else { -1 });
             }
+            FontBigger | FontSmaller => return self.zoom_font(if c == FontBigger { 1 } else { -1 }),
             c if tab_number(c).is_some() => {
                 let i = tab_number(c).unwrap();
                 if i < self.tabs.len() {
@@ -1854,7 +1860,7 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let t0 = Instant::now();
-        let e = self.build_view();
+        let e = zoom::ZoomRoot::new(self.build_view(), Message::WheelZoom).into();
         crate::timing::report("view", "window", t0.elapsed(), nib_proto::timing::SLOW_UI);
         e
     }
@@ -2800,6 +2806,48 @@ mod tests {
         let t = a.tab().unwrap().table.as_ref().unwrap();
         assert_eq!(t.header[0], "xname");
         assert_eq!(t.sort.map(|s| (s.col, s.descending)), Some((1, true)));
+    }
+
+    #[test]
+    fn preview_zooms_apart_from_the_code_font() {
+        use crate::zoom::Zone;
+        let mut a = app();
+        open_text(&mut a, "a.md", "# Title\n");
+        let size = a.face.size;
+        // Not in preview: the keys and the wheel change the code font, as before.
+        let _ = a.update(Message::Control(Command::FontBigger));
+        assert_eq!((a.face.size, a.preview_zoom), (size + 1.0, 1.0));
+        let _ = a.update(Message::WheelZoom(None, -1));
+        assert_eq!(a.face.size, size);
+
+        // In preview the keys zoom the preview only; there and back is 100% again.
+        let _ = a.update(Message::Control(Command::TogglePreview));
+        let _ = a.update(Message::Control(Command::FontBigger));
+        assert_eq!(a.face.size, size);
+        assert!((a.preview_zoom - 1.1).abs() < 1e-5);
+        let _ = a.update(Message::Control(Command::FontSmaller));
+        assert_eq!(a.preview_zoom, 1.0);
+
+        // The wheel zooms what is under the pointer: the preview, or (over the editor) the font.
+        let _ = a.update(Message::WheelZoom(Some(Zone::Preview), 3));
+        assert!((a.preview_zoom - 1.1f32.powi(3)).abs() < 1e-5);
+        let _ = a.update(Message::WheelZoom(None, 2));
+        assert_eq!(a.face.size, size + 2.0);
+        let _ = a.update(Message::WheelZoom(Some(Zone::Preview), -100));
+        assert_eq!(a.preview_zoom, 0.5);
+
+        // A terminal with the keys: the code font, even with a preview on screen.
+        let _ = a.update(Message::WheelZoom(Some(Zone::Preview), 5));
+        a.focus = Focus::Terminal(1);
+        let z = a.preview_zoom;
+        let _ = a.update(Message::Control(Command::FontSmaller));
+        assert_eq!((a.face.size, a.preview_zoom), (size + 1.0, z));
+
+        // The CSV table is a rendered view too.
+        a.focus = Focus::Main;
+        open_text(&mut a, "d.csv", "a,b\n1,2\n");
+        let _ = a.update(Message::Control(Command::FontBigger));
+        assert!(a.preview_zoom > z && a.face.size == size + 1.0);
     }
 
     #[test]
