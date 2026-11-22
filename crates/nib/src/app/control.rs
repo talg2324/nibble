@@ -33,12 +33,54 @@ impl App {
             }
             "pending" => {
                 // Connecting counts: `wait` should wait for it.
-                call.ok(json!({ "pending": self.pending.len() + usize::from(self.connecting.is_some()) }));
+                // So does a server on its way to ready.
+                call.ok(json!({ "pending": self.pending.len() + usize::from(self.connecting.is_some()) + self.serve.coming() }));
                 Task::none()
             }
             "askpass" => self.on_askpass(call),
             "search" => self.on_search_ctl(call),
+            c if c.starts_with("serve.") => self.on_serve_ctl(call),
+            c if c.starts_with("forward.") => self.on_forward_ctl(call),
             c if c.starts_with("ssh.") => self.on_ssh_ctl(call),
+            // The mouse in the web tab in front, as the user's own: through the tab, so that
+            // what the tab does with a press (its own list for a <select>) happens too.
+            "web.pointer" => {
+                use super::web::Msg;
+                if self.web_front().is_none() {
+                    call.err("no web tab is in front (`web open` brings one forward; not in --headless)");
+                    return Task::none();
+                }
+                let n = |k: &str| call.req.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                let button = call.req.get("button").and_then(Value::as_u64).unwrap_or(0).min(2) as u8;
+                let mut tasks = vec![self.handle(Message::Web(Msg::Move(iced::Point::new(n("x"), n("y")))))];
+                match call.str_arg("do").unwrap_or("click") {
+                    "move" => {}
+                    "down" => tasks.push(self.handle(Message::Web(Msg::Down(button)))),
+                    "up" => tasks.push(self.handle(Message::Web(Msg::Up(button)))),
+                    "wheel" => tasks.push(self.handle(Message::Web(Msg::Scroll(iced::mouse::ScrollDelta::Pixels { x: -n("dx"), y: -n("dy") })))),
+                    "click" => {
+                        tasks.push(self.handle(Message::Web(Msg::Down(button))));
+                        tasks.push(self.handle(Message::Web(Msg::Up(button))));
+                    }
+                    other => {
+                        call.err(format!("web.pointer: do is move, click, down, up or wheel, not {other:?}"));
+                        return Task::none();
+                    }
+                }
+                call.ok(json!({}));
+                Task::batch(tasks)
+            }
+            // A port or a local address means the daemon's machine: forwarded first when that is
+            // another one, then the engine's like the rest.
+            "web.open" => {
+                self.web_open(call);
+                Task::none()
+            }
+            // The web tab's engine answers these itself, on its own thread (crate::web).
+            c if c.starts_with("web.") => {
+                crate::web::submit(call, &self.root.to_string());
+                Task::none()
+            }
             "commands" => {
                 let names: Vec<&str> = Command::ALL.iter().map(|c| c.name()).collect();
                 call.ok(json!({ "commands": names }));
@@ -401,6 +443,7 @@ impl App {
                     "language": t.doc.language_name(),
                     "modified": t.doc.is_modified(),
                     "rendered": t.rendered,
+                "web": t.web,
                     "pdf": t.media.as_ref().and_then(Media::pdf).map(crate::pdf::PdfView::state_json),
                 })
             })
@@ -451,12 +494,18 @@ impl App {
                     "key": t.key,
                     "focused": self.focus == Focus::Terminal(t.key),
                     "started": t.id.is_some(),
+                    "server": t.server,
                     "size": [t.size.0, t.size.1],
                     "cursor": [row + 1, col + 1],
                     "screen": s.contents(),
                 })
             })
             .collect();
+        // The engine's account of the pages, and the window's of its web tabs.
+        let mut web = crate::web::state();
+        if let Some(o) = web.as_object_mut() {
+            o.insert("window".into(), self.web_json());
+        }
         json!({
             "title": self.title(),
             "headless": self.headless,
@@ -479,6 +528,7 @@ impl App {
             },
             "ai": self.ai_state_json(),
             "diff": self.diff_json(),
+            "web": web,
             "search": self.search_json(),
             "pending": self.pending.len(),
             "flash": self.flash.as_ref().map(|(text, warn, _)| json!({ "text": text, "warn": warn })),
@@ -486,6 +536,10 @@ impl App {
             "tabs": tabs,
             "editor": editor,
             "terminals": terminals,
+            // The project's servers, as the daemon last said (`serve list` asks it).
+            "servers": self.servers_json(),
+            // Another machine's ports brought to this one (`forward list`).
+            "forwards": crate::forward::list(),
         })
     }
 

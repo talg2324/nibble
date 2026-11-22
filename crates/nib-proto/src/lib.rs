@@ -11,6 +11,7 @@ pub mod frame;
 pub mod path;
 pub mod skills;
 pub mod timing;
+pub mod web;
 pub use frame::{read_frame, write_frame, FrameError, MAX_FRAME};
 
 /// Bumped on any incompatible change. Client and daemon must match exactly (the daemon binary is
@@ -250,7 +251,103 @@ pub enum Request {
     /// that contain it (smart case: case-insensitive unless it has a capital). Folders whose name
     /// starts with `.`, gitignored files and binary files are skipped. At most `max` lines.
     Search { query: String, max: u32 },
+    /// The project's servers (`$NIBDIR/serve.json` on the daemon's machine): read, define,
+    /// start, stop -> `Servers`, every server as it is after `op`. Starting and stopping are
+    /// begun, not waited for: `ServerNotify::Server` says how each goes on.
+    Serve { op: ServeOp },
     Shutdown,
+}
+
+/// What to do with the project's servers (`Request::Serve`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ServeOp {
+    List,
+    /// Add or replace one definition. A running server keeps the one it was started with
+    /// until it is restarted.
+    Set { name: String, def: ServerDef },
+    /// Stop one and forget its definition.
+    Remove { name: String },
+    /// Start these (none named: all), each after the servers it comes `after`.
+    Up { names: Vec<String> },
+    /// Stop these (none named: all).
+    Down { names: Vec<String> },
+    /// Stop one, wait for its port to be free, start it.
+    Restart { name: String },
+}
+
+/// One server of the project, as `serve.json` defines it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ServerDef {
+    /// Run by the user's shell.
+    pub cmd: String,
+    /// Where it listens (on 127.0.0.1): how nib tells that it is ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Servers whose ports must answer before this one is started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
+    /// A path (`/`): once the port answers, the window shows `http://127.0.0.1:PORT<view>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// Where it runs, relative to the project root (absent: the root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// A name for its page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ServerState {
+    #[default]
+    Stopped,
+    /// For the servers it comes after.
+    Waiting,
+    /// Running; its port does not answer yet.
+    Starting,
+    /// Running, and its port answers (or it has none).
+    Ready,
+    /// It ended by itself, with this exit code.
+    Exited(Option<i32>),
+    /// Not started: something else already listens on its port.
+    PortTaken,
+}
+
+impl ServerState {
+    /// As `nib ctl serve list` and `nib-serve` say it.
+    pub fn name(self) -> String {
+        match self {
+            ServerState::Stopped => "stopped".into(),
+            ServerState::Waiting => "waiting".into(),
+            ServerState::Starting => "starting".into(),
+            ServerState::Ready => "ready".into(),
+            ServerState::Exited(Some(code)) => format!("exited({code})"),
+            ServerState::Exited(None) => "exited".into(),
+            ServerState::PortTaken => "port-taken".into(),
+        }
+    }
+
+    /// On its way to `Ready`.
+    pub fn coming(self) -> bool {
+        matches!(self, ServerState::Waiting | ServerState::Starting)
+    }
+}
+
+/// A server and how it is doing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ServerInfo {
+    pub name: String,
+    pub def: ServerDef,
+    pub state: ServerState,
+    /// Its terminal, while it runs (`PtyOutput`, `PtyInput`, `PtyResize` as for any other;
+    /// `PtyClose` stops the server).
+    #[serde(default)]
+    pub pty: Option<PtyId>,
+    /// Its definition was removed: forget it.
+    #[serde(default)]
+    pub removed: bool,
 }
 
 /// The directories the file tree can show. Paths in `Tree` / `Fs` are relative to it.
@@ -677,6 +774,9 @@ pub enum ClientNotify {
     /// Freeze (`on`) or thaw every process of the session, mid-command or mid-request,
     /// without it noticing -> `AiEvent::Suspended`. Unix only.
     AiSuspend { id: AiId, on: bool },
+    /// The answer to `ServerNotify::Web` `id`: the JSON object the control socket would have
+    /// answered (`{"ok": true, …}` or `{"ok": false, "error": "…"}`).
+    WebReply { id: u64, reply: String },
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -769,6 +869,8 @@ pub enum Response {
     /// to answer them).
     ReviewSent { review: Review, message: String },
     Search(SearchResults),
+    /// In the order of their names.
+    Servers(Vec<ServerInfo>),
     Ok,
 }
 
@@ -902,6 +1004,13 @@ pub enum ServerNotify {
         path: String,
         mtime_ns: Option<u128>,
     },
+    /// One of the project's servers (`Request::Serve`) changed: its state, its terminal, its
+    /// definition. Sent before any `PtyOutput` of a terminal it names.
+    Server(ServerInfo),
+    /// An agent's `nib-web …`: a request for the window's web tab, as the JSON object its
+    /// control socket takes (`{"cmd": "web.read", …}`; `web::agent_may` says which). The
+    /// window answers with `ClientNotify::WebReply` carrying the same `id`.
+    Web { id: u64, req: String },
 }
 
 /// What a chat session says, already taken out of the assistant's own event stream.

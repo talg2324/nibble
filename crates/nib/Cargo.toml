@@ -43,6 +43,8 @@ hayro = "0.9"
 arboard = "3.7.0"
 # The window's handle, to ask the OS where a file was dropped (winit doesn't say).
 raw-window-handle = "0.6"
+# Pictures of a page come from the browser as base64 (web/). Already in the tree.
+base64 = "0.22"
 
 
 [target.'cfg(unix)'.dependencies]

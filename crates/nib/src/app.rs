@@ -5,19 +5,23 @@ mod connection;
 mod control;
 mod diff;
 mod drop;
+mod forward;
 mod git;
 mod pdf_tab;
 mod peek;
 mod plan;
 mod search;
+mod serve;
 mod settings;
 mod ssh;
 mod titlebar;
 mod tree;
 mod viewers;
+mod web;
 mod watch;
 
 pub use connection::ConnEvent;
+pub use web::Msg as WebMsg;
 
 use crate::editor_view::{Typeface, ViewEvent};
 use crate::icons::{hex, Icons};
@@ -90,6 +94,8 @@ pub enum Message {
     Git(git::Msg),
     /// The diff tab (`diff.rs`).
     Diff(diff::Msg),
+    /// The web tabs (`web.rs`).
+    Web(web::Msg),
     Ai(ai::Msg),
     Ssh(ssh::Msg),
     /// A result in the definitions / references list was clicked.
@@ -121,6 +127,9 @@ enum Pending {
     TreeFs { reveal: Option<String>, renamed: Option<(String, String)>, open: bool },
     Save { tab: u64, revision: usize },
     PtyOpen { term: u64 },
+    /// Something asked of the project's servers; `call`: by a control client, who gets the answer.
+    /// `quiet`: asked by the window itself at connect; a refusal is not worth a message.
+    Serve { call: Option<crate::control::Call>, quiet: bool },
     /// `poll`: the answer schedules the next ask.
     Git { poll: bool },
     GitDetails,
@@ -193,6 +202,8 @@ pub struct Tab {
     lsp_synced: Option<u64>,
     /// The diff tab (`diff.rs`): its document is an empty placeholder.
     diff: bool,
+    /// A web tab (`web.rs`), likewise: the page it shows.
+    web: Option<u32>,
 }
 
 struct Term {
@@ -203,6 +214,9 @@ struct Term {
     size: (u16, u16),
     /// Input typed before the PTY exists.
     queued: Vec<u8>,
+    /// The project's server that runs here (`serve.rs`): headed with its name and state, kept
+    /// when the server ends by itself, and closing it stops the server.
+    server: Option<String>,
 }
 
 /// Where keyboard input goes. Terminals are referenced by `Term::key`.
@@ -392,6 +406,8 @@ pub struct App {
     git: Option<nib_proto::GitInfo>,
     git_ui: git::Panel,
     diff: diff::View,
+    web: web::Tabs,
+    serve: serve::State,
     flash: Option<(String, bool, u64)>,
     flash_seq: u64,
     /// Recent flash messages, newest last (the control socket's `state` shows them).
@@ -492,6 +508,7 @@ impl App {
             tree: Default::default(),
             mods: Default::default(),
             terms: Vec::new(),
+            serve: Default::default(),
             terms_visible: false,
             next_term_key: 1,
             last_term: None,
@@ -511,6 +528,7 @@ impl App {
             git: None,
             git_ui: Default::default(),
             diff: Default::default(),
+            web: Default::default(),
             flash: None,
             flash_seq: 0,
             messages: VecDeque::new(),
@@ -577,6 +595,8 @@ impl App {
         });
         let blur = iced::event::listen_with(|ev, _, _| match ev {
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::Blur),
+            // The window moved to a screen of another density: web tabs are drawn at it.
+            iced::Event::Window(iced::window::Event::Rescaled(s)) => Some(Message::Web(web::Msg::Scale(s))),
             iced::Event::Window(iced::window::Event::FileHovered(_)) => Some(Message::Drop(drop::Msg::Hovered)),
             iced::Event::Window(iced::window::Event::FilesHoveredLeft) => Some(Message::Drop(drop::Msg::Left)),
             iced::Event::Window(iced::window::Event::FileDropped(p)) => Some(Message::Drop(drop::Msg::File(p))),
@@ -659,6 +679,8 @@ impl App {
             _ => nib_proto::timing::label(&msg),
         };
         let task = self.handle(msg);
+        let web = self.web_follow();
+        let task = Task::batch([task, web]);
         self.ai_sync();
         self.sync_watch();
         let derived = self.refresh_derived();
@@ -818,6 +840,7 @@ impl App {
             Message::GitPoll(_) => Task::none(),
             Message::Git(m) => self.on_git_msg(m),
             Message::Diff(m) => self.on_diff_msg(m),
+            Message::Web(m) => self.on_web_msg(m),
             Message::Ai(m) => self.on_ai_msg(m),
             Message::Drop(m) => self.on_drop(m),
             Message::TitleBar(m) => self.on_titlebar(m),
@@ -895,7 +918,14 @@ impl App {
                 }
                 return Task::none();
             }
+            ServerMsg::Notify(ServerNotify::Server(info)) => return self.on_server_info(info),
+            ServerMsg::Notify(ServerNotify::Web { id, req }) => return self.on_agent_web(id, &req),
             ServerMsg::Notify(ServerNotify::PtyExit { id, .. }) => {
+                // A server's terminal stays, for what it printed (`serve.rs`).
+                if let Some(t) = self.terms.iter_mut().find(|t| t.id == Some(id) && t.server.is_some()) {
+                    t.id = None;
+                    return Task::none();
+                }
                 if let Some(key) = self.terms.iter().find(|t| t.id == Some(id)).map(|t| t.key) {
                     self.remove_term(key);
                     return self.ai_term_closed(key);
@@ -940,6 +970,7 @@ impl App {
             (Pending::AiDelete { model }, result) => self.on_ai_deleted(model, result),
             (Pending::Browse, result) => self.on_browse(result),
             (Pending::Search { seq }, result) => self.on_search_results(seq, result),
+            (Pending::Serve { call, quiet }, result) => self.on_serve(call, quiet, result),
             (Pending::GitDetails, result) => self.on_git_details(result),
             (Pending::Diff { scope, epoch }, result) => self.on_diff(scope, epoch, result),
             (Pending::DiffGit, result) => self.on_diff_git(result),
@@ -1258,6 +1289,7 @@ impl App {
             parser: vt100::Parser::new(rows.try_into().unwrap(), cols.try_into().unwrap(), 5000),
             size: (rows, cols),
             queued: Vec::new(),
+            server: None,
         });
         self.terms_visible = true;
         self.set_focus(Focus::Terminal(key));
@@ -1333,8 +1365,10 @@ impl App {
         let Some(t) = self.terms.iter_mut().find(|t| t.key == key) else { return Task::none() };
         match ev {
             TermEvent::Focus => self.set_focus(Focus::Terminal(key)),
-            // Opened here, on the machine at the keyboard: a remote shell has no browser.
-            TermEvent::OpenUrl(url) => viewers::open_external(&url),
+            // A page of the machine the shell runs on: a web tab (its port forwarded first, if
+            // that is another machine). Anything else: the system's browser, on the machine at
+            // the keyboard (a remote shell has none).
+            TermEvent::OpenUrl(url) => self.open_link(&url),
             TermEvent::Scroll(lines) => {
                 let s = t.parser.screen_mut();
                 let cur = s.scrollback() as i64;
@@ -1495,6 +1529,11 @@ impl App {
             }
             return Task::none();
         }
+        if self.web_front().is_some() && self.focus == Focus::Main {
+            if let Some(t) = self.web_key(chord, text.clone()) {
+                return t;
+            }
+        }
         if self.diff_active() {
             if let Some(t) = self.diff_key(chord, text.clone()) {
                 return t;
@@ -1589,6 +1628,9 @@ impl App {
             OpenInNewTab => return Task::none(),
             ToggleTerminal => return self.toggle_terminal(false),
             NewTerminal => return self.new_terminal(),
+            ServeUp => return self.serve(nib_proto::ServeOp::Up { names: Vec::new() }, None),
+            ServeDown => return self.serve(nib_proto::ServeOp::Down { names: Vec::new() }, None),
+            ServeRestart => return self.serve_restart_focused(),
             ToggleAi => return self.on_ai_msg(ai::Msg::Toggle),
             ToggleGit => return self.on_git_msg(git::Msg::Toggle),
             ToggleDiff => return self.diff_toggle(),
@@ -1802,6 +1844,7 @@ impl App {
             self.quit_armed = true;
             return self.flash_warn(format!("{dirty} unsaved file(s) — quit again to discard"));
         }
+        crate::forward::clear_now();
         iced::exit()
     }
 
@@ -1894,7 +1937,11 @@ impl App {
                 let focused = self.focus == Focus::Terminal(t.key);
                 let key = t.key;
                 let tv = TerminalView::new(t.parser.screen(), th, self.face.font, self.face.size, focused, move |ev| Message::Term(key, ev));
-                stack = stack.push(self.pane(tv.into(), focused));
+                let body: Element<'_, Message> = match self.serve_header(t) {
+                    Some(head) => column![head, Element::from(tv)].into(),
+                    None => tv.into(),
+                };
+                stack = stack.push(self.pane(body, focused));
             }
             center = center.push(self.vrule());
             center = center.push(stack.width(Length::FillPortion(2)).height(Length::Fill));
@@ -1996,7 +2043,7 @@ impl App {
         let tabs = self.tabs.iter().enumerate().map(|(i, t)| {
             let name = t.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // The tab a followed agent opened.
-            let name = if t.diff { "± diff".to_string() } else { name };
+            let name = if t.diff { "± diff".to_string() } else if let Some(page) = t.web { self.web_title(page) } else { name };
             let name = if t.doc.path.as_deref().is_some_and(|p| self.ai_follow_tab(p)) { format!("◉ {name}") } else { name };
             let active = i == self.active && !self.ai.shown();
             let fg = if active { th.foreground } else { th.dim };

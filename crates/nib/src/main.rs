@@ -10,6 +10,7 @@ mod control;
 mod diff_view;
 mod editor_view;
 mod fonts;
+mod forward;
 mod gif;
 mod gpu_log;
 mod gpu_pick;
@@ -28,6 +29,7 @@ mod terminal_view;
 mod theme;
 mod timing;
 mod transport;
+mod web;
 mod zoom;
 
 use anyhow::{bail, Context, Result};
@@ -168,6 +170,9 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("gif") {
         std::process::exit(gif::gif_main(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some(web::WATCH_ARG) {
+        std::process::exit(web::watch_main(&args[1..]));
+    }
     if args.first().map(String::as_str) == Some(gpu_pick::PROBE_ARG) {
         std::process::exit(gpu_pick::probe_main());
     }
@@ -216,6 +221,11 @@ fn main() -> Result<()> {
         "root": launch.root,
         "headless": headless,
         "logs": { "nibd": transport::daemon_log(&launch.target) },
+    });
+    // The web tabs' engine wakes the app the same way, when a page or its picture changed.
+    let wake = ctl_tx.clone();
+    web::wake_with(move || {
+        let _ = wake.unbounded_send(app::Message::Web(app::WebMsg::Wake));
     });
     let ctl_guard = if bench {
         None

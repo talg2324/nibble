@@ -23,8 +23,10 @@ mod places;
 mod pty;
 mod review;
 mod search;
+mod serve;
 mod tree;
 mod watch;
+mod web;
 mod work;
 
 use nib_proto::{
@@ -56,6 +58,10 @@ fn main() -> anyhow::Result<()> {
         Some("work") => std::process::exit(work::cli(&args[1..])),
         // And their answers to the user's review of their work (see `review`).
         Some("review") => std::process::exit(review::cli(&args[1..])),
+        // And the project's servers (see `serve`).
+        Some("serve") => std::process::exit(serve::cli(&args[1..])),
+        // And the page of the project's app in the window's web tab (see `web`).
+        Some("web") => std::process::exit(web::cli(&args[1..])),
         None | Some("--stdio") => {}
         Some(other) => anyhow::bail!("unknown argument {other:?}; usage: nibd [--stdio|--version]"),
     }
@@ -144,7 +150,7 @@ fn serve_with<W: io::Write + Send + 'static>(
     });
 
     let mut state =
-        State { root: None, places: None, ptys: pty::Ptys::default(), lsp: None, ai: Default::default(), watch: watch::Watcher::new(tx.clone()), tx: tx.clone() };
+        State { root: None, places: None, ptys: Default::default(), serve: None, web: None, lsp: None, ai: Default::default(), watch: watch::Watcher::new(tx.clone()), tx: tx.clone() };
     while let Some(msg) = next()? {
         let t0 = Instant::now();
         // Requests are timed by the writer; a notification is done when this loop turns.
@@ -172,9 +178,20 @@ fn serve_with<W: io::Write + Send + 'static>(
             ClientMsg::Notify(ClientNotify::Ping { seq }) => {
                 let _ = tx.send(ServerMsg::Notify(ServerNotify::Pong { seq }));
             }
-            ClientMsg::Notify(ClientNotify::PtyInput { id, data }) => state.ptys.input(id, &data),
-            ClientMsg::Notify(ClientNotify::PtyResize { id, cols, rows }) => state.ptys.resize(id, cols, rows),
-            ClientMsg::Notify(ClientNotify::PtyClose { id }) => state.ptys.close(id),
+            ClientMsg::Notify(ClientNotify::PtyInput { id, data }) => state.ptys.lock().unwrap().input(id, &data),
+            ClientMsg::Notify(ClientNotify::PtyResize { id, cols, rows }) => state.ptys.lock().unwrap().resize(id, cols, rows),
+            ClientMsg::Notify(ClientNotify::PtyClose { id }) => {
+                state.ptys.lock().unwrap().close(id);
+                // A server's terminal: the server is stopped.
+                if let Some(serve) = &state.serve {
+                    serve.lock().unwrap().closed(id);
+                }
+            }
+            ClientMsg::Notify(ClientNotify::WebReply { id, reply }) => {
+                if let Some(web) = &state.web {
+                    web.lock().unwrap().reply(id, &reply);
+                }
+            }
             ClientMsg::Notify(ClientNotify::DocSync { path, version, text }) => {
                 if let Some(lsp) = &mut state.lsp {
                     let path = resolve(state.root.as_ref(), &path);
@@ -214,7 +231,9 @@ fn serve_with<W: io::Write + Send + 'static>(
             }
         }
     }
-    drop(state); // kills PTYs and releases its sender clone
+    // Terminals and servers end here, whoever else still holds them for a moment.
+    state.ptys.lock().unwrap().close_all();
+    drop(state); // releases its sender clone
     drop(tx);
     writer
         .join()
@@ -226,7 +245,12 @@ struct State {
     root: Option<PathBuf>,
     /// Scratch and NIBDIR, made by Hello (None if they couldn't be).
     places: Option<places::Places>,
-    ptys: pty::Ptys,
+    /// Shared with the project's servers, which open their own.
+    ptys: Arc<Mutex<pty::Ptys>>,
+    /// The project's servers; created by Hello (they need the root and NIBDIR).
+    serve: Option<serve::Shared>,
+    /// Agents' requests for the window's web tab, passed on; created by Hello.
+    web: Option<web::Shared>,
     /// Created by Hello (it needs the root).
     lsp: Option<lsp::Lsp>,
     ai: ai::Shared,
@@ -446,6 +470,9 @@ impl State {
                     lsp_extensions: lsp.extensions(),
                 };
                 self.lsp = Some(lsp);
+                let (nibdir, scratch) = (self.places.as_ref().map(|p| p.nibdir.as_path()), self.places.as_ref().map(|p| p.scratch.as_path()));
+                self.serve = Some(serve::new(&root, nibdir, scratch, &mail::path(scratch), self.ptys.clone(), self.tx.clone()));
+                self.web = Some(web::new(&mail::path(scratch), self.tx.clone()));
                 self.root = Some(root);
                 Ok(resp)
             }
@@ -523,23 +550,27 @@ impl State {
                     Some(p) => vec![("NIB_SCRATCH", &p.scratch), ("NIBDIR", &p.nibdir)],
                     None => Vec::new(),
                 };
-                let id = self.ptys.open(&cwd, cmd, cols, rows, &env, self.tx.clone())?;
+                let id = self.ptys.lock().unwrap().open(&cwd, cmd, cols, rows, &env, self.tx.clone())?;
                 Ok(Response::PtyOpened { id })
             }
             Request::AiSetup { agent, cols, rows, login } => {
                 let (cmd, path) = ai::setup_cmd(agent, login)?;
                 let root = self.root.clone().expect("checked above");
                 let env = [("PATH", std::path::Path::new(&path))];
-                let id = self.ptys.open(&root, Some(cmd), cols, rows, &env, self.tx.clone())?;
+                let id = self.ptys.lock().unwrap().open(&root, Some(cmd), cols, rows, &env, self.tx.clone())?;
                 Ok(Response::PtyOpened { id })
             }
             Request::AiUpdate { agent, cols, rows } => {
                 let (cmd, path) = ai::update_cmd(agent)?;
                 let root = self.root.clone().expect("checked above");
                 let env = [("PATH", std::path::Path::new(&path))];
-                let id = self.ptys.open(&root, Some(cmd), cols, rows, &env, self.tx.clone())?;
+                let id = self.ptys.lock().unwrap().open(&root, Some(cmd), cols, rows, &env, self.tx.clone())?;
                 Ok(Response::PtyOpened { id })
             }
+            Request::Serve { op } => match &self.serve {
+                Some(serve) => serve.lock().unwrap().request(op).map(Response::Servers),
+                None => Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")),
+            },
             Request::Shutdown => Ok(Response::Ok),
         }
     }

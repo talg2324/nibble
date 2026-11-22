@@ -90,12 +90,17 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// The session's mailbox folder, made if needed: in its scratch directory, else the temp dir.
-pub fn dir(scratch: Option<&Path>) -> Option<PathBuf> {
-    let dir = match scratch {
+/// Where the session's mailbox folder is (or will be): in its scratch directory, else the temp dir.
+pub fn path(scratch: Option<&Path>) -> PathBuf {
+    match scratch {
         Some(s) => s.join("mailbox"),
         None => std::env::temp_dir().join(format!("nibd-mailbox-{}", std::process::id())),
-    };
+    }
+}
+
+/// The session's mailbox folder, made if needed.
+pub fn dir(scratch: Option<&Path>) -> Option<PathBuf> {
+    let dir = path(scratch);
     for sub in ["outbox", "inbox", "waiting", "bin"] {
         fs::create_dir_all(dir.join(sub)).ok()?;
     }
@@ -114,8 +119,10 @@ fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
     let exe = exe.display().to_string();
     // `C:/…` is the form Git Bash and every MSYS tool take; on Unix there are no `\` to change.
     let sh_exe = if cfg!(windows) { exe.replace('\\', "/") } else { exe.clone() };
-    // `nib-work` (see `work`) is the same binary's other command for agents.
-    for (name, sub) in [("nib-mail", "mail"), ("nib-work", "work"), ("nib-review", "review")] {
+    // `nib-work` (see `work`) is the same binary's other command for agents; `nib-serve` (see
+    // `serve`) starts and stops the project's servers; `nib-web` (see `web`) reads and operates
+    // a page of them in the window's web tab.
+    for (name, sub) in [("nib-mail", "mail"), ("nib-work", "work"), ("nib-review", "review"), ("nib-serve", "serve"), ("nib-web", "web")] {
         let script = bin.join(name);
         fs::write(&script, format!("#!/bin/sh\nexec '{}' {sub} \"$@\"\n", sh_exe.replace('\'', "'\\''")))?;
         #[cfg(unix)]

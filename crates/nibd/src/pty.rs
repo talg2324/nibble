@@ -137,12 +137,17 @@ impl Ptys {
             let _ = p.killer.kill();
         }
     }
+
+    /// The session is over: every terminal goes.
+    pub fn close_all(&mut self) {
+        for (_, mut p) in self.map.drain() {
+            let _ = p.killer.kill();
+        }
+    }
 }
 
 impl Drop for Ptys {
     fn drop(&mut self) {
-        for (_, mut p) in self.map.drain() {
-            let _ = p.killer.kill();
-        }
+        self.close_all();
     }
 }

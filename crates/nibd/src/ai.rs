@@ -1453,7 +1453,7 @@ fn open_claude(exe: &Path, model: Option<&str>, tuning: &Tuning, tools: bool, mo
         .args(resume.map(|id| vec!["--resume", id]).unwrap_or_default())
         // The mailbox is nib's own, and the agents use it at each other's request, not only the
         // user's: without this, auto mode's safety check refuses a reply as unasked-for.
-        .args(if tools { vec!["--allowedTools", "Bash(nib-mail:*)", "Bash(nib-work:*)", "Bash(nib-review:*)"] } else { vec![] })
+        .args(if tools { vec!["--allowedTools", "Bash(nib-mail:*)", "Bash(nib-work:*)", "Bash(nib-review:*)", "Bash(nib-serve:*)", "Bash(nib-web:*)"] } else { vec![] })
         // Where `nib-work start` puts an agent's own work tree: its commands may `cd` there.
         .args(work_trees(env).filter(|_| tools).map(|d| vec!["--add-dir".to_string(), d.to_string_lossy().into_owned()]).unwrap_or_default())
         // nib's own skills, as a plugin for this session (they show up as `nib:<name>`).
@@ -1787,7 +1787,7 @@ fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
 }
 
 /// Base64, for pictures in a message.
-fn base64(data: &[u8]) -> String {
+pub(crate) fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {

@@ -45,6 +45,17 @@ impl Conn {
         self.send(&ClientMsg::Notify(n))
     }
 
+    /// A way to notify the daemon from another thread (an answer that is ready later, on the
+    /// web tab's engine's thread). What it sends after this connection closed goes nowhere.
+    pub fn notifier(&self) -> impl Fn(nib_proto::ClientNotify) + Send + 'static {
+        let stdin = self.stdin.clone();
+        move |n| {
+            if let Ok(mut w) = stdin.lock() {
+                let _ = nib_proto::send(&mut *w, &ClientMsg::Notify(n));
+            }
+        }
+    }
+
     fn send(&self, m: &ClientMsg) -> Result<()> {
         let mut w = self.stdin.lock().map_err(|_| anyhow!("connection poisoned"))?;
         nib_proto::send(&mut *w, m)?;

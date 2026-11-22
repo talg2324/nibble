@@ -3,32 +3,54 @@
 
 use std::ops::Range;
 
-/// Byte ranges of the `http://` / `https://` URLs in `s`. Trailing punctuation that usually ends
-/// a sentence (and a closing bracket with no opening one inside the URL) is left out.
+/// This machine, as servers print it without a scheme: `localhost:8000`, `127.0.0.1:8000/docs`,
+/// `0.0.0.0:8000`, `[::1]:8000`. The length of host, colon and port at the start of `rest`, if
+/// it starts with one and the port ends there.
+fn bare_local(rest: &str) -> Option<usize> {
+    let host = ["localhost:", "127.0.0.1:", "0.0.0.0:", "[::1]:"].into_iter().find(|h| rest.starts_with(h))?;
+    let after = &rest.as_bytes()[host.len()..];
+    let digits = after.iter().take_while(|b| b.is_ascii_digit()).count();
+    let ends = after.get(digits).is_none_or(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'@')));
+    // `localhost:8000.5` is not an address; `localhost:8000.` ends a sentence.
+    let fraction = after.get(digits) == Some(&b'.') && after.get(digits + 1).is_some_and(u8::is_ascii_digit);
+    ((1..=5).contains(&digits) && after[..digits].iter().fold(0u32, |n, b| n * 10 + u32::from(b - b'0')) <= 65535 && ends && !fraction).then_some(host.len() + digits)
+}
+
+/// Byte ranges of the `http://` / `https://` URLs in `s`, and of this machine's addresses
+/// written without a scheme (`localhost:8000/docs`, see `bare_local`). Trailing punctuation that
+/// usually ends a sentence (and a closing bracket with no opening one inside the URL) is left out.
 pub fn find_urls(s: &str) -> Vec<Range<usize>> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i < s.len() {
         let rest = &s[i..];
-        let scheme = if rest.starts_with("https://") {
-            8
+        // `head`: what is there before the part that may be trimmed.
+        let (head, bare) = if rest.starts_with("https://") {
+            (8, false)
         } else if rest.starts_with("http://") {
-            7
+            (7, false)
+        } else if let Some(n) = bare_local(rest) {
+            (n, true)
         } else {
             i += rest.chars().next().map_or(1, char::len_utf8);
             continue;
         };
-        if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-            i += scheme;
+        // Part of a longer word or host (`mylocalhost:80`, `x.127.0.0.1:80`, `ftp://localhost:1`).
+        let inside = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || (bare && matches!(b, b'.' | b'-' | b'/' | b'@' | b':'));
+        if i > 0 && inside(bytes[i - 1]) {
+            i += head;
             continue;
         }
-        let mut end = i + scheme;
-        while end < s.len() && is_url_byte(bytes[end]) {
-            end += 1;
+        let mut end = i + head;
+        // A bare address goes on only with a path, a query or a fragment.
+        if !bare || matches!(bytes.get(end), Some(b'/' | b'?' | b'#')) {
+            while end < s.len() && is_url_byte(bytes[end]) {
+                end += 1;
+            }
         }
         // Trim what a sentence or a bracket around the URL put after it.
-        while let Some(&last) = bytes[i + scheme..end].last() {
+        while let Some(&last) = bytes[i + head..end].last() {
             let unbalanced = |open: u8, close: u8| {
                 last == close && {
                     let u = &bytes[i..end];
@@ -37,17 +59,17 @@ pub fn find_urls(s: &str) -> Vec<Range<usize>> {
             };
             if matches!(last, b'.' | b',' | b';' | b':' | b'!' | b'?' | b'\'' | b'*' | b'_')
                 || unbalanced(b'(', b')')
-                || unbalanced(b'[', b']')
+                || (unbalanced(b'[', b']') && !(bare && end == i + head))
             {
                 end -= 1;
             } else {
                 break;
             }
         }
-        if end > i + scheme {
+        if bare || end > i + head {
             out.push(i..end);
         }
-        i = end.max(i + scheme);
+        i = end.max(i + head);
     }
     out
 }
@@ -81,7 +103,8 @@ pub fn autolink(md: &str) -> String {
                 continue;
             }
             let mut last = 0;
-            for r in find_urls(piece) {
+            // Only those with a scheme: `<localhost:8000>` would be a link to nowhere.
+            for r in find_urls(piece).into_iter().filter(|r| piece[r.clone()].starts_with("http")) {
                 let before = &piece[..r.start];
                 let linked = before.ends_with('<') || before.ends_with("](") || before.ends_with('[') || before.ends_with("]: ");
                 if linked {
@@ -137,6 +160,19 @@ mod tests {
         assert_eq!(urls("(see https://en.wikipedia.org/wiki/Rust_(language))"), ["https://en.wikipedia.org/wiki/Rust_(language)"]);
         assert_eq!(urls("(https://a.com)"), ["https://a.com"]);
         assert_eq!(urls("xhttps://a.com http:// nope"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn this_machine_without_a_scheme_is_found_too() {
+        assert_eq!(urls("Uvicorn running on localhost:8000 (Press CTRL+C to quit)"), ["localhost:8000"]);
+        assert_eq!(urls("docs at 127.0.0.1:8765/docs?x=1."), ["127.0.0.1:8765/docs?x=1"]);
+        assert_eq!(urls("Listening on 0.0.0.0:6006, [::1]:6006/ and (localhost:5173/app)."), ["0.0.0.0:6006", "[::1]:6006/", "localhost:5173/app"]);
+        assert_eq!(urls("http://localhost:8000/x and localhost:1"), ["http://localhost:8000/x", "localhost:1"]);
+        // Not inside a longer host or word, not without a port, not a port that is none.
+        for no in ["mylocalhost:80", "x.127.0.0.1:80", "a-localhost:80", "ftp://localhost:21", "me@localhost:22", "localhost", "localhost:", "localhost:abc", "localhost:80abc", "localhost:123456", "localhost:70000", "10.0.0.0.0:80", "127.0.0.1:80.5", "::127.0.0.1:80"] {
+            assert_eq!(urls(no), Vec::<&str>::new(), "{no}");
+        }
+        assert_eq!(autolink("see localhost:8000 or http://localhost:8000"), "see localhost:8000 or <http://localhost:8000>");
     }
 
     #[test]

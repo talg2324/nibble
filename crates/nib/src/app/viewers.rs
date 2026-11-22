@@ -455,12 +455,13 @@ impl Tab {
             svg: None,
             lsp_synced: None,
             diff: false,
+            web: None,
         }
     }
 
     /// Shows something other than the editable text, so typing and cursor keys don't apply.
     pub(super) fn passive(&self) -> bool {
-        self.diff || self.media.is_some() || (self.kind == Kind::Csv && self.rendered)
+        self.diff || self.web.is_some() || self.media.is_some() || (self.kind == Kind::Csv && self.rendered)
     }
 
     fn csv_delimiter(&self) -> Option<u8> {
@@ -809,6 +810,9 @@ impl App {
         let th = &self.theme;
         if tab.diff {
             return self.diff_view();
+        }
+        if let Some(page) = tab.web {
+            return self.web_view(page);
         }
         if let Some(m) = &tab.media {
             if let Some(v) = m.pdf() {

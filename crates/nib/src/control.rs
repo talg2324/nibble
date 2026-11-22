@@ -22,9 +22,14 @@ use std::sync::{mpsc, Arc, Mutex};
 /// How long a connection waits for the app to answer one request. A person typing a password,
 /// and ssh connecting (and uploading nibd), take longer than the rest.
 fn reply_timeout(req: &Value) -> std::time::Duration {
+    // Starting the browser; waiting for a page as long as was asked.
+    if let Some(secs) = nib_proto::web::reply_secs(req) {
+        return std::time::Duration::from_secs_f64(secs);
+    }
     let secs = match req.get("cmd").and_then(Value::as_str).unwrap_or("") {
         "askpass" => 600,
         "ssh.connect" | "ssh.test" => 180,
+        "forward.add" => 90,
         _ => 30,
     };
     std::time::Duration::from_secs(secs)
@@ -35,8 +40,11 @@ fn reply_timeout(req: &Value) -> std::time::Duration {
 #[derive(Clone)]
 pub struct Call {
     pub req: Value,
-    tx: Arc<Mutex<Option<mpsc::Sender<Value>>>>,
+    /// Where the answer goes (a socket's connection, another request's answer); taken once.
+    answer: Arc<Mutex<Option<Answer>>>,
 }
+
+type Answer = Box<dyn FnOnce(Value) + Send>;
 
 impl std::fmt::Debug for Call {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -49,7 +57,18 @@ impl Call {
     #[cfg(test)]
     pub fn test(req: Value) -> (Self, mpsc::Receiver<Value>) {
         let (tx, rx) = mpsc::channel();
-        (Self { req, tx: Arc::new(Mutex::new(Some(tx))) }, rx)
+        (Self::then(req, move |v| drop(tx.send(v))), rx)
+    }
+    /// A request the window makes of itself (a server's page, once the server is ready):
+    /// nobody waits for the answer.
+    pub fn internal(req: Value) -> Self {
+        Self { req, answer: Arc::new(Mutex::new(None)) }
+    }
+    /// A request whose answer (`{"ok": …}`) is given to `answer`, on whichever thread answers:
+    /// one that came another way than the socket (an agent's, through the daemon), or one made
+    /// on the way to answering another.
+    pub fn then(req: Value, answer: impl FnOnce(Value) + Send + 'static) -> Self {
+        Self { req, answer: Arc::new(Mutex::new(Some(Box::new(answer)))) }
     }
     pub fn cmd(&self) -> &str {
         self.req.get("cmd").and_then(Value::as_str).unwrap_or("")
@@ -68,9 +87,14 @@ impl Call {
     pub fn err(&self, e: impl std::fmt::Display) {
         self.send(json!({ "ok": false, "error": e.to_string() }));
     }
+    /// Answer with `v` as it is (another request's answer, passed on).
+    pub fn reply(&self, v: Value) {
+        self.send(v);
+    }
     fn send(&self, v: Value) {
-        if let Some(tx) = self.tx.lock().unwrap().take() {
-            let _ = tx.send(v);
+        let answer = self.answer.lock().unwrap().take();
+        if let Some(answer) = answer {
+            answer(v);
         }
     }
 }
@@ -126,6 +150,8 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        crate::web::shutdown();
+        crate::forward::clear_now();
         let _ = std::fs::remove_file(&self.sock);
         if let Some(r) = RUN.get() {
             log("exit", "");
@@ -295,7 +321,7 @@ mod sys {
                 Ok(req) if req.is_object() => {
                     let (tx, rx) = mpsc::channel();
                     let timeout = reply_timeout(&req);
-                    let call = Call { req, tx: Arc::new(Mutex::new(Some(tx))) };
+                    let call = Call::then(req, move |v| drop(tx.send(v)));
                     if out.unbounded_send(wrap(call)).is_err() {
                         return Ok(()); // the window is gone
                     }
@@ -407,8 +433,79 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
                        (state.ai.efforts); taken when its session starts
   ai system-prompt TEXT  replace what the shown agent adds to its system prompt (empty: none)
   ai system            show the system prompt pane beside the steps
-  wait [SECS]          until nothing is waiting on the daemon (default 10 s)
+  wait [SECS]          until nothing is waiting on the daemon and no server is on its way to
+                       ready (default 10 s)
   raw JSON             send one request as-is, e.g. raw '{\"cmd\":\"state\"}'
+
+Local apps (a page served by this machine, shown in a web tab; read and operated from here, so no
+browser automation is needed). Runs in the system's browser, unseen (Firefox, Chrome, Edge, Brave
+or Chromium). Only this machine's pages: anything else is refused, and never opened for you.
+Every request takes --tab T: a tab's number in `web list`, its port, or the start of its name
+(default: the tab used last).
+  web open PORT|URL            show an app (http://127.0.0.1:PORT/ for a port); the same app
+                               again is the same tab. Its tab comes forward (--background: not).
+                               In a window on another machine (SSH) the port is that machine's:
+                               it is forwarded here first (`forwarded` in the answer; below)
+  web open PROFILE:PORT[/PATH] a port of a saved SSH connection, forwarded here and shown
+                               (TensorBoard on the GPU machine: web open gpu:6006)
+  web list                     the web tabs: name, address, loading
+  web read [--full]            the page as text with what can be acted on marked [N name], those
+                               elements (ref, role, name, value, checked, options, disabled,
+                               offscreen, frame), and since the last read: console errors and
+                               warnings, failed requests, downloads; `blocked`: an address
+                               outside this machine the page tried to show; `dialog`: one waiting
+  web click N                  click element N of the last read
+  web fill N TEXT              empty field N and type TEXT (a <select>: choose that option);
+                               then waits 0.4 s, as pages take a typed value after a pause
+                               (--no-wait: don't)
+  web select N OPTION          choose an option of <select> N by its text or value
+  web type TEXT | web key CHORD
+                               type into, or press a chord in, whatever has the keyboard in
+                               the page (key shift+enter, key mod+s, key escape)
+  web scroll N | +PX | -PX     bring element N into view, or scroll down / up
+  web wait [TEXT | N] [--gone] [--secs S]
+                               until the page shows TEXT, or element N (--gone: no longer),
+                               or with neither: has loaded. Default 10 s; an error if not
+  web shot [FILE] [--full] [--ref N]
+                               a PNG of the page as it shows, of the whole document, or of
+                               one element (default: <run dir>/snapshots/NNN.png)
+  web dialog accept|dismiss [TEXT]
+                               answer an alert / confirm / prompt (TEXT: what to type in it)
+  web upload N FILE…           give file input N its files
+  web back | web reload
+  web pointer X Y [move|click|down|up|wheel PX]
+                               the mouse in the web tab in front, at X Y of the page (what a
+                               person does there, the tab's own lists and dialogs included;
+                               agents use click N instead). state.web.window says what shows
+  web eval JS                  the value of an expression in the page
+  web close                    close the tab (the last one: the browser too)
+
+Servers (the project's backend, frontend, TensorBoard…: defined in serve.json in the project's
+NIBDIR on the daemon's machine, each run in a terminal of the window, stopped when it closes):
+  serve list                   every server: name, state, port, view, terminal, cmd. States:
+                               stopped, waiting (for the servers it comes after), starting,
+                               ready (its port answers), exited(CODE), port-taken (something
+                               else already listens there: it was not started)
+  serve set NAME --cmd \"…\" [--port N] [--after A,B] [--view /path] [--cwd DIR] [--title T] [--env K=V]…
+                               define or redefine one: the shell command, the port it listens
+                               on (127.0.0.1), the servers whose ports must answer first, the
+                               page to show in a web tab once it is ready, the folder (inside
+                               the project) to run in, the web tab's name, environment
+  serve rm NAME                stop it and forget it
+  serve up [NAME…]             start them (none named: all), with the servers they come
+                               after; answers at once: `wait`, or poll `serve list`, for ready
+  serve down [NAME…]           stop them (none named: all); their terminals close
+  serve restart NAME           stop it, wait for its port to be free, start it
+  serve log NAME [--lines N]   what its terminal shows (state.terminals[].screen)
+
+Ports of another machine (the web tab shows this machine's pages only, so a remote port is
+brought here over ssh: to the same port number when it is free, else the next free one, with a
+warning). `web open` and a ready server do this by themselves; a link clicked in a terminal too.
+  forward list                 state.forwards: local (the port here), remote, host
+  forward add [PROFILE:]PORT   bring a port here and keep it: the window's machine's, or a saved
+                               SSH connection's. Keys only: ssh asks nothing
+  forward rm LOCALPORT         take one down (also: when its web tab closes or its server
+                               stops, when the window changes machine or root, when it quits)
 
 SSH (saved connections are [profiles] in config.toml; the window switches in place):
   ssh list                         saved connections, where the window is, ~/.ssh/config hosts
@@ -489,7 +586,7 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         }
         ["run", name] => json!({ "cmd": "run", "command": name }),
         ["key", chord] => json!({ "cmd": "key", "chord": chord }),
-        ["type", text] => json!({ "cmd": "type", "text": unescape(text) }),
+        ["type", text] => json!({ "cmd": "type", "text": nib_proto::web::unescape(text) }),
         ["open", path] => json!({ "cmd": "open", "path": path }),
         ["search", "--next"] => json!({ "cmd": "search", "do": "next" }),
         ["search", "--prev"] => json!({ "cmd": "search", "do": "prev" }),
@@ -541,6 +638,9 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
             let name: Vec<&str> = rest.iter().enumerate().filter(|(i, _)| at.is_none_or(|a| *i != a && *i != a + 1)).map(|(_, w)| *w).collect();
             json!({ "cmd": "ai.use", "agent": name.join(" "), "model": model })
         }
+        ["web", rest @ ..] => web_request(rest)?,
+        ["serve", rest @ ..] => serve_request(rest)?,
+        ["forward", rest @ ..] => forward_request(rest)?,
         ["raw", j] => serde_json::from_str(j).context("raw: bad JSON")?,
         ["ssh", rest @ ..] => ssh_request(rest)?,
         ["wait"] | ["wait", _] => Value::Null,
@@ -576,6 +676,67 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         }
     }
     Ok(print(&sys::call(&sock, &req)?))
+}
+
+/// `nib ctl web …` as a request: the same words an agent's `nib-web` takes (`nib_proto::web`).
+fn web_request(a: &[&str]) -> anyhow::Result<Value> {
+    nib_proto::web::request(a).map_err(|e| match e.starts_with("web: unknown request") {
+        true => anyhow::anyhow!("{e}\n{CTL_USAGE}"),
+        false => anyhow::anyhow!(e),
+    })
+}
+
+/// `nib ctl forward …` as a request.
+fn forward_request(a: &[&str]) -> anyhow::Result<Value> {
+    use anyhow::{bail, Context};
+    let port = |p: &str| p.parse::<u16>().ok().filter(|p| *p != 0).with_context(|| format!("forward: {p:?} is not a port (1 to 65535)"));
+    Ok(match a {
+        ["list"] => json!({ "cmd": "forward.list" }),
+        ["rm", local] => json!({ "cmd": "forward.rm", "local": port(local)? }),
+        ["add", what] => match what.rsplit_once(':') {
+            Some((profile, p)) if !profile.is_empty() => json!({ "cmd": "forward.add", "profile": profile, "port": port(p)? }),
+            _ => json!({ "cmd": "forward.add", "port": port(what)? }),
+        },
+        _ => bail!("forward: list, add [PROFILE:]PORT or rm LOCALPORT\n{CTL_USAGE}"),
+    })
+}
+
+/// `nib ctl serve …` as a request.
+fn serve_request(a: &[&str]) -> anyhow::Result<Value> {
+    use anyhow::{bail, Context};
+    Ok(match a {
+        ["list"] => json!({ "cmd": "serve.list" }),
+        [c @ ("rm" | "restart"), name] => json!({ "cmd": format!("serve.{c}"), "name": name }),
+        [c @ ("up" | "down"), names @ ..] => json!({ "cmd": format!("serve.{c}"), "names": names }),
+        ["log", name] => json!({ "cmd": "serve.log", "name": name }),
+        ["log", name, "--lines", n] => json!({ "cmd": "serve.log", "name": name, "lines": n.parse::<u64>().context("serve log: --lines takes a number")? }),
+        ["set", name, opts @ ..] => {
+            let mut def = serde_json::Map::new();
+            let mut env = serde_json::Map::new();
+            let mut it = opts.iter();
+            while let Some(o) = it.next() {
+                let v = *it.next().with_context(|| format!("serve set: {o} needs a value"))?;
+                match *o {
+                    "--cmd" | "--view" | "--cwd" | "--title" => drop(def.insert(o[2..].into(), json!(v))),
+                    "--port" => drop(def.insert("port".into(), json!(v.parse::<u16>().context("serve set: --port takes a number from 1 to 65535")?))),
+                    "--after" => drop(def.insert("after".into(), json!(v.split(',').filter(|s| !s.is_empty()).collect::<Vec<_>>()))),
+                    "--env" => {
+                        let (k, val) = v.split_once('=').context("serve set: --env takes NAME=VALUE")?;
+                        env.insert(k.into(), json!(val));
+                    }
+                    other => bail!("serve set: unknown option {other}\n{CTL_USAGE}"),
+                }
+            }
+            if !def.contains_key("cmd") {
+                bail!("serve set NAME needs --cmd \"…\"");
+            }
+            if !env.is_empty() {
+                def.insert("env".into(), Value::Object(env));
+            }
+            json!({ "cmd": "serve.set", "name": name, "def": def })
+        }
+        _ => bail!("serve: unknown request {:?}\n{CTL_USAGE}", a.join(" ")),
+    })
 }
 
 /// `nib ctl ssh …` as a request.
@@ -620,31 +781,53 @@ fn ssh_request(a: &[&str]) -> anyhow::Result<Value> {
     Ok(req)
 }
 
-/// `\n`, `\t` and `\\` in `type` text, so a shell argument can carry Enter and Tab.
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars();
-    while let Some(c) = it.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match it.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('\\') => out.push('\\'),
-            Some(o) => {
-                out.push('\\');
-                out.push(o);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
 /// Paths on this machine, absolute (the window may have another working directory).
 fn abs_paths(paths: &[&str]) -> anyhow::Result<Vec<String>> {
     let cwd = std::env::current_dir()?;
     Ok(paths.iter().map(|p| cwd.join(p).to_string_lossy().into_owned()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forward_requests_from_the_command_line() {
+        assert_eq!(forward_request(&["list"]).unwrap(), json!({ "cmd": "forward.list" }));
+        assert_eq!(forward_request(&["add", "8765"]).unwrap(), json!({ "cmd": "forward.add", "port": 8765 }));
+        assert_eq!(forward_request(&["add", "gpu:6006"]).unwrap(), json!({ "cmd": "forward.add", "profile": "gpu", "port": 6006 }));
+        assert_eq!(forward_request(&["rm", "6007"]).unwrap(), json!({ "cmd": "forward.rm", "local": 6007 }));
+        for wrong in [&["add"][..], &["add", "gpu"], &["add", "gpu:"], &["add", "0"], &["add", "70000"], &["rm"], &["rm", "x"], &["dance"]] {
+            assert!(forward_request(wrong).is_err(), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn an_answer_goes_where_the_request_came_from_once() {
+        let (tx, rx) = mpsc::channel();
+        let call = Call::then(json!({ "cmd": "web.read" }), move |v| drop(tx.send(v)));
+        call.clone().ok(json!({ "text": "hi" }));
+        call.err("too late");
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [json!({ "ok": true, "text": "hi" })]);
+        Call::internal(json!({})).ok(json!({}));
+    }
+
+    #[test]
+    fn serve_requests_from_the_command_line() {
+        assert_eq!(serve_request(&["list"]).unwrap(), json!({ "cmd": "serve.list" }));
+        assert_eq!(serve_request(&["up"]).unwrap(), json!({ "cmd": "serve.up", "names": [] }));
+        assert_eq!(serve_request(&["down", "a", "b"]).unwrap(), json!({ "cmd": "serve.down", "names": ["a", "b"] }));
+        assert_eq!(serve_request(&["restart", "a"]).unwrap(), json!({ "cmd": "serve.restart", "name": "a" }));
+        assert_eq!(serve_request(&["log", "a", "--lines", "5"]).unwrap(), json!({ "cmd": "serve.log", "name": "a", "lines": 5 }));
+        let set = serve_request(&["set", "web", "--cmd", "npm run dev", "--port", "5173", "--after", "api,db", "--view", "/", "--env", "A=1", "--env", "B=x=y"]).unwrap();
+        assert_eq!(
+            set,
+            json!({ "cmd": "serve.set", "name": "web", "def": { "cmd": "npm run dev", "port": 5173, "after": ["api", "db"], "view": "/", "env": { "A": "1", "B": "x=y" } } })
+        );
+        // What the window turns into the daemon's definition.
+        assert!(serde_json::from_value::<nib_proto::ServerDef>(set["def"].clone()).is_ok());
+        for wrong in [&["set", "web"][..], &["set", "web", "--port", "1"], &["set", "web", "--cmd", "x", "--port", "70000"], &["set", "web", "--cmd"], &["restart"], &["dance"]] {
+            assert!(serve_request(wrong).is_err(), "{wrong:?}");
+        }
+    }
 }

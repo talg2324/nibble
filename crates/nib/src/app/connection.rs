@@ -169,6 +169,9 @@ impl App {
                 let after = match hello {
                     Some(true) => {
                         self.greeted();
+                        // The project's servers, before anybody asks: `state.servers` and the
+                        // terminals of those that run are right from the start.
+                        let servers = self.serve_ask(nib_proto::ServeOp::List, None, true);
                         // The AI panel stayed open through the switch: look on this machine.
                         let ai = if self.ai.open { self.ai_check(None) } else { Task::none() };
                         let browse = if std::mem::take(&mut self.ssh.browse_next) {
@@ -177,7 +180,7 @@ impl App {
                         } else {
                             Task::none()
                         };
-                        Task::batch([ai, browse])
+                        Task::batch([ai, browse, servers])
                     }
                     // A root change the daemon refused: it kept the old root, so show that again.
                     Some(false) if self.connected => {
@@ -322,6 +325,8 @@ impl App {
         }
         crate::control::log("conn", &format!("root -> {root}"));
         self.epoch += 1;
+        // Another project: its servers are others, and so are the ports worth having here.
+        crate::forward::clear();
         // Answers about the old root would land in the new tree.
         self.pending.retain(|_, p| !matches!(p, Pending::Tree | Pending::TreeGit | Pending::TreeFs { .. } | Pending::Git { .. } | Pending::GitDetails));
         let open = self.tree.open;
@@ -398,6 +403,9 @@ impl App {
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
         self.closed.clear();
         self.terms.clear();
+        self.serve_reset();
+        // What was forwarded from the old machine is not the new one's.
+        crate::forward::clear();
         self.terms_visible = false;
         self.last_term = None;
         let open = self.tree.open;
