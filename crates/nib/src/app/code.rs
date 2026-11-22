@@ -782,7 +782,7 @@ impl<'a> markdown::Viewer<'a, Message> for MarkdownViewer<'a> {
         match (math::get(self.math, url), picture) {
             (Some(f), _) => container(math::display(f, settings.text_size.0, self.color)).padding([settings.spacing.0 / 2.0, 0.0]).into(),
             (None, Some(img)) => {
-                let pic = container(img.view()).max_height(REPLY_IMAGE_MAX_H).padding([settings.spacing.0 / 2.0, 0.0]);
+                let pic = container(super::peek::peek(img.view(), img)).max_height(REPLY_IMAGE_MAX_H).padding([settings.spacing.0 / 2.0, 0.0]);
                 mouse_area(pic)
                     .on_press(Message::Ai(super::ai::Msg::OpenImage(url.clone())))
                     .interaction(mouse::Interaction::Pointer)

@@ -5,6 +5,7 @@ mod control;
 mod drop;
 mod git;
 mod pdf_tab;
+mod peek;
 mod search;
 mod settings;
 mod ssh;

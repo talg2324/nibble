@@ -1119,7 +1119,7 @@ impl App {
                         _ => None,
                     };
                     match pic {
-                        Some(p) => mark(icon, column![row, container(p.view()).max_height(PICTURE_HEIGHT)].spacing(4).into()),
+                        Some(p) => mark(icon, column![row, container(crate::app::peek::peek(p.view(), p)).max_height(PICTURE_HEIGHT)].spacing(4).into()),
                         None => mark(icon, row),
                     }
                 }
