@@ -136,6 +136,11 @@ fn running(c: &Chat) -> Option<&Step> {
     c.turns.iter().rev().filter_map(|t| t.step.as_ref()).find(|s| s.done.is_none())
 }
 
+/// How many sub-agents it sent to the background are still at work.
+fn helpers(c: &Chat) -> usize {
+    c.turns.iter().filter_map(|t| t.step.as_ref()).filter(|s| s.background && s.done.is_none()).count()
+}
+
 /// What the agent is doing, in a word or two.
 pub(super) fn state_of(c: &Chat) -> (String, Tone) {
     if c.frozen {
@@ -153,6 +158,10 @@ pub(super) fn state_of(c: &Chat) -> (String, Tone) {
         return ("compacting".into(), Tone::Working);
     }
     if !c.busy {
+        // Its turn is over, but a sub-agent it sent to the background still works.
+        if helpers(c) > 0 {
+            return ("idle · helper at work".into(), Tone::Working);
+        }
         return (if c.turns.is_empty() { "new" } else { "idle" }.into(), Tone::Idle);
     }
     let step = running(c);
@@ -184,11 +193,15 @@ pub(super) fn state_of(c: &Chat) -> (String, Tone) {
 
 /// A running command's clock: the text, whether it counts down, and what kind of wait it is.
 fn step_clock(s: &Step) -> Option<(String, bool, &'static str)> {
-    let AiStepKind::Command { command, .. } = &s.kind else { return None };
     if s.done.is_some() {
         return None;
     }
     let elapsed = s.started.elapsed().as_secs_f64();
+    let command = match &s.kind {
+        AiStepKind::Command { command, .. } => command,
+        AiStepKind::Agent { .. } => return Some((wait::clock(elapsed.floor()), false, if s.background { "in the background" } else { "running" })),
+        _ => return None,
+    };
     Some(match wait::of(command) {
         Some(w) if w.leading && elapsed < w.secs => (wait::clock(w.secs - elapsed), true, if w.bound { "timeout: may end sooner" } else { "sleeping" }),
         _ => (wait::clock(elapsed.floor()), false, "running"),
@@ -216,6 +229,7 @@ pub(super) fn step_json(s: &Step) -> Value {
         "kind": kind,
         "what": what,
         "running": s.done.is_none(),
+        "background": s.background,
         "ok": s.done.as_ref().map(|d| d.ok),
         "output": s.done.as_ref().map(|d| d.output.as_str()),
         "line": s.done.as_ref().and_then(|d| d.line),
@@ -1225,7 +1239,34 @@ impl App {
                 column![body, copy].spacing(2).align_x(Alignment::End).into()
             }
         };
+        // The sub-agent the steps just shown were under: where another's (or the agent's own)
+        // start, a line says whose they are, since they come mixed in with the agent's own work.
+        let mut under: Option<&str> = None;
         for (i, t) in ai.turns.iter().enumerate() {
+            let parent = t.step.as_ref().and_then(|s| s.parent.as_deref());
+            if t.who == Who::Step && parent != under {
+                if let Some(p) = parent {
+                    let helper = ai.turns.iter().filter_map(|t| t.step.as_ref()).find(|s| s.id == p);
+                    let what = match helper.map(|h| &h.kind) {
+                        Some(AiStepKind::Agent { description }) => clip(description, 80),
+                        _ => "a sub-agent".into(),
+                    };
+                    let state = match helper.and_then(|h| h.done.as_ref()) {
+                        None if helper.is_some_and(|h| h.background) => "· in the background, its own steps:",
+                        None => "· its own steps:",
+                        Some(_) => "· its steps:",
+                    };
+                    let head = row![
+                        svg(self.icons.network.clone()).width(11).height(11),
+                        text(format!("helper: {what}")).size(11).font(self.face.font).color(fg),
+                        text(state).size(11).color(dim),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center);
+                    feed = feed.push(container(head).padding(Padding { left: MARK_WIDTH + 4.0, ..Padding::ZERO }));
+                }
+                under = parent;
+            }
             let turn: Element<'a, Message> = match (t.who, &t.step) {
                 // The plan being asked about shows at the end, with what to answer.
                 (_, Some(s)) if ai.asked_plan() == Some(&s.id) => continue,

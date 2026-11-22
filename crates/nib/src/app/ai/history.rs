@@ -101,7 +101,7 @@ fn revive(key: u64, past: AiPast, entries: Vec<AiPastEntry>, root: &str) -> Chat
             AiPastEntry::Text(t) => turns.push(said(&t)),
             AiPastEntry::Note(t) => turns.push(plain(Who::Note, t)),
             AiPastEntry::Mail(m) => turns.push(plain(Who::Mail, if m.incoming { format!("from {}: {}", m.from, m.text) } else { format!("to {}: {}", m.to, m.text) })),
-            AiPastEntry::Step(s) => turns.push(Turn { step: Some(Step { id: s.id, parent: s.parent, acts: super::act::of(&s.kind, root), kind: s.kind, started: Instant::now(), done: None }), ..plain(Who::Step, String::new()) }),
+            AiPastEntry::Step(s) => turns.push(Turn { step: Some(Step { id: s.id, parent: s.parent, acts: super::act::of(&s.kind, root), kind: s.kind, started: Instant::now(), done: None, background: false }), ..plain(Who::Step, String::new()) }),
             AiPastEntry::StepDone { done, seconds } => {
                 if let Some(step) = turns.iter_mut().rev().filter_map(|t| t.step.as_mut()).find(|s| s.id == done.id) {
                     step.done = Some(StepEnd { ok: done.ok, output: done.output, line: done.line, took: Duration::from_secs_f32(seconds.max(0.0)) });
@@ -111,7 +111,7 @@ fn revive(key: u64, past: AiPast, entries: Vec<AiPastEntry>, root: &str) -> Chat
     }
     let mut chat = Chat { key, agent: Some(past.agent), chosen: past.model, name: past.name, past: Some(past.id), turns, ..Default::default() };
     // A step it never finished (the conversation was cut off) is over.
-    end_steps(&mut chat);
+    end_steps(&mut chat, true);
     chat
 }
 

@@ -91,6 +91,8 @@ struct Step {
     acts: Vec<act::Act>,
     started: Instant,
     done: Option<StepEnd>,
+    /// A sub-agent sent to the background: it goes on after the turn ends, until it reports.
+    background: bool,
 }
 
 struct StepEnd {
@@ -586,14 +588,38 @@ fn step_copy(s: &Step) -> Step {
         acts: s.acts.clone(),
         started: s.started,
         done: s.done.as_ref().map(|d| StepEnd { ok: d.ok, output: String::new(), line: d.line, took: d.took }),
+        background: s.background,
     }
 }
 
-/// The turn is over: a step the harness never closed (the turn was stopped) is over too.
-fn end_steps(c: &mut Chat) {
-    for s in c.turns.iter_mut().filter_map(|t| t.step.as_mut()).filter(|s| s.done.is_none()) {
+/// The turn is over: a step the harness never closed (the turn was stopped) is over too, but
+/// for a sub-agent in the background and what it is doing (`all`: those too, the session is
+/// gone).
+fn end_steps(c: &mut Chat, all: bool) {
+    let goes_on: Vec<String> = if all {
+        vec![]
+    } else {
+        let open = c.turns.iter().filter_map(|t| t.step.as_ref()).filter(|s| s.done.is_none());
+        open.filter(|s| in_background(c, Some(&s.id))).map(|s| s.id.clone()).collect()
+    };
+    for s in c.turns.iter_mut().filter_map(|t| t.step.as_mut()).filter(|s| s.done.is_none() && !goes_on.contains(&s.id)) {
         s.done = Some(StepEnd { ok: false, output: String::new(), line: None, took: s.started.elapsed() });
     }
+}
+
+/// Whether the step `parent` (and so one inside it) belongs to a sub-agent in the background,
+/// itself or one of the sub-agents it is inside.
+fn in_background<'a>(c: &'a Chat, mut parent: Option<&'a str>) -> bool {
+    let steps: Vec<&Step> = c.turns.iter().filter_map(|t| t.step.as_ref()).collect();
+    // A step can't be its own parent's parent, but a harness could say so: stop after them all.
+    for _ in 0..=steps.len() {
+        let Some(s) = parent.and_then(|p| steps.iter().rev().find(|s| s.id == p)) else { return false };
+        if s.background {
+            return true;
+        }
+        parent = s.parent.as_deref();
+    }
+    false
 }
 
 /// Whether an assistant's error means its sign-in is missing or no longer good.
@@ -1368,7 +1394,7 @@ impl App {
             }
             c.busy = false;
             c.frozen = false;
-            end_steps(c);
+            end_steps(c, true);
         }
     }
 
@@ -1984,7 +2010,11 @@ impl App {
                 return self.ai_fetch_images();
             }
             AiEvent::Step(s) => {
-                ai.busy = true;
+                // A step of a sub-agent in the background says nothing of the agent's own turn,
+                // which may be over.
+                if !in_background(ai, s.parent.as_deref()) {
+                    ai.busy = true;
+                }
                 if let Some(text) = plan_of(&s.kind) {
                     // Asked about later, if at all (a replayed conversation): shown folded. A step
                     // sent again never replaces the plan, nor what the user did in it.
@@ -2007,7 +2037,7 @@ impl App {
                     md: markdown::Content::new(),
                     math: Default::default(),
                     images,
-                    step: Some(Step { id: s.id, parent: s.parent, acts: act::of(&s.kind, &root), kind: s.kind, started: Instant::now(), done: None }),
+                    step: Some(Step { id: s.id, parent: s.parent, acts: act::of(&s.kind, &root), kind: s.kind, started: Instant::now(), done: None, background: false }),
                 });
                 if let Some(step) = self.ai.chats[self.ai.cur].turns.last().and_then(|t| t.step.as_ref()).map(step_copy) {
                     self.ai_follow_step(&step);
@@ -2028,6 +2058,12 @@ impl App {
                     self.ai_follow_done(&step);
                     return self.ai_file_changed(&step);
                 }
+            }
+            AiEvent::Background { id } => {
+                if let Some(step) = ai.turns.iter_mut().rev().filter_map(|t| t.step.as_mut()).find(|s| s.id == id) {
+                    step.background = true;
+                }
+                return self.ai_arm_clock();
             }
             AiEvent::Name(n) => ai.name = Some(n),
             AiEvent::Work(w) => return self.diff_work(id, w),
@@ -2081,7 +2117,7 @@ impl App {
                 ai.busy = false;
                 ai.compacting = false;
                 ai.ask = None;
-                end_steps(ai);
+                end_steps(ai, false);
                 // Stopped by the user: not an error.
                 ai.error = if std::mem::take(&mut ai.stopping) { None } else { error };
                 self.ai_follow_turn_done();
@@ -2103,7 +2139,7 @@ impl App {
                 ai.busy = false;
                 ai.frozen = false;
                 ai.ask = None;
-                end_steps(ai);
+                end_steps(ai, true);
                 let name = ai.agent.map_or("The assistant", AiAgent::name);
                 let msg = msg.unwrap_or_else(|| format!("{name} exited."));
                 ai.session = Session::Failed(if needs_login(&msg) { login_hint } else { msg });
@@ -2972,6 +3008,39 @@ mod tests {
         assert_eq!(stage::state_of(&a.ai).0, "idle");
         let _ = a.update(Message::Ai(Msg::Clock));
         assert!(!a.ai.ticking, "nothing runs: the clock stops");
+    }
+
+    #[test]
+    fn a_sub_agent_in_the_background_runs_past_the_turn_until_it_reports() {
+        let mut a = chatting();
+        say(&mut a, "go");
+        event(&mut a, 7, step("a1", AiStepKind::Agent { description: "Build servers".into() }));
+        event(&mut a, 7, AiEvent::Background { id: "a1".into() });
+        event(&mut a, 7, AiEvent::Text("It runs.".into()));
+        event(&mut a, 7, AiEvent::TurnDone { error: None });
+        let s = a.ai_state_json();
+        assert_eq!((&s["steps"][0]["running"], &s["steps"][0]["background"]), (&json!(true), &json!(true)), "the turn's end is not the helper's");
+        assert_eq!(s["steps"][0]["clock"], "00:00");
+        assert_eq!(stage::state_of(&a.ai), ("idle · helper at work".into(), stage::Tone::Working));
+        assert!(a.ai.ticking);
+        // Its own steps come later, under it.
+        event(&mut a, 7, AiEvent::Step(nib_proto::AiStep { id: "t9".into(), parent: Some("a1".into()), kind: command("cargo build") }));
+        assert!(!a.ai.busy, "the helper at work does not make the agent's own turn go on");
+        // The agent's next turn ends while the helper's command still runs: it goes on too.
+        say(&mut a, "meanwhile");
+        event(&mut a, 7, AiEvent::TurnDone { error: None });
+        assert_eq!(a.ai_state_json()["steps"][1]["running"], json!(true), "the helper's own step is not the turn's");
+        event(&mut a, 7, done("t9", true, ""));
+        event(&mut a, 7, done("a1", true, "built"));
+        let s = a.ai_state_json();
+        assert_eq!((&s["steps"][0]["running"], &s["steps"][0]["ok"], &s["steps"][1]["parent"]), (&json!(false), &json!(true), &json!("a1")));
+        assert_eq!(stage::state_of(&a.ai).0, "idle");
+        // The session going away ends one still at work.
+        say(&mut a, "again");
+        event(&mut a, 7, step("a2", AiStepKind::Agent { description: "More".into() }));
+        event(&mut a, 7, AiEvent::Background { id: "a2".into() });
+        event(&mut a, 7, AiEvent::Exit { msg: None });
+        assert_eq!(a.ai_state_json()["steps"][2]["running"], json!(false));
     }
 
     #[test]

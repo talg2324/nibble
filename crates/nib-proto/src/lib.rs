@@ -926,6 +926,9 @@ pub enum AiEvent {
     Step(AiStep),
     /// That step ended.
     StepDone(AiStepDone),
+    /// That step (a sub-agent) was started in the background: it goes on after its launch,
+    /// past the end of the turn, and a later `StepDone` ends it.
+    Background { id: String },
     /// The agent wants to do something its mode doesn't let it do unasked; it waits for
     /// `AiAnswer`.
     Ask(AiAsk),

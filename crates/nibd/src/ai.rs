@@ -22,7 +22,7 @@ use nib_proto::{
     AiAgent, AiAgentInfo, AiAsk, AiEvent, AiOption, AiQuestion, AiId, AiImage, AiLimit, AiMode, AiModel, AiSkill, AiStep, AiStepDone, AiStepKind, AiUsage, ErrorKind, RpcError, ServerMsg, ServerNotify, SkillGroup,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1529,6 +1529,9 @@ struct Turn {
     limits: Vec<AiLimit>,
     /// See `Session::Stream`.
     asks: Asks,
+    /// The steps of sub-agents running in the background: their launch came back at once, and
+    /// a `task_notification` ends them.
+    background: HashSet<String>,
 }
 
 /// The sum of the token counts at `keys` in `usage` (`None` when it has none of them).
@@ -1632,12 +1635,19 @@ impl Turn {
                     let context = lines.iter().take_while(|l| l.as_str().is_some_and(|l| l.starts_with(' '))).count();
                     Some((start + context as u64) as u32)
                 });
+                // A sub-agent sent to the background: its launch is not its end.
+                let launched = v.pointer("/tool_use_result/status").and_then(Value::as_str) == Some("async_launched");
                 let blocks = v.pointer("/message/content").and_then(Value::as_array);
                 blocks
                     .into_iter()
                     .flatten()
                     .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
                     .filter_map(|b| {
+                        if launched {
+                            let id = s(b, "tool_use_id")?;
+                            self.background.insert(id.clone());
+                            return Some(AiEvent::Background { id });
+                        }
                         let output = match b.get("content") {
                             Some(Value::String(t)) => t.clone(),
                             Some(Value::Array(parts)) => parts.iter().filter_map(|p| p.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"),
@@ -1647,6 +1657,12 @@ impl Turn {
                         Some(AiEvent::StepDone(AiStepDone { id: s(b, "tool_use_id")?, ok, output: clip(output), line }))
                     })
                     .collect()
+            }
+            // A sub-agent in the background ended: its step does.
+            Some("system") if s(v, "subtype").as_deref() == Some("task_notification") => {
+                let Some(id) = s(v, "tool_use_id").filter(|id| self.background.remove(id)) else { return vec![] };
+                let ok = s(v, "status").as_deref() == Some("completed");
+                vec![AiEvent::StepDone(AiStepDone { id, ok, output: clip(s(v, "summary").unwrap_or_default()), line: None })]
             }
             // Its mode makes it ask before this tool call: the user answers (`answer`).
             Some("control_request") if v.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool") => {
@@ -2967,6 +2983,26 @@ mod tests {
         assert_eq!(read(&mut t, failed), [AiEvent::StepDone(AiStepDone { id: "t2".into(), ok: false, output: "exit 1".into(), line: None })]);
         // What the user typed is not a step.
         assert!(read(&mut t, r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#).is_empty());
+    }
+
+    #[test]
+    fn claude_background_sub_agent_ends_when_it_says_so() {
+        let mut t = Turn::default();
+        // Its launch comes back at once: the step goes on.
+        let launched = r#"{"type":"user","message":{"content":[{"tool_use_id":"a1","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"x"}}"#;
+        assert_eq!(read(&mut t, launched), [AiEvent::Background { id: "a1".into() }]);
+        // What it does is under it.
+        let inner = r#"{"type":"assistant","parent_tool_use_id":"a1","message":{"content":[{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"echo hi"}}]}}"#;
+        assert!(matches!(&read(&mut t, inner)[..], [AiEvent::Step(AiStep { parent: Some(p), .. })] if p == "a1"));
+        // A background command's notice is not about a step of this kind.
+        assert!(read(&mut t, r#"{"type":"system","subtype":"task_notification","tool_use_id":"b7","status":"completed","summary":"x"}"#).is_empty());
+        let end = r#"{"type":"system","subtype":"task_notification","task_id":"x","tool_use_id":"a1","status":"completed","summary":"done"}"#;
+        assert_eq!(read(&mut t, end), [AiEvent::StepDone(AiStepDone { id: "a1".into(), ok: true, output: "done".into(), line: None })]);
+        assert!(read(&mut t, end).is_empty(), "it ends once");
+        // One that failed or was stopped did not end well.
+        read(&mut t, &launched.replace("a1", "a2"));
+        let failed = read(&mut t, r#"{"type":"system","subtype":"task_notification","tool_use_id":"a2","status":"failed","summary":"no"}"#);
+        assert_eq!(failed, [AiEvent::StepDone(AiStepDone { id: "a2".into(), ok: false, output: "no".into(), line: None })]);
     }
 
     #[test]
