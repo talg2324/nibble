@@ -41,7 +41,7 @@ Every window has a run directory (`session.run_dir` in `state`, `hello` and `nib
 |---|---|
 | `ctl.sock` | the socket |
 | `meta.json` | pid, label, root, version, socket, log paths, `started` / `ended` (unix seconds) |
-| `nib.log` | the window's trace: every control request (yours included), refusals (`ctl!`), flash messages (`info` / `warn`), disconnects (`disc`), `start` / `exit` |
+| `nib.log` | the window's trace: every control request (yours included), refusals (`ctl!`), flash messages (`info` / `warn`), disconnects (`disc`), `start` / `exit`, and slow operations (`slow  rpc Diff 412.00ms`: requests, `update` steps, `view`, `draw`, `ping`; nibd logs its own as `slow  req …` / `notify …`). Launch with `NIB_TIMING=all` to log every operation as `time  …`; `NIB_SLOW_MS=N` sets the threshold (default 50 ms on the UI thread, 250 ms for the daemon) |
 | `snapshots/` | `001.png`, `002.png`, … — where `snapshot` saves by default |
 
 The daemon's stderr (nibd and ssh) is in `session.logs.nibd` (`~/.cache/nib/<target>.log`,
@@ -60,6 +60,9 @@ Rules:
 | | |
 |---|---|
 | `state` | `session` (run dir, socket, logs), `roots` (scratch and NIBDIR paths on the code's machine, which one the tree shows), title, focus, panels, tabs, active editor (cursor, selections with their text, visible lines), terminals (full screen text, cursor), `pending` daemon requests, last flash + recent `messages` |
+| `state.diff` | the diff tab (`run toggle_diff`; `null` while closed): `scope` (`head` / `unstaged` / `staged` / `everyone` / `agent:N`; `scopes` lists the ones on offer, `diff open SCOPE` shows one), `work` and `plan` (an agent's branch and plan, in its scope), `files` (path, status, adds, dels, folded), `cursor` and `at` (the row the keys act on: file, hunk or line with its numbers and text). Keys: `j` `k` rows, `n` `p` hunks, `]` `[` files, `s` or `1` `2` `3` scope, `space` stage / unstage the file, `enter` open the line. It follows the disk by itself (about a second) |
+| `diff comment` … `diff send` | review the agent's work the diff tab shows: `diff comment [--on PATH[:LINE[-END]]] TEXT` (lines of the file as it is now; no `--on`: the whole work), `diff reply ID TEXT`, `diff resolve|reopen|remove ID`, `diff send` (the open comments go to the agent as its next message). `state.diff.review.comments[]` has each comment with the agent's `replies`; `diff open since:N` shows what it changed since the review |
+| `ai diff` / `ai accept` | an agent said its job is done (`state.ai.accepting`): `ai diff` shows its work in the diff tab instead of answering; `ai accept` accepts it, which for an agent on its own branch (`state.diff.work.branch`) lands the branch as one commit first (`wait`, then `state.flash` says `landed …` or `not landed: …`) |
 | `snapshot [FILE]` | PNG of the window, by default into `snapshots/`; prints the path. Look at it with your image-reading tool. Not headless |
 | `commands` | every name `run` accepts (snake_case: `save`, `new_terminal`, `move_doc_end`, `toggle_git`, …) |
 | `run NAME` | run a command exactly as its shortcut would |

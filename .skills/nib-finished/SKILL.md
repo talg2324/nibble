@@ -25,6 +25,16 @@ nib-mail done --asked "WHAT YOU WERE ASKED" [--found "WHAT YOU FOUND OUT"] --did
 Run it as the last thing in your turn, after your normal reply, then stop. If the user writes
 to you again, the job is not finished: go on, and run `nib-mail done` again when it is.
 
+## On your own branch
+
+If you started a branch with `nib-work start` (the **nib-work** skill), accepting lands it:
+everything on your branch, committed or not, becomes **one commit** on the user's branch, with
+`--did` as its subject, and your work tree is removed. Before answering, the user can open your
+work as a pull request, your plan beside it. If the branch cannot be landed (theirs moved on,
+a conflict) you are told so instead of being ended: `nib-work sync`, resolve, check again, and
+run `nib-mail done` again. They can also send you review comments on your changes: answer each
+(`nib-review reply`, the nib-work skill's "A review"), then run `nib-mail done` again.
+
 ## When — and when not
 
 Use it only when **all** of these hold:
