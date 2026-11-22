@@ -7,12 +7,16 @@
 //! image through `display`, a paragraph holding links through `rich` (words and formulas in a
 //! wrapping row, since Iced's rich text can't hold pictures). A formula that doesn't parse is left
 //! as it was written.
+//!
+//! ```` ```mermaid ```` blocks go the same way as display math: laid out by mermaid-rs-renderer
+//! (Mermaid in Rust, no browser) into an SVG drawn in its own colours on its own background, at the
+//! text's size, scrolled sideways if it is wider than the pane.
 
 use iced::widget::markdown::Uri;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Tree, Widget};
 use iced::advanced::renderer;
-use iced::widget::{container, rich_text, row, svg, text};
+use iced::widget::{container, rich_text, row, scrollable, svg, text};
 use iced::{mouse, Color, Element, Length, Padding, Rectangle, Size};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::collections::HashMap;
@@ -33,6 +37,14 @@ const SCALE: f32 = 1.15;
 /// is padded so its baseline lines up with the text's.
 const MID: f32 = 0.33;
 
+/// What a reference stands for, and how it is drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
+    Inline,
+    Display,
+    Diagram,
+}
+
 pub struct Formula {
     pub svg: svg::Handle,
     /// In em, padding included.
@@ -40,6 +52,9 @@ pub struct Formula {
     /// Above and below the baseline, in em, padding included.
     pub ascent: f32,
     pub descent: f32,
+    /// A Mermaid diagram: drawn in its own colours, its em the diagram's font size (not tinted
+    /// with the text colour, not scaled up like math).
+    pub diagram: bool,
 }
 
 /// The formulas a piece of Markdown refers to, by link / image URL.
@@ -71,9 +86,15 @@ pub fn offset_before(marks: &[(usize, usize)], at: usize) -> usize {
     }
 }
 
-/// Whether `s` might hold math (a cheap test before `prepare`).
+/// Whether `s` might hold math or a diagram (a cheap test before `prepare`).
 pub fn maybe(s: &str) -> bool {
-    s.contains('$') || s.contains("\\(") || s.contains("\\[") || s.contains("```math") || s.contains("~~~math")
+    s.contains('$')
+        || s.contains("\\(")
+        || s.contains("\\[")
+        || s.contains("```math")
+        || s.contains("~~~math")
+        || s.contains("```mermaid")
+        || s.contains("~~~mermaid")
 }
 
 /// Typesets the formulas in `src` and replaces them with references.
@@ -90,9 +111,14 @@ pub fn prepare(src: &str) -> Prepared {
         while k < skips.len() && skips[k].0.end <= i {
             k += 1;
         }
-        if let Some((r, tex)) = skips.get(k).filter(|s| s.0.start <= i) {
-            if let Some(tex) = tex {
-                p.replace(src, &mut copied, r.clone(), tex, !in_any(&inline_only, r.start));
+        if let Some((r, block)) = skips.get(k).filter(|s| s.0.start <= i) {
+            match block {
+                Some((Fence::Math, tex)) => {
+                    let kind = if in_any(&inline_only, r.start) { Kind::Inline } else { Kind::Display };
+                    p.replace(src, &mut copied, r.clone(), tex, kind);
+                }
+                Some((Fence::Mermaid, code)) => p.replace(src, &mut copied, r.clone(), code, Kind::Diagram),
+                None => {}
             }
             i = r.end;
             continue;
@@ -115,8 +141,8 @@ pub fn prepare(src: &str) -> Prepared {
         };
         match found {
             Some((tex, end, display)) if !src[tex.clone()].trim().is_empty() => {
-                let display = display && !in_any(&inline_only, i);
-                p.replace(src, &mut copied, i..end, &src[tex], display);
+                let kind = if display && !in_any(&inline_only, i) { Kind::Display } else { Kind::Inline };
+                p.replace(src, &mut copied, i..end, &src[tex], kind);
                 i = end;
             }
             _ => i += 1,
@@ -127,16 +153,17 @@ pub fn prepare(src: &str) -> Prepared {
 }
 
 impl Prepared {
-    /// Replaces `src[range]` with a reference to `tex` typeset, if it typesets.
-    fn replace(&mut self, src: &str, copied: &mut usize, range: Range<usize>, tex: &str, display: bool) {
-        let Some(formula) = typeset(tex.trim(), display) else { return };
+    /// Replaces `src[range]` with a reference to `tex` typeset (or drawn, for a diagram), if it
+    /// typesets.
+    fn replace(&mut self, src: &str, copied: &mut usize, range: Range<usize>, tex: &str, kind: Kind) {
+        let Some(formula) = typeset(tex.trim(), kind) else { return };
         let mut h = DefaultHasher::new();
-        (display, tex.trim()).hash(&mut h);
+        (kind, tex.trim()).hash(&mut h);
         let url = format!("{SCHEME}{:016x}", h.finish());
         self.md.push_str(&src[*copied..range.start]);
         self.marks.push((self.md.len(), range.start));
-        let alt = escape(tex.trim());
-        if display {
+        let alt = if kind == Kind::Diagram { "Mermaid diagram".to_string() } else { escape(tex.trim()) };
+        if kind != Kind::Inline {
             let (prefix, at_marker) = line_prefix(src, range.start);
             // An image block of its own (Iced folds a paragraph's text before an image into the
             // image's alt text), in the same list item / quote as the text around it.
@@ -153,11 +180,20 @@ impl Prepared {
     }
 }
 
-/// A range where `$` isn't math, and the formula if it's a ```` ```math ```` block.
-type Skip = (Range<usize>, Option<String>);
+/// A fenced code block that becomes a picture.
+#[derive(Clone, Copy)]
+enum Fence {
+    Math,
+    Mermaid,
+}
+
+/// A range where `$` isn't math, and its text if it's a ```` ```math ```` or ```` ```mermaid ````
+/// block.
+type Skip = (Range<usize>, Option<(Fence, String)>);
 
 /// Code (spans, blocks, HTML, front matter) where `$` isn't math, with the text of ```` ```math ````
-/// blocks; and headings and tables, where display math stays inline. Both sorted by start.
+/// and ```` ```mermaid ```` blocks; and headings and tables, where display math stays inline. Both
+/// sorted by start.
 fn regions(src: &str) -> (Vec<Skip>, Vec<Range<usize>>) {
     let opts = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
@@ -166,17 +202,21 @@ fn regions(src: &str) -> (Vec<Skip>, Vec<Range<usize>>) {
         | Options::ENABLE_TASKLISTS;
     let mut skips: Vec<Skip> = Vec::new();
     let mut inline_only = Vec::new();
-    // The code block being read: its range, and its text if it is a math block.
-    let mut block: Option<(Range<usize>, Option<String>)> = None;
+    // The code block being read: its range, and its text if it becomes a picture.
+    let mut block: Option<Skip> = None;
     for (ev, r) in Parser::new_ext(src, opts).into_offset_iter() {
         match ev {
             Event::Start(Tag::CodeBlock(kind)) => {
-                let math = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.trim() == "math");
-                block = Some((r, math.then(String::new)));
+                let fence = match &kind {
+                    CodeBlockKind::Fenced(lang) if lang.trim() == "math" => Some(Fence::Math),
+                    CodeBlockKind::Fenced(lang) if lang.trim() == "mermaid" => Some(Fence::Mermaid),
+                    _ => None,
+                };
+                block = Some((r, fence.map(|f| (f, String::new()))));
             }
             Event::Text(t) => {
-                if let Some((_, Some(tex))) = &mut block {
-                    tex.push_str(&t);
+                if let Some((_, Some((_, text)))) = &mut block {
+                    text.push_str(&t);
                 }
             }
             Event::End(TagEnd::CodeBlock) => skips.extend(block.take()),
@@ -288,19 +328,23 @@ fn escape(tex: &str) -> String {
     out
 }
 
-/// Typeset formulas, so re-parsing (a reply streaming in, a document being edited) doesn't lay
-/// them out again. `None`: doesn't parse.
-type Cache = HashMap<(bool, String), Option<Arc<Formula>>>;
+/// Typeset formulas and drawn diagrams, so re-parsing (a reply streaming in, a document being
+/// edited) doesn't lay them out again. `None`: doesn't parse.
+type Cache = HashMap<(Kind, String), Option<Arc<Formula>>>;
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(Default::default);
 const CACHE_MAX: usize = 2048;
 
-fn typeset(tex: &str, display: bool) -> Option<Arc<Formula>> {
-    let key = (display, tex.to_string());
+fn typeset(tex: &str, kind: Kind) -> Option<Arc<Formula>> {
+    let key = (kind, tex.to_string());
     if let Some(f) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return f.clone();
     }
     // A layout bug must not take the editor down; the formula is then shown as written.
-    let f = std::panic::catch_unwind(|| render(tex, display)).ok().flatten().map(Arc::new);
+    let f = std::panic::catch_unwind(|| match kind {
+        Kind::Diagram => diagram(tex),
+        _ => render(tex, kind == Kind::Display),
+    });
+    let f = f.ok().flatten().map(Arc::new);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if cache.len() >= CACHE_MAX {
         cache.clear();
@@ -329,6 +373,31 @@ fn render(tex: &str, display: bool) -> Option<Formula> {
         width: (list.width + 2.0 * pad) as f32,
         ascent: (list.height + pad) as f32,
         descent: (list.depth + pad) as f32,
+        diagram: false,
+    })
+}
+
+/// A Mermaid diagram as an SVG, Mermaid's own default theme (light, on a white background, so
+/// `classDef` colours read as their authors meant on any editor theme). Labels are SVG text, drawn
+/// with the system's fonts.
+fn diagram(code: &str) -> Option<Formula> {
+    use mermaid_rs_renderer::{compute_layout, measure_svg_dimensions, parse_mermaid_strict, render, RenderOptions};
+    let opts = RenderOptions::mermaid_default();
+    let parsed = parse_mermaid_strict(code).ok()?;
+    let layout = compute_layout(&parsed.graph, &opts.theme, &opts.layout);
+    let size = measure_svg_dimensions(&layout, &opts.layout, None);
+    if !(size.width > 0.0 && size.height > 0.0) {
+        return None;
+    }
+    // A numeric width and height on the root (some diagram kinds would say `100%`).
+    let svg = render::render_svg_with_dimensions(&layout, &opts.theme, &opts.layout, Some((size.width, size.height)));
+    let em = opts.theme.font_size;
+    Some(Formula {
+        svg: svg::Handle::from_memory(svg.into_bytes()),
+        width: size.width / em,
+        ascent: size.height / em,
+        descent: 0.0,
+        diagram: true,
     })
 }
 
@@ -342,7 +411,8 @@ pub fn get<'f>(formulas: Option<&'f Formulas>, url: &str) -> Option<&'f Arc<Form
 /// a bar).
 struct Picture {
     svg: svg::Handle,
-    color: Color,
+    /// The text colour the picture is drawn in; `None` for its own colours.
+    color: Option<Color>,
     size: Size,
 }
 
@@ -370,17 +440,27 @@ impl<M> Widget<M, iced::Theme, iced::Renderer> for Picture {
     ) {
         use iced::advanced::svg::Renderer as _;
         let b = layout.bounds();
-        renderer.draw_svg(iced::advanced::svg::Svg::new(self.svg.clone()).color(self.color), b, b);
+        let mut svg = iced::advanced::svg::Svg::new(self.svg.clone());
+        if let Some(color) = self.color {
+            svg = svg.color(color);
+        }
+        renderer.draw_svg(svg, b, b);
     }
 }
 
 fn picture<'a, M: 'a>(f: &Formula, em: f32, color: Color) -> Element<'a, M> {
     let size = Size::new(f.width * em, (f.ascent + f.descent) * em);
-    Element::new(Picture { svg: f.svg.clone(), color, size })
+    Element::new(Picture { svg: f.svg.clone(), color: (!f.diagram).then_some(color), size })
 }
 
-/// A display formula: centred, shrunk to fit if it's wider than the pane.
+/// A display formula, centred and shrunk to fit if it's wider than the pane; or a diagram, centred
+/// at the text's size and scrolled sideways if it's wider (shrunk, a large one's labels can't be
+/// read).
 pub fn display<'a, M: 'a>(f: &Formula, size: f32, color: Color) -> Element<'a, M> {
+    if f.diagram {
+        let wide = scrollable(picture::<M>(f, size, color)).direction(scrollable::Direction::Horizontal(Default::default()));
+        return container(wide).center_x(Length::Fill).into();
+    }
     container(picture(f, size * SCALE, color)).center_x(Length::Fill).into()
 }
 
@@ -496,10 +576,26 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_blocks() {
+        let chart = "flowchart TD\n    subgraph S[\"S · one\"]\n        a([\"x<br/>[B, 1]\"]) --> b[\\\"E\"/]\n        b -. sg .-> c{{\"Q\"}}\n        c --> d[[\"T\"]] --> e[/\"G\"\\]\n    end\n    classDef t fill:#eef4ff,stroke:#4a6fa5\n    class a t\n";
+        let src = format!("Text.\n\n```mermaid\n{chart}```\n\nMore, $5 and $10.\n");
+        let p = prepare(&src);
+        assert_eq!(urls(&p), 1, "{}", p.md);
+        let f = p.formulas.values().next().unwrap();
+        assert!(f.diagram && f.width > 0.0 && f.ascent > 0.0);
+        let c = iced::widget::markdown::Content::parse(&p.md);
+        assert!(c.items().iter().any(|i| matches!(i, iced::widget::markdown::Item::Image { .. })), "{}", p.md);
+        assert!(p.md.ends_with("More, $5 and $10.\n"), "{}", p.md);
+        // Doesn't parse: kept as written.
+        let bad = "```mermaid\nnot a diagram {{{\n```\n";
+        assert_eq!(prepare(bad).md, bad);
+    }
+
+    #[test]
     fn maps_offsets_back() {
         let src = "ab $x$ cd";
         let p = prepare(src);
-        let cd = p.md.find("cd").unwrap();
+        let cd = p.md.rfind("cd").unwrap();
         assert_eq!(p.source_offset(cd), src.find("cd").unwrap());
         assert_eq!(p.source_offset(1), 1);
         assert_eq!(p.source_offset(p.md.find('[').unwrap() + 1), 3);
