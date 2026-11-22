@@ -487,23 +487,25 @@ Without it: the only tab; with several open, it is refused (the user switches ta
   web eval JS                  the value of an expression in the page
   web close                    close the tab (the last one: the browser too)
 
-Servers (the project's backend, frontend, TensorBoard…: defined in serve.json in the project's
-NIBDIR on the daemon's machine, each run in a terminal of the window, stopped when it closes):
-  serve list                   every server: name, state, port, view, terminal, cmd. States:
-                               stopped, waiting (for the servers it comes after), starting,
-                               ready (its port answers), exited(CODE), port-taken (something
-                               else already listens there: it was not started)
-  serve set NAME --cmd \"…\" [--port N] [--after A,B] [--view /path] [--cwd DIR] [--title T] [--env K=V]…
-                               define or redefine one: the shell command, the port it listens
-                               on (127.0.0.1), the servers whose ports must answer first, the
-                               page to show in a web tab once it is ready, the folder (inside
-                               the project) to run in, the web tab's name, environment
-  serve rm NAME                stop it and forget it
-  serve up [NAME…]             start them (none named: all), with the servers they come
-                               after; answers at once: `wait`, or poll `serve list`, for ready
-  serve down [NAME…]           stop them (none named: all); their terminals close
-  serve restart NAME           stop it, wait for its port to be free, start it
-  serve log NAME [--lines N]   what its terminal shows (state.terminals[].screen)
+Apps (the project's apps: each runs servers — a backend, a frontend, TensorBoard… — and may
+have a page. Defined in apps.json in the project's NIBDIR on the daemon's machine; each server
+runs in a terminal of the window, stopped when it closes. The Apps panel shows them. What is
+defined here waits for the user's approval: they see its commands the first time they open it):
+  app list                     every app and its servers: state, port, page, terminal, cmd,
+                               approved. States: stopped, waiting (for the servers it comes
+                               after), starting, ready (its port answers), exited(CODE),
+                               port-taken (something else already listens there: not started)
+  app set NAME --json FILE|-   define or redefine an app, whole, from JSON:
+                               {\"title\": \"Demo\", \"page\": {\"server\": \"web\", \"path\": \"/\"},
+                                \"servers\": {\"api\": {\"cmd\": \"…\", \"port\": 8765},
+                                            \"web\": {\"cmd\": \"…\", \"port\": 8766, \"after\": [\"api\"],
+                                                    \"cwd\": \"web\", \"env\": {\"K\": \"V\"}}}}
+  app rm NAME                  stop it and forget it
+  app up [NAME…]               start them (none named: every approved one); answers at once:
+                               `wait`, or poll `app list`, for ready
+  app down [NAME…]             stop them (none named: all); their terminals close
+  app restart NAME [SERVER]    stop its servers (or one), wait for the ports to be free, start
+  app log NAME [SERVER] [--lines N]  what its terminal shows (the page's server by default)
 
 Ports of another machine (the web tab shows this machine's pages only, so a remote port is
 brought here over ssh: to the same port number when it is free, else the next free one, with a
@@ -646,7 +648,10 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
             json!({ "cmd": "ai.use", "agent": name.join(" "), "model": model })
         }
         ["web", rest @ ..] => web_request(rest)?,
-        ["serve", rest @ ..] => serve_request(rest)?,
+        ["app", rest @ ..] => app_request(rest, || {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map(|_| s)
+        })?,
         ["forward", rest @ ..] => forward_request(rest)?,
         ["raw", j] => serde_json::from_str(j).context("raw: bad JSON")?,
         ["ssh", rest @ ..] => ssh_request(rest)?,
@@ -708,41 +713,30 @@ fn forward_request(a: &[&str]) -> anyhow::Result<Value> {
     })
 }
 
-/// `nib ctl serve …` as a request.
-fn serve_request(a: &[&str]) -> anyhow::Result<Value> {
+/// `nib ctl app …` as a request. `stdin`: what `set NAME --json -` reads.
+fn app_request(a: &[&str], stdin: impl FnOnce() -> std::io::Result<String>) -> anyhow::Result<Value> {
     use anyhow::{bail, Context};
+    let lines = |n: &str| n.parse::<u64>().context("app log: --lines takes a number");
     Ok(match a {
-        ["list"] => json!({ "cmd": "serve.list" }),
-        [c @ ("rm" | "restart"), name] => json!({ "cmd": format!("serve.{c}"), "name": name }),
-        [c @ ("up" | "down"), names @ ..] => json!({ "cmd": format!("serve.{c}"), "names": names }),
-        ["log", name] => json!({ "cmd": "serve.log", "name": name }),
-        ["log", name, "--lines", n] => json!({ "cmd": "serve.log", "name": name, "lines": n.parse::<u64>().context("serve log: --lines takes a number")? }),
-        ["set", name, opts @ ..] => {
-            let mut def = serde_json::Map::new();
-            let mut env = serde_json::Map::new();
-            let mut it = opts.iter();
-            while let Some(o) = it.next() {
-                let v = *it.next().with_context(|| format!("serve set: {o} needs a value"))?;
-                match *o {
-                    "--cmd" | "--view" | "--cwd" | "--title" => drop(def.insert(o[2..].into(), json!(v))),
-                    "--port" => drop(def.insert("port".into(), json!(v.parse::<u16>().context("serve set: --port takes a number from 1 to 65535")?))),
-                    "--after" => drop(def.insert("after".into(), json!(v.split(',').filter(|s| !s.is_empty()).collect::<Vec<_>>()))),
-                    "--env" => {
-                        let (k, val) = v.split_once('=').context("serve set: --env takes NAME=VALUE")?;
-                        env.insert(k.into(), json!(val));
-                    }
-                    other => bail!("serve set: unknown option {other}\n{CTL_USAGE}"),
-                }
-            }
-            if !def.contains_key("cmd") {
-                bail!("serve set NAME needs --cmd \"…\"");
-            }
-            if !env.is_empty() {
-                def.insert("env".into(), Value::Object(env));
-            }
-            json!({ "cmd": "serve.set", "name": name, "def": def })
+        ["list"] => json!({ "cmd": "app.list" }),
+        ["rm", name] => json!({ "cmd": "app.rm", "name": name }),
+        ["restart", name] => json!({ "cmd": "app.restart", "name": name }),
+        ["restart", name, server] => json!({ "cmd": "app.restart", "name": name, "server": server }),
+        [c @ ("up" | "down"), names @ ..] => json!({ "cmd": format!("app.{c}"), "names": names }),
+        ["log", name] => json!({ "cmd": "app.log", "name": name }),
+        ["log", name, "--lines", n] => json!({ "cmd": "app.log", "name": name, "lines": lines(n)? }),
+        ["log", name, server] => json!({ "cmd": "app.log", "name": name, "server": server }),
+        ["log", name, server, "--lines", n] => json!({ "cmd": "app.log", "name": name, "server": server, "lines": lines(n)? }),
+        ["set", name, "--json", from] => {
+            let text = match *from {
+                "-" => stdin().context("app set: reading stdin")?,
+                file => std::fs::read_to_string(file).with_context(|| format!("app set: {file}"))?,
+            };
+            let def: Value = serde_json::from_str(&text).context("app set: not JSON")?;
+            json!({ "cmd": "app.set", "name": name, "def": def })
         }
-        _ => bail!("serve: unknown request {:?}\n{CTL_USAGE}", a.join(" ")),
+        ["set", ..] => bail!("app set NAME --json FILE (or - for stdin)\n{CTL_USAGE}"),
+        _ => bail!("app: unknown request {:?}\n{CTL_USAGE}", a.join(" ")),
     })
 }
 
@@ -820,21 +814,24 @@ mod tests {
     }
 
     #[test]
-    fn serve_requests_from_the_command_line() {
-        assert_eq!(serve_request(&["list"]).unwrap(), json!({ "cmd": "serve.list" }));
-        assert_eq!(serve_request(&["up"]).unwrap(), json!({ "cmd": "serve.up", "names": [] }));
-        assert_eq!(serve_request(&["down", "a", "b"]).unwrap(), json!({ "cmd": "serve.down", "names": ["a", "b"] }));
-        assert_eq!(serve_request(&["restart", "a"]).unwrap(), json!({ "cmd": "serve.restart", "name": "a" }));
-        assert_eq!(serve_request(&["log", "a", "--lines", "5"]).unwrap(), json!({ "cmd": "serve.log", "name": "a", "lines": 5 }));
-        let set = serve_request(&["set", "web", "--cmd", "npm run dev", "--port", "5173", "--after", "api,db", "--view", "/", "--env", "A=1", "--env", "B=x=y"]).unwrap();
-        assert_eq!(
-            set,
-            json!({ "cmd": "serve.set", "name": "web", "def": { "cmd": "npm run dev", "port": 5173, "after": ["api", "db"], "view": "/", "env": { "A": "1", "B": "x=y" } } })
-        );
+    fn app_requests_from_the_command_line() {
+        let none = || -> std::io::Result<String> { unreachable!("stdin not read") };
+        assert_eq!(app_request(&["list"], none).unwrap(), json!({ "cmd": "app.list" }));
+        assert_eq!(app_request(&["up"], none).unwrap(), json!({ "cmd": "app.up", "names": [] }));
+        assert_eq!(app_request(&["down", "a", "b"], none).unwrap(), json!({ "cmd": "app.down", "names": ["a", "b"] }));
+        assert_eq!(app_request(&["restart", "a"], none).unwrap(), json!({ "cmd": "app.restart", "name": "a" }));
+        assert_eq!(app_request(&["restart", "a", "api"], none).unwrap(), json!({ "cmd": "app.restart", "name": "a", "server": "api" }));
+        assert_eq!(app_request(&["log", "a", "--lines", "5"], none).unwrap(), json!({ "cmd": "app.log", "name": "a", "lines": 5 }));
+        assert_eq!(app_request(&["log", "a", "web", "--lines", "5"], none).unwrap(), json!({ "cmd": "app.log", "name": "a", "server": "web", "lines": 5 }));
+        let json = r#"{ "title": "Demo", "page": { "server": "web", "path": "/" }, "servers": { "web": { "cmd": "npm run dev", "port": 5173, "env": { "A": "1" } } } }"#;
+        let set = app_request(&["set", "demo", "--json", "-"], || Ok(json.to_string())).unwrap();
+        assert_eq!(set["cmd"], "app.set");
         // What the window turns into the daemon's definition.
-        assert!(serde_json::from_value::<nib_proto::ServerDef>(set["def"].clone()).is_ok());
-        for wrong in [&["set", "web"][..], &["set", "web", "--port", "1"], &["set", "web", "--cmd", "x", "--port", "70000"], &["set", "web", "--cmd"], &["restart"], &["dance"]] {
-            assert!(serve_request(wrong).is_err(), "{wrong:?}");
+        let def = serde_json::from_value::<nib_proto::AppDef>(set["def"].clone()).unwrap();
+        assert_eq!((def.title.as_deref(), def.servers["web"].port), (Some("Demo"), Some(5173)));
+        for wrong in [&["set", "web"][..], &["set", "web", "--cmd", "x"], &["log"], &["restart"], &["dance"]] {
+            assert!(app_request(wrong, none).is_err(), "{wrong:?}");
         }
+        assert!(app_request(&["set", "web", "--json", "-"], || Ok("{ not json".into())).is_err());
     }
 }

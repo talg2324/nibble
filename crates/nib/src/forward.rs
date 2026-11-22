@@ -2,7 +2,7 @@
 //!
 //! The web tab's browser runs on the machine at the keyboard and shows only that machine's
 //! pages (`web::local`). When the window's daemon is on another machine (SSH), `localhost:8000`
-//! printed in its terminal, a server's `port` in serve.json and `web open 8000` all mean the
+//! printed in its terminal, a server's `port` in apps.json and `web open 8000` all mean the
 //! *remote* machine's port: it is forwarded first, to the same port number here when that is
 //! free (pages carry absolute `http://127.0.0.1:8765` addresses), else to the next free one,
 //! with a warning naming both. The page is then opened at `127.0.0.1:LOCAL`, which is local by

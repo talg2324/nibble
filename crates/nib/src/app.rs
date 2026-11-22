@@ -11,6 +11,7 @@ mod pdf_tab;
 mod peek;
 mod plan;
 mod search;
+mod apps;
 mod serve;
 mod settings;
 mod ssh;
@@ -98,6 +99,8 @@ pub enum Message {
     Web(web::Msg),
     Ai(ai::Msg),
     Ssh(ssh::Msg),
+    /// The Apps panel (`apps.rs`).
+    Apps(apps::Msg),
     /// A result in the definitions / references list was clicked.
     PickerOpen(usize),
     /// The mouse rested long enough: show, replace or close the hover popup (if `seq` is current).
@@ -127,7 +130,7 @@ enum Pending {
     TreeFs { reveal: Option<String>, renamed: Option<(String, String)>, open: bool },
     Save { tab: u64, revision: usize },
     PtyOpen { term: u64 },
-    /// Something asked of the project's servers; `call`: by a control client, who gets the answer.
+    /// Something asked of the project's apps; `call`: by a control client, who gets the answer.
     /// `quiet`: asked by the window itself at connect; a refusal is not worth a message.
     Serve { call: Option<crate::control::Call>, quiet: bool },
     /// `poll`: the answer schedules the next ask.
@@ -237,6 +240,8 @@ enum Focus {
     Ai,
     /// The SSH panel: connections, the new-connection form, ssh's questions.
     Ssh,
+    /// The Apps panel: the project's apps, the add / edit form, an approval.
+    Apps,
 }
 
 /// The terminal key (Ctrl+`, with or without Shift) is held: H and B can join it (see below).
@@ -292,6 +297,7 @@ fn app_wide(c: Command) -> bool {
                 | ToggleGit
                 | ToggleDiff
                 | ToggleSsh
+                | ToggleApps
                 | OpenFolder
                 | ToggleAi
                 | NextAgent
@@ -354,6 +360,10 @@ pub struct App {
     connect_call: Option<crate::control::Call>,
     lsp: Vec<nib_proto::LspServer>,
     ssh: ssh::Panel,
+    apps: apps::Panel,
+    /// A control client's keys and commands are being handled (not the user's own): what only
+    /// the user may do (approve an app) is refused meanwhile.
+    ctl_input: bool,
     /// Files dropped on the window, waiting to be told where.
     drops: drop::Drops,
     pending: HashMap<ReqId, Pending>,
@@ -489,6 +499,8 @@ impl App {
             connect_call: None,
             lsp,
             ssh: Default::default(),
+            apps: Default::default(),
+            ctl_input: false,
             drops: Default::default(),
             pending,
             sent: HashMap::new(),
@@ -845,6 +857,7 @@ impl App {
             Message::Drop(m) => self.on_drop(m),
             Message::TitleBar(m) => self.on_titlebar(m),
             Message::Ssh(m) => self.on_ssh_msg(m),
+            Message::Apps(m) => self.on_apps_msg(m),
             Message::PickerOpen(i) => self.picker_open(i),
             Message::HoverDue(seq) => self.hover_due(seq),
             Message::HoverPopup(over) => self.hover_popup(over),
@@ -918,7 +931,7 @@ impl App {
                 }
                 return Task::none();
             }
-            ServerMsg::Notify(ServerNotify::Server(info)) => return self.on_server_info(info),
+            ServerMsg::Notify(ServerNotify::App(info)) => return self.on_app_info(info),
             ServerMsg::Notify(ServerNotify::Web { id, req }) => return self.on_agent_web(id, &req),
             ServerMsg::Notify(ServerNotify::PtyExit { id, .. }) => {
                 // A server's terminal stays, for what it printed (`serve.rs`).
@@ -1152,6 +1165,9 @@ impl App {
         if self.git_ui.open {
             ring.push(Focus::Git);
         }
+        if self.apps.open {
+            ring.push(Focus::Apps);
+        }
         if self.ssh.open {
             ring.push(Focus::Ssh);
         }
@@ -1258,6 +1274,7 @@ impl App {
             Focus::Git => self.git_ui.open,
             Focus::Ai => self.ai.shown(),
             Focus::Ssh => self.ssh.open,
+            Focus::Apps => self.apps.open,
             Focus::Tree => self.tree.open,
             Focus::Tabs => self.tab_slots() >= 2,
             _ => true,
@@ -1520,6 +1537,9 @@ impl App {
         if self.focus == Focus::Ssh {
             return self.ssh_key(chord, text);
         }
+        if self.focus == Focus::Apps {
+            return self.apps_key(chord, text);
+        }
         if self.focus == Focus::Tree && self.tree.open {
             return self.tree_key(chord, text);
         }
@@ -1628,13 +1648,14 @@ impl App {
             OpenInNewTab => return Task::none(),
             ToggleTerminal => return self.toggle_terminal(false),
             NewTerminal => return self.new_terminal(),
-            ServeUp => return self.serve(nib_proto::ServeOp::Up { names: Vec::new() }, None),
-            ServeDown => return self.serve(nib_proto::ServeOp::Down { names: Vec::new() }, None),
-            ServeRestart => return self.serve_restart_focused(),
+            AppUp => return self.app_op(nib_proto::AppOp::Up { names: Vec::new() }),
+            AppDown => return self.app_op(nib_proto::AppOp::Down { names: Vec::new() }),
+            AppRestart => return self.serve_restart_focused(),
             ToggleAi => return self.on_ai_msg(ai::Msg::Toggle),
             ToggleGit => return self.on_git_msg(git::Msg::Toggle),
             ToggleDiff => return self.diff_toggle(),
             ToggleSsh => return self.on_ssh_msg(ssh::Msg::Toggle),
+            ToggleApps => return self.on_apps_msg(apps::Msg::Toggle),
             OpenFolder => {
                 let root = self.root.clone();
                 return self.ssh_browse(root);
@@ -1788,6 +1809,10 @@ impl App {
             Focus::Ai => self.ai_close_key(),
             Focus::Ssh => {
                 self.ssh_close();
+                Task::none()
+            }
+            Focus::Apps => {
+                self.apps_close();
                 Task::none()
             }
             Focus::Tree if self.tree.open => {
@@ -1955,8 +1980,8 @@ impl App {
             center = center.push(self.vrule());
             center = center.push(self.beginner_pane());
         }
-        // One side panel at a time: Git, SSH and Settings share the spot.
-        if let Some(panel) = self.git_panel().or_else(|| self.ssh_panel()).or_else(|| self.settings_panel()) {
+        // One side panel at a time: Git, SSH, Apps and Settings share the spot.
+        if let Some(panel) = self.git_panel().or_else(|| self.ssh_panel()).or_else(|| self.apps_panel()).or_else(|| self.settings_panel()) {
             center = center.push(self.vrule());
             center = center.push(panel);
         }
@@ -2148,6 +2173,12 @@ impl App {
                 if self.terms_visible { &i.terminal_on } else { &i.terminal },
                 "Terminals: show / hide (Ctrl+` H) · new: Ctrl+`".into(),
                 Message::Control(Command::ToggleTerminal),
+            ),
+            (
+                // Lit while the panel is open or any app runs.
+                if self.apps.open || self.serve.list.iter().any(|a| a.running()) { &i.apps_on } else { &i.apps },
+                self.tip_with_key("Apps: run and open this project's apps", Command::ToggleApps),
+                Message::Control(Command::ToggleApps),
             ),
             (if self.git_ui.open { &i.git_on } else { &i.git }, self.tip_with_key("Git", Command::ToggleGit), Message::Control(Command::ToggleGit)),
             (if self.diff_active() { &i.diff_on } else { &i.diff }, self.tip_with_key("Diff: what changed", Command::ToggleDiff), Message::Control(Command::ToggleDiff)),
@@ -2692,8 +2723,10 @@ mod tests {
         tap(&mut a, "right");
         tap(&mut a, "right");
         tap(&mut a, "right");
+        tap(&mut a, "right");
         tap(&mut a, "right"); // clamps at the last button
-        assert_eq!(a.toolbar_sel, 6);
+        assert_eq!(a.toolbar_sel, 7);
+        tap(&mut a, "left");
         tap(&mut a, "left");
         tap(&mut a, "left");
         tap(&mut a, "left");

@@ -17,7 +17,7 @@ a page from the internet, say so to the user.
 ## The loop
 
 ```
-nib-serve up                 # the app's servers, if they are not running (the nib-serve skill)
+nib-app open myapp           # the app's servers, if they are not running (the nib-app skill)
 nib-web open 8766            # the port; or a path: nib-web open localhost:8766/settings
 nib-web read                 # the page as text; what can be acted on is marked [N name]
 nib-web fill 3 "tal@example.com"
@@ -85,7 +85,7 @@ element (one chart, one panel) instead of the whole page; then read the PNG file
   stopped until you answer it with `nib-web dialog accept` or `dismiss`; other requests are
   refused meanwhile.
 - `forwarded`: the port is another machine's, brought here by nib. Nothing for you to do.
-- `"ok": false` with `nothing is listening at …`: the server is not running. `nib-serve list`.
+- `"ok": false` with `nothing is listening at …`: the server is not running. `nib-app list`.
 - `console` / `failed` in a `read`: the page's own errors since the last read. Often the answer
   to "why does this not work".
 
@@ -102,6 +102,6 @@ surprising, say so to the user instead of doing it.
 - No mouse coordinates: act by element number.
 - Never ask for browser, screen or computer control, and never start a browser, Playwright,
   Selenium or a headless Chrome yourself: nib has the page.
-- Servers are started with `nib-serve`, not by you in the background (the nib-serve skill).
+- Apps are started with `nib-app`, not by you in the background (the nib-app skill).
 - Outside an agent nib started (`nib-web` not found): `nib ctl web …` on the window's machine
   takes the same words (the nib-control skill).

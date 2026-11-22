@@ -171,7 +171,7 @@ impl App {
                         self.greeted();
                         // The project's servers, before anybody asks: `state.servers` and the
                         // terminals of those that run are right from the start.
-                        let servers = self.serve_ask(nib_proto::ServeOp::List, None, true);
+                        let servers = self.app_ask(nib_proto::AppOp::List, None, false, true);
                         // The AI panel stayed open through the switch: look on this machine.
                         let ai = if self.ai.open { self.ai_check(None) } else { Task::none() };
                         let browse = if std::mem::take(&mut self.ssh.browse_next) {

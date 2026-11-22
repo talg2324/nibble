@@ -124,7 +124,7 @@ fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
     // `nib-work` (see `work`) is the same binary's other command for agents; `nib-app` (see
     // `serve`) registers, starts and stops the project's apps; `nib-web` (see `web`) reads and operates
     // a page of them in the window's web tab.
-    // `nib-serve` was `nib-app` before apps (v0.3): gone, not left to fail.
+    // `nib-app` was `nib-serve` before apps (v0.3): the old one goes rather than fail.
     for old in ["nib-serve", "nib-serve.cmd"] {
         let _ = fs::remove_file(bin.join(old));
     }

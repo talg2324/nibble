@@ -313,6 +313,7 @@ impl App {
         // Settings takes the side panel's spot.
         self.git_close();
         self.ssh_close();
+        self.apps_close();
         if page == Page::Appearance {
             self.ensure_appearance_data();
         }

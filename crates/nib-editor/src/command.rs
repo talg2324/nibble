@@ -92,9 +92,10 @@ commands! {
     TogglePreview   => "toggle_preview",    "View",      "Preview (Markdown, HTML) / table or text (CSV)";
     ToggleTerminal  => "toggle_terminal",   "Panels",    "Terminals: show / hide";
     NewTerminal     => "new_terminal",      "Panels",    "New terminal (hold with H: hide/show terminals, B: toolbar)";
-    ServeUp         => "serve_up",          "Panels",    "Servers: start the project's servers, each in a terminal (serve.json in NIBDIR)";
-    ServeDown       => "serve_down",        "Panels",    "Servers: stop them all";
-    ServeRestart    => "serve_restart",     "Panels",    "Servers: restart the one whose terminal has the keyboard";
+    ToggleApps      => "toggle_apps",       "Panels",    "Apps panel: this project's apps (open, stop, register)";
+    AppUp           => "app_up",            "Panels",    "Apps: start every approved app, each server in a terminal (apps.json in NIBDIR)";
+    AppDown         => "app_down",          "Panels",    "Apps: stop them all";
+    AppRestart      => "app_restart",       "Panels",    "Apps: restart the server whose terminal has the keyboard";
     NextPane        => "next_pane",         "Panels",    "Next pane (file tree, editor, terminals, Git panel, toolbar)";
     PrevPane        => "prev_pane",         "Panels",    "Previous pane";
     FocusToolbar    => "focus_toolbar",     "Panels",    "Toolbar: jump to it and back (arrows pick a button, Enter presses it)";

@@ -342,6 +342,23 @@ impl App {
         self.ai_check(None)
     }
 
+    /// A new agent with `draft` already in its message box, the caret at its end, for the user
+    /// to finish and send (the Apps panel's "Register via AI chat").
+    pub(in crate::app) fn ai_new_agent_with_draft(&mut self, draft: String) -> Task<Message> {
+        let t = self.ai_new_agent();
+        let c = &mut self.ai.chats[self.ai.cur];
+        c.input = draft;
+        c.back = 0;
+        c.anchor = None;
+        t
+    }
+
+    /// What the shown agent's message box holds.
+    #[cfg(test)]
+    pub(in crate::app) fn ai_draft(&self) -> String {
+        self.ai.chats[self.ai.cur].input.clone()
+    }
+
     /// End agent `i`'s conversation and take it off the list. A local model nobody else is
     /// using is unloaded from memory.
     pub(in crate::app) fn ai_kill(&mut self, i: usize) -> Task<Message> {

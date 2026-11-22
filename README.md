@@ -89,7 +89,7 @@ To use agents, install a supported coding agent (see [Agents](#agents)) on the m
 | `nib --headless` | the same editor with no window, driven only through `nib ctl` | anywhere |
 | `nib ai` | local models (Ollama) and OpenCode sub-agents for scripts: one call, one agent run, or a resumable batch of thousands, on the GPUs you pick | this machine or an SSH profile |
 | `nib-mail` | the mailbox agents use to talk to each other and to say they're done | inside an agent's commands |
-| `nib-serve` | starts, stops and reads the project's servers | inside an agent's commands |
+| `nib-app` | registers, starts, stops and reads the project's apps | inside an agent's commands |
 | `nib-web` | reads and operates a page of the project's app in the window's web tab | inside an agent's commands |
 | `nib grammar` | add or remove syntax highlighting for a language | the machine you sit at |
 | `nib gif` | turns a GIF into one contact sheet of its frames, since models only see a GIF's first frame | anywhere |
@@ -152,29 +152,25 @@ Agents in the same project share one working tree, so they need to talk. Every a
 
 ## Local apps
 
-A page your project serves (its frontend, TensorBoard, a notebook) opens in a **web tab** beside the code: `nib ctl web open 8766`, a Cmd/Ctrl-click on `localhost:8766` in a terminal, or a server's `view` (below).
+A page your project serves (its frontend, TensorBoard, a notebook) opens in a **web tab** beside the code: `nib ctl web open 8766`, a Cmd/Ctrl-click on `localhost:8766` in a terminal, or an app's page (below).
 
 - The page runs in the browser you already have (Firefox, Chrome, Edge, Brave or Chromium, whichever is the system's default), started unseen and owned by the window; nibble draws it in the tab and passes on your mouse, keys and clipboard. No browser is bundled. Cmd/Ctrl + wheel (or Cmd/Ctrl +, -, 0) over the page zooms it as a browser does, laid out anew: a dashboard made for a bigger screen gets room at 75%.
 - **Only this machine's pages** are shown: `localhost`, `*.localhost`, `127.x.x.x`, `[::1]`. A link or redirect to anywhere else is not followed; the tab says what was not opened and offers to open it in your own browser. It is a viewer for your app, not a web browser.
 - **Over SSH** the app runs on the other machine and the browser on yours, so nibble forwards the port first (`ssh -O forward` on the connection it already has): to the same port number when that is free, else the next free one, with a warning. `nib ctl web open gpu:6006` does the same for any saved SSH connection, for TensorBoard on a GPU box while you edit locally. `nib ctl forward list|add|rm` shows and manages them; they go when the tab closes, the server stops, or the window leaves.
 - **Agents** read and operate the same page with `nib-web` (`open`, `read`, `click N`, `fill N TEXT`, `wait TEXT`, `zoom 75`, `shot`): the page as text with numbered elements, so they need no browser automation or screen control. They get less than you do at the socket: no script evaluation, no mouse, and never a page from outside this machine.
 
-## Servers
+## Apps
 
-Define a project's servers once, and nibble runs them: each in a terminal of its own beside the code, headed with its name and state, and stopped when the window closes.
+Register how a project's app is run once, and open it from the **Apps** button on the toolbar (Cmd/Ctrl+Shift+A) whenever you come back to the repo. An app is the servers it runs (a backend and its frontend, TensorBoard, a notebook server) and the page to show once they answer; nibble runs each server in a terminal of its own beside the code, headed with the app, the server and its state, and stops them when the window closes.
 
-```sh
-nib ctl serve set backend  --cmd "uv run myapp serve --no-open --port 8765" --port 8765
-nib ctl serve set frontend --cmd "uv run myapp frontend --port 8766 --api http://127.0.0.1:8765" \
-                           --port 8766 --after backend --view / --title "My app"
-nib ctl serve up            # or the command `serve_up`
-```
-
-- The definitions are kept in `serve.json` in the project's `NIBDIR`, on the code's machine and outside the repo. Optional per server: `cwd` (a folder inside the project), `env`, `title`.
-- A server is **ready** once its `port` answers on 127.0.0.1 or `[::1]`. One that comes `after` others starts when their ports answer (and is given up as `exited` if one of them ends first). Over SSH, a ready server's port is forwarded to your machine. One with a `view` gets a web tab on that page when it is ready, reloaded when it is restarted.
+- **Register** from the panel: **+ Add** is a small form (a name, then each server's command, port, page, the servers it comes after, its folder and environment). Or **✦ Register via AI chat**: a new agent chat opens with `/nib-app I want to register a new app for this repo with nib-app. Here are my instructions:` already written; say how you run it and the agent (with the `nib-app` skill in front of your message) registers it, starts it and checks its page.
+- **Open** starts the app's servers in order and brings its page forward when it answers; on an app that runs it brings the page forward. **Stop**, **Restart**, **Edit** and **Remove** (asked once more) are on its row; a click shows its servers and their commands. **Open address** shows a page of this machine nobody registered.
+- **You approve what you did not write.** An app an agent (or `nib ctl`) registered or changed waits: the panel marks it, and the first time you open it nibble shows you each command, folder and variable before anything runs. Only your own click or key approves it — never anything sent through `nib ctl` — and any later change asks again. Your "start everything" (`app_up`) starts only approved apps. An agent may start the app it registered itself, to check it; registering (`nib-app set`) is not pre-allowed, so its harness treats it like any other command it would run. Environment variables that change which program runs (`PATH`, `LD_*`, `NODE_OPTIONS`…) are refused, and every change is logged in `apps.log.jsonl`.
+- The apps are kept in `apps.json` in the project's `NIBDIR`, on the code's machine and outside the repo, so cloning a repo never registers anything.
+- A server is **ready** once its `port` answers on 127.0.0.1 or `[::1]`. One that comes `after` others starts when their ports answer (and is given up as `exited` if one of them ends first). Over SSH, a ready server's port is forwarded to your machine. The app's page gets a web tab when it is ready, reloaded when the app is restarted.
 - If something else already listens on a server's port (another project with the same default, an older run), nibble does not start it and says **port-taken** instead of running a second copy against the wrong process.
-- A server terminal is an ordinary terminal: scroll back, press Ctrl-C. Closing it stops the server; one that ends by itself keeps its terminal so you can read why. `serve_restart` restarts the one whose terminal has focus; `serve_down` stops them all.
-- Agents use the same servers with `nib-serve` (`list`, `up`, `restart`, `log`, …) instead of starting their own in the background.
+- A server terminal is an ordinary terminal: scroll back, press Ctrl-C. Closing it stops the server; one that ends by itself keeps its terminal so you can read why. `app_restart` restarts the one whose terminal has focus; `app_down` stops them all.
+- Scripts use `nib ctl app list|set NAME --json FILE|up|down|restart|log|rm`; agents use the same apps with `nib-app` instead of starting their own servers in the background.
 
 ## Skills
 
@@ -187,7 +183,7 @@ nibble ships its own [agent skills](.skills) as plain, editable `SKILL.md` files
 | [`nib-finished`](.skills/nib-finished/SKILL.md) | tell you a clear job is done, with a short summary |
 | [`nib-subagents`](.skills/nib-subagents/SKILL.md) | tell its own hidden helpers from an agent in your agents tab, and start the one you meant |
 | [`nib-artifacts`](.skills/nib-artifacts/SKILL.md) | put scratch files, plots and logs in scratch or NIBDIR, not in your repo |
-| [`nib-serve`](.skills/nib-serve/SKILL.md) | start, restart and read the project's servers through nibble instead of launching its own |
+| [`nib-app`](.skills/nib-app/SKILL.md) | register the project's apps for you, and start, restart and read them through nibble instead of launching its own |
 | [`nib-web`](.skills/nib-web/SKILL.md) | look at and operate a page of the project's app in the web tab instead of asking for a browser |
 | [`nib-ai`](.skills/nib-ai/SKILL.md) | run local models and sub-agents with `nib ai` instead of hand-written glue |
 | [`nib-upstream`](.skills/nib-upstream/SKILL.md) | turn a nibble bug into a draft PR or an issue you approve (opt-in) |

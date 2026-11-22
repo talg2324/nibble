@@ -25,6 +25,9 @@ const DIFF: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24
 /// The letters SSH, drawn in strokes like the other icons: the SSH panel.
 const REMOTE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6.6000000000000005 8.6C6.1000000000000005 7.7 5.2 7.2 4.1 7.2C2.5999999999999996 7.2 1.6 8.1 1.6 9.3C1.6 12.1 6.8 11 6.8 14.3C6.8 15.8 5.6000000000000005 16.8 4.0 16.8C2.8 16.8 1.7999999999999998 16.2 1.2 15.3 M14.4 8.6C13.9 7.7 13.0 7.2 11.9 7.2C10.4 7.2 9.4 8.1 9.4 9.3C9.4 12.1 14.6 11 14.6 14.3C14.6 15.8 13.4 16.8 11.8 16.8C10.6 16.8 9.6 16.2 9.0 15.3 M17.4 7.2V16.8M22.8 7.2V16.8M17.4 12H22.8"/></svg>"#;
 
+/// A window with a play triangle in it: the Apps panel (the project's apps, run here).
+const APPS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="1.5"/><path d="M3 8.5h18"/><path d="M10.2 11.2v5.6l4.6-2.8z"/></svg>"#;
+
 /// The logo mark without its app-icon tile: three blocks and a bitten fourth.
 /// `currentColor` paints the blocks; `ACCENT` the bitten one.
 const LOGO: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="104 394 798 186"><defs><mask id="bite"><rect x="0" y="0" width="1024" height="1024" fill="#fff"/><circle cx="902" cy="402" r="74" fill="#000"/><circle cx="826" cy="372" r="40" fill="#000"/><circle cx="930" cy="480" r="40" fill="#000"/></mask></defs><g fill="currentColor"><rect x="112" y="402" width="170" height="170" rx="34"/><rect x="316" y="402" width="170" height="170" rx="34"/><rect x="520" y="402" width="170" height="170" rx="34"/></g><rect x="724" y="402" width="170" height="170" rx="34" fill="ACCENT" mask="url(#bite)"/></svg>"##;
@@ -62,6 +65,8 @@ pub struct Icons {
     pub diff_on: svg::Handle,
     pub remote: svg::Handle,
     pub remote_on: svg::Handle,
+    pub apps: svg::Handle,
+    pub apps_on: svg::Handle,
     pub gear: svg::Handle,
     pub gear_on: svg::Handle,
     pub logo: svg::Handle,
@@ -87,6 +92,8 @@ impl Icons {
             diff_on: handle(DIFF, on),
             remote: handle(REMOTE, off),
             remote_on: handle(REMOTE, on),
+            apps: handle(APPS, off),
+            apps_on: handle(APPS, on),
             gear: handle(GEAR, off),
             gear_on: handle(GEAR, on),
             logo: handle(&LOGO.replace("ACCENT", on), off),

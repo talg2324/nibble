@@ -312,6 +312,7 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
         ("mod+shift+backspace", KillAgent),
         ("ctrl+.", Panic),
         ("mod+shift+r", ToggleSsh), // R for remote
+        ("mod+shift+a", ToggleApps),
         ("mod+f", Find),
     ];
     if cfg!(target_os = "macos") {

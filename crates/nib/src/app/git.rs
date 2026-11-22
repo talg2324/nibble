@@ -201,6 +201,7 @@ impl App {
     /// Show the panel (in the settings panel's place) with the keyboard on its first operation.
     fn git_open(&mut self) -> Task<Message> {
         self.ssh_close();
+        self.apps_close();
         self.settings.menu = false;
         self.settings.page = None;
         self.settings.recording = None;

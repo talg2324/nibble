@@ -58,9 +58,10 @@ ctl run quit; wait $HPID
 [ "$(cat "$TMP/h.py")" = $'import os\ny = 2' ] || { echo "FAIL: headless content: $(cat "$TMP/h.py")"; exit 1; }
 echo "  ok"
 
-# The project's servers: defined, started in order, read, stopped; a port something else holds
-# is left alone; nothing is left listening once the window is gone.
-echo "e2e: servers"
+# The project's apps: defined, started in order, read, stopped; a port something else holds
+# is left alone; what nib ctl defines waits for the user; nothing is left listening once the
+# window is gone.
+echo "e2e: apps"
 mkdir -p "$TMP/srv"; echo hello > "$TMP/srv/index.html"
 read -r P1 P2 P3 <<< "$(python3 -c "
 import socket
@@ -68,8 +69,27 @@ s = [socket.socket() for _ in range(3)]
 for x in s: x.bind(('127.0.0.1', 0))
 print(*[x.getsockname()[1] for x in s])")"
 answers() { python3 -c "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), 1)" "$1" 2>/dev/null; }
-srv() { "$NIB" ctl -s "$SOCK" serve list | python3 -c "import json, sys; print(' '.join(s['name'] + '=' + s['state'] for s in json.load(sys.stdin)['servers']))"; }
+srv() { "$NIB" ctl -s "$SOCK" app list | python3 -c "import json, sys; print(' '.join(a['name'] + '/' + s['name'] + '=' + s['state'] for a in json.load(sys.stdin)['apps'] for s in a['servers']))"; }
 closed() { for _ in $(seq 50); do answers "$1" || return 0; sleep 0.1; done; return 1; }
+# Apps the user approved, as their own click in the Apps panel leaves them in apps.json (nib ctl
+# defines apps, but never approves one): $1 the window's socket, $2 {name: definition}. The
+# hash is the daemon's (serve::hash, pinned by its test): SHA-256 of the definition as compact
+# JSON, fields in their order, maps by key, nothing empty.
+approved_apps() {
+  local nibdir
+  nibdir=$("$NIB" ctl -s "$1" state | python3 -c "import json, sys; print(json.load(sys.stdin)['roots']['nibdir'])")
+  python3 - "$nibdir" "$2" <<'PY'
+import hashlib, json, sys
+nibdir, apps = sys.argv[1], json.loads(sys.argv[2])
+out = {}
+for name, d in apps.items():
+    servers = {s: {k: v for k, v in (("cmd", x["cmd"]), ("port", x.get("port")), ("after", x.get("after") or None)) if v is not None} for s, x in sorted(d["servers"].items())}
+    canon = {k: v for k, v in (("title", d.get("title")), ("page", d.get("page")), ("servers", servers)) if v is not None}
+    h = hashlib.sha256(json.dumps(canon, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    out[name] = dict(canon, approved=h)
+json.dump({"apps": out}, open(nibdir + "/apps.json", "w"))
+PY
+}
 SOCK="$TMP/s.sock"
 NIB_CONTROL="$SOCK" "$NIB" --headless "$TMP/srv" > "$TMP/s.out" &
 SPID=$!
@@ -79,29 +99,35 @@ ctl wait 20
 python3 -m http.server "$P3" --bind 127.0.0.1 >/dev/null 2>&1 & HOLD=$!
 KIDS="$KIDS $HOLD"
 for _ in $(seq 50); do answers "$P3" && break; sleep 0.1; done
-ctl serve set one --cmd "python3 -m http.server $P1 --bind 127.0.0.1" --port "$P1"
-ctl serve set two --cmd "python3 -m http.server $P2 --bind 127.0.0.1" --port "$P2" --after one
-ctl serve set held --cmd "python3 -m http.server $P3 --bind 127.0.0.1" --port "$P3"
-! ctl serve set bad --cmd true --after nobody 2>/dev/null || { echo "FAIL: a server after one that is not defined was accepted"; exit 1; }
-[ "$(srv)" = "held=stopped one=stopped two=stopped" ] || { echo "FAIL: servers defined: $(srv)"; exit 1; }
-ctl serve up
-for _ in $(seq 150); do [ "$(srv)" = "held=port-taken one=ready two=ready" ] && break; sleep 0.1; done
-[ "$(srv)" = "held=port-taken one=ready two=ready" ] || { echo "FAIL: servers up: $(srv)"; exit 1; }
+approved_apps "$SOCK" "{
+  \"pair\": { \"servers\": { \"one\": { \"cmd\": \"python3 -m http.server $P1 --bind 127.0.0.1\", \"port\": $P1 },
+                           \"two\": { \"cmd\": \"python3 -m http.server $P2 --bind 127.0.0.1\", \"port\": $P2, \"after\": [\"one\"] } } },
+  \"held\": { \"servers\": { \"held\": { \"cmd\": \"python3 -m http.server $P3 --bind 127.0.0.1\", \"port\": $P3 } } } }"
+echo '{ "servers": { "s": { "cmd": "true", "after": ["nobody"] } } }' | { ! "$NIB" ctl -s "$SOCK" app set bad --json - >/dev/null 2>&1; } || { echo "FAIL: a server after one the app does not have was accepted"; exit 1; }
+# What nib ctl defines waits for the user: listed, not started, not approvable from here.
+echo "{ \"servers\": { \"s\": { \"cmd\": \"python3 -m http.server $P3 --bind 127.0.0.1\", \"port\": $P3 } } }" | ctl app set mine --json -
+! "$NIB" ctl -s "$SOCK" app up mine >/dev/null 2>&1 || { echo "FAIL: nib ctl started an app the user did not approve"; exit 1; }
+! "$NIB" ctl -s "$SOCK" raw '{"cmd":"app.approve","name":"mine","hash":"x"}' 2>/dev/null | grep -q '"ok": *true' || { echo "FAIL: nib ctl approved an app"; exit 1; }
+ctl app rm mine
+[ "$(srv)" = "held/held=stopped pair/one=stopped pair/two=stopped" ] || { echo "FAIL: apps defined: $(srv)"; exit 1; }
+ctl app up
+for _ in $(seq 150); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+[ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up: $(srv)"; exit 1; }
 answers "$P1" && answers "$P2" || { echo "FAIL: a ready server's port does not answer"; exit 1; }
 python3 -c "import sys, urllib.request; sys.exit(0 if b'hello' in urllib.request.urlopen('http://127.0.0.1:$P1/index.html').read() else 1)" || { echo "FAIL: server one does not serve the project"; exit 1; }
-for _ in $(seq 50); do "$NIB" ctl -s "$SOCK" serve log one | grep -qF 'GET /index.html' && break; sleep 0.1; done
-"$NIB" ctl -s "$SOCK" serve log one --lines 5 | grep -qF 'GET /index.html' || { echo "FAIL: serve log"; exit 1; }
-ctl serve restart one
-for _ in $(seq 150); do [ "$(srv)" = "held=port-taken one=ready two=ready" ] && break; sleep 0.1; done
-[ "$(srv)" = "held=port-taken one=ready two=ready" ] || { echo "FAIL: server restarted: $(srv)"; exit 1; }
-ctl serve down
-[ "$(srv)" = "held=stopped one=stopped two=stopped" ] || { echo "FAIL: servers down: $(srv)"; exit 1; }
+for _ in $(seq 50); do "$NIB" ctl -s "$SOCK" app log pair one | grep -qF 'GET /index.html' && break; sleep 0.1; done
+"$NIB" ctl -s "$SOCK" app log pair one --lines 5 | grep -qF 'GET /index.html' || { echo "FAIL: app log"; exit 1; }
+ctl app restart pair one
+for _ in $(seq 150); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+[ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: server restarted: $(srv)"; exit 1; }
+ctl app down
+[ "$(srv)" = "held/held=stopped pair/one=stopped pair/two=stopped" ] || { echo "FAIL: apps down: $(srv)"; exit 1; }
 closed "$P1" && closed "$P2" || { echo "FAIL: a stopped server still listens"; exit 1; }
-answers "$P3" || { echo "FAIL: stopping the servers stopped what held the taken port"; exit 1; }
+answers "$P3" || { echo "FAIL: stopping the apps stopped what held the taken port"; exit 1; }
 # Running again when the window quits: they go with it.
-ctl serve up one two
-for _ in $(seq 150); do [ "$(srv)" = "held=stopped one=ready two=ready" ] && break; sleep 0.1; done
-[ "$(srv)" = "held=stopped one=ready two=ready" ] || { echo "FAIL: servers up again: $(srv)"; exit 1; }
+ctl app up pair
+for _ in $(seq 150); do [ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+[ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up again: $(srv)"; exit 1; }
 ctl run quit; wait $SPID
 closed "$P1" && closed "$P2" || { echo "FAIL: a server outlived the window"; exit 1; }
 ! pgrep -f -- "http.server ($P1|$P2) " >/dev/null || { echo "FAIL: a server process outlived the window"; exit 1; }
@@ -244,12 +270,12 @@ GOT=$(fwd forward add "gpu:$F1"); L2=${GOT##*=}
 grep -qF -- "-N -L 127.0.0.1:$L2:localhost:$F1" "$TMP/fssh/log" || { echo "FAIL: no ssh of its own for another connection"; exit 1; }
 [ -z "$(fwd forward rm "$L2")" ] && closed "$L2" || { echo "FAIL: forward rm (ssh of its own)"; exit 1; }
 # A ready server's port comes here; stopped, it goes.
-ctl serve set app --cmd "python3 -m http.server $F2 --bind 127.0.0.1" --port "$F2" --view /
-ctl serve up
+approved_apps "$SOCK" "{ \"far\": { \"page\": { \"server\": \"web\", \"path\": \"/\" }, \"servers\": { \"web\": { \"cmd\": \"python3 -m http.server $F2 --bind 127.0.0.1\", \"port\": $F2 } } } }"
+ctl app up
 for _ in $(seq 150); do GOT=$(fwd forward list); [ -n "$GOT" ] && break; sleep 0.1; done
 L3=${GOT##*=}
 [ "$GOT" = "@far:$F2=$L3" ] || { echo "FAIL: a ready server's port was not forwarded: $GOT"; exit 1; }
-ctl serve down
+ctl app down
 for _ in $(seq 50); do [ -z "$(fwd forward list)" ] && break; sleep 0.1; done
 [ -z "$(fwd forward list)" ] && closed "$L3" || { echo "FAIL: a stopped server's forward stayed"; exit 1; }
 # A page of the other machine, shown here through a forward made for it and gone with its tab.

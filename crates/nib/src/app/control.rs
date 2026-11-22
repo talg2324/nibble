@@ -13,7 +13,17 @@ use serde_json::{json, Value};
 pub(super) const MESSAGE_LOG: usize = 50;
 
 impl App {
+    /// A control request. The keys it presses and the commands it runs are handled here and
+    /// now, marked as not the user's own (`ctl_input`): an agent can drive nib, but cannot
+    /// approve an app for the user.
     pub(super) fn on_control(&mut self, call: Call) -> Task<Message> {
+        let was = std::mem::replace(&mut self.ctl_input, true);
+        let t = self.on_control_call(call);
+        self.ctl_input = was;
+        t
+    }
+
+    fn on_control_call(&mut self, call: Call) -> Task<Message> {
         match call.cmd() {
             "hello" => {
                 call.ok(json!({
@@ -33,13 +43,13 @@ impl App {
             }
             "pending" => {
                 // Connecting counts: `wait` should wait for it.
-                // So does a server on its way to ready.
+                // So does a server of an app on its way to ready.
                 call.ok(json!({ "pending": self.pending.len() + usize::from(self.connecting.is_some()) + self.serve.coming() }));
                 Task::none()
             }
             "askpass" => self.on_askpass(call),
             "search" => self.on_search_ctl(call),
-            c if c.starts_with("serve.") => self.on_serve_ctl(call),
+            c if c.starts_with("app.") => self.on_app_ctl(call),
             c if c.starts_with("forward.") => self.on_forward_ctl(call),
             c if c.starts_with("ssh.") => self.on_ssh_ctl(call),
             // The mouse in the web tab in front, as the user's own: through the tab, so that
@@ -429,6 +439,7 @@ impl App {
             Focus::Git => "git".to_owned(),
             Focus::Ai => "ai".to_owned(),
             Focus::Ssh => "ssh".to_owned(),
+            Focus::Apps => "apps".to_owned(),
         };
         let tabs: Vec<Value> = self
             .tabs
@@ -524,6 +535,7 @@ impl App {
                 "git": self.git_ui.open,
                 "ai": self.ai.open,
                 "ssh": self.ssh.open,
+                "apps": self.apps.open,
                 "settings": self.settings.page.map(|p| format!("{p:?}").to_lowercase()),
             },
             "ai": self.ai_state_json(),
@@ -536,8 +548,8 @@ impl App {
             "tabs": tabs,
             "editor": editor,
             "terminals": terminals,
-            // The project's servers, as the daemon last said (`serve list` asks it).
-            "servers": self.servers_json(),
+            // The project's apps, as the daemon last said (`app list` asks it).
+            "apps": self.apps_json(),
             // Another machine's ports brought to this one (`forward list`).
             "forwards": crate::forward::list(),
         })

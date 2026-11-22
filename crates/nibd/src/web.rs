@@ -3,7 +3,7 @@
 //! The page lives in a browser on the machine at the keyboard, driven by the window; the agent
 //! runs here, in the daemon's process tree, possibly on another machine, and cannot reach the
 //! window's control socket. So `nib-web ARGS` (`nibd web ARGS`, see `cli`) leaves its request
-//! as a file in the session's mailbox folder (`web/req/`), as `nib-serve` does; the daemon picks
+//! as a file in the session's mailbox folder (`web/req/`), as `nib-app` does; the daemon picks
 //! it up and passes it to its window (`ServerNotify::Web`), which runs it as it would a
 //! `web.*` request from its socket and answers (`ClientNotify::WebReply`); the daemon writes the
 //! answer to `web/res/`, and the command prints it as JSON, as `nib ctl web` does.

@@ -316,6 +316,7 @@ impl App {
     /// Show the panel (in the Git / Settings spot) with the keyboard in the box.
     fn ssh_open(&mut self) {
         self.git_close();
+        self.apps_close();
         self.settings.menu = false;
         self.settings.page = None;
         self.settings.recording = None;
