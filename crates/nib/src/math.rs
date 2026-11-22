@@ -8,9 +8,9 @@
 //! wrapping row, since Iced's rich text can't hold pictures). A formula that doesn't parse is left
 //! as it was written.
 //!
-//! ```` ```mermaid ```` blocks go the same way as display math: laid out by mermaid-rs-renderer
-//! (Mermaid in Rust, no browser) into an SVG drawn in its own colours on its own background, at the
-//! text's size, scrolled sideways if it is wider than the pane.
+//! ```` ```mermaid ```` blocks go the same way as display math: laid out by merman (Mermaid's own
+//! layout and SVG, in Rust, no browser) into an SVG drawn in its own colours on a white background,
+//! at the text's size, scrolled sideways if it is wider than the pane.
 
 use iced::widget::markdown::Uri;
 use iced::advanced::layout::{self, Layout};
@@ -377,28 +377,55 @@ fn render(tex: &str, display: bool) -> Option<Formula> {
     })
 }
 
+/// Mermaid's font size, the diagram's em.
+const DIAGRAM_EM: f32 = 14.0;
+
 /// A Mermaid diagram as an SVG, Mermaid's own default theme (light, on a white background, so
-/// `classDef` colours read as their authors meant on any editor theme). Labels are SVG text, drawn
-/// with the system's fonts.
+/// `classDef` colours read as their authors meant on any editor theme). merman's resvg-safe output:
+/// labels as SVG text (Mermaid's HTML labels can't be drawn by an SVG renderer), and text resvg
+/// draws right (`x̂` mid-label loses its `x` otherwise, and a label ending in a combining mark panics
+/// usvg, which aborts nib).
+/// Fonts every OS has (the renderer's `sans-serif` is Arial, missing on most Linux systems).
 fn diagram(code: &str) -> Option<Formula> {
-    use mermaid_rs_renderer::{compute_layout, measure_svg_dimensions, parse_mermaid_strict, render, RenderOptions};
-    let opts = RenderOptions::mermaid_default();
-    let parsed = parse_mermaid_strict(code).ok()?;
-    let layout = compute_layout(&parsed.graph, &opts.theme, &opts.layout);
-    let size = measure_svg_dimensions(&layout, &opts.layout, None);
-    if !(size.width > 0.0 && size.height > 0.0) {
-        return None;
-    }
-    // A numeric width and height on the root (some diagram kinds would say `100%`).
-    let svg = render::render_svg_with_dimensions(&layout, &opts.theme, &opts.layout, Some((size.width, size.height)));
-    let em = opts.theme.font_size;
+    let (svg, width, height) = diagram_svg(code)?;
     Some(Formula {
         svg: svg::Handle::from_memory(svg.into_bytes()),
-        width: size.width / em,
-        ascent: size.height / em,
+        width: width / DIAGRAM_EM,
+        ascent: height / DIAGRAM_EM,
         descent: 0.0,
         diagram: true,
     })
+}
+
+/// The diagram's SVG and its size in px.
+fn diagram_svg(code: &str) -> Option<(String, f32, f32)> {
+    use merman::{MermaidEngine, OperationControl, RenderOutput, RenderRequest, Renderer, SourcePresentationConfig, SvgRequest};
+    let config = SourcePresentationConfig::from_value(serde_json::json!({
+        "fontFamily": "\"Segoe UI\", Helvetica, Arial, \"DejaVu Sans\", \"Liberation Sans\", sans-serif",
+    }));
+    let renderer = Renderer::new().with_presentation_engine(MermaidEngine::new().with_site_config(config));
+    let request = SvgRequest { pipeline: Some(merman::svg::SvgPipeline::resvg_safe()), ..Default::default() };
+    let out = renderer.render(RenderRequest::svg(code, OperationControl::new(), request)).ok()?;
+    let RenderOutput::Svg(Some(svg)) = out else { return None };
+    let mut svg = svg.svg().to_string();
+    // The root says `width="100%"` (Mermaid's useMaxWidth): its size in px is the viewBox's.
+    let root = svg.find('>')?;
+    let view: Vec<f32> = attr(&svg[..root], "viewBox")?.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+    let (width, height) = (*view.get(2)?, *view.get(3)?);
+    if !(width > 0.0 && height > 0.0) {
+        return None;
+    }
+    let sized = svg[..root].replacen("width=\"100%\"", &format!("width=\"{width}\" height=\"{height}\""), 1);
+    // Mermaid leaves the background transparent; its dark text needs the white it was drawn for.
+    let backing = format!("<rect x=\"{}\" y=\"{}\" width=\"{width}\" height=\"{height}\" fill=\"white\"/>", view[0], view[1]);
+    svg.replace_range(..=root, &format!("{sized}>{backing}"));
+    Some((svg, width, height))
+}
+
+/// The value of attribute `name` in an XML tag.
+fn attr<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
+    let from = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+    tag[from..].find('"').map(|len| &tag[from..from + len])
 }
 
 /// The formula a link / image URL refers to.
@@ -589,6 +616,14 @@ mod tests {
         // Doesn't parse: kept as written.
         let bad = "```mermaid\nnot a diagram {{{\n```\n";
         assert_eq!(prepare(bad).md, bad);
+        // Labels ending in a combining mark: usvg (Iced's, with the system's fonts) panics on them
+        // unless merman makes them safe, and nib's builds abort on a panic.
+        let svg = diagram_svg("flowchart TD\n    a[\"mean x̂\"] --> b[\"(x̂\"]").unwrap().0;
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        let opts = usvg::Options { fontdb: Arc::new(fonts), ..Default::default() };
+        assert!(svg.contains("<text") && !svg.contains("<foreignObject"), "labels must be SVG text");
+        assert!(usvg::Tree::from_str(&svg, &opts).is_ok());
     }
 
     #[test]
