@@ -23,23 +23,17 @@ Agents get API access to the editor with no MCP needed.
 
 ## Why nibble
 
-- Switch providers and models mid-chat
-- Comment and iterate on plans and code diffs within the chat session
-- See what the agents are doing
-- Give frontend access via headless browser without real internet control
-- Watch agents communicate and intervene when needed
+With coding agents, the human is the bottleneck. Agents get a lot done fast, and without oversight it turns into slop. nibble is built so one person can keep up with several agents working at once.
 
-## Ideology
-
-- **See the agents work** 
-- **No provider lock-in**
-- **Editor UI is an API**
-- **Remote-first**
-- **Nothing to install on the remote**
-- **Fast is a feature**
-- **Small on purpose**
-- **Config is a diff**
-- **No debugger needed**
+- **See the agents work.** Every read, edit and command is a step you can watch; Follow replays them in the editor; the mailbox shows what agents tell each other. One key freezes them all so you can step in.
+- **Review where you chat.** Comment on an agent's plan or diff and send it back. Accepting lands its branch as one commit.
+- **No provider lock-in.** Claude Code, Codex, OpenCode and local models side by side. Switch provider or model mid-chat.
+- **The editor UI is an API.** Anything with a shortcut is a command agents and scripts can run with `nib ctl`. No MCP, no screen control. Agents see your app's pages through `nib-web`, which opens localhost only, never the open internet.
+- **Remote-first, nothing to install.** nibble uploads its daemon over SSH. Terminals, language servers, git and agents run where the code is.
+- **Fast is a feature.** A native app, not a browser in a window.
+- **Small on purpose.** No extension API; niche features belong in a fork.
+- **Config is a diff.** Defaults are built in; your `config.toml` holds only what you changed.
+- **No debugger.** Agents debug with throwaway scripts and logs, so nibble doesn't ship one.
 
 ## Contents
 
