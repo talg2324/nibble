@@ -433,6 +433,8 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
                        (state.ai.efforts); taken when its session starts
   ai system-prompt TEXT  replace what the shown agent adds to its system prompt (empty: none)
   ai system            show the system prompt pane beside the steps
+  ai wpf [on|off]      worktree-per-feature: each agent's change on a branch of its own, landed
+                       as one commit (state.ai.worktree_per_feature; no argument: flip it)
   wait [SECS]          until nothing is waiting on the daemon and no server is on its way to
                        ready (default 10 s)
   raw JSON             send one request as-is, e.g. raw '{\"cmd\":\"state\"}'
@@ -617,6 +619,8 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         ["ai", "follow"] => json!({ "cmd": "ai.follow", "on": true }),
         ["ai", "unfollow"] => json!({ "cmd": "ai.follow", "on": false }),
         ["open", path, "--line", line] => json!({ "cmd": "open", "path": path, "line": line.parse::<u32>().context("open --line: a line number")? }),
+        ["ai", "wpf"] => json!({ "cmd": "ai.wpf" }),
+        ["ai", "wpf", on @ ("on" | "off")] => json!({ "cmd": "ai.wpf", "on": *on == "on" }),
         ["ai", "skills"] => json!({ "cmd": "ai.side", "skills": true }),
         ["ai", "terminal"] => json!({ "cmd": "ai.side", "skills": false }),
         ["ai", "noside"] => json!({ "cmd": "ai.side", "off": true }),

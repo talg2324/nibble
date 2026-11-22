@@ -210,6 +210,7 @@ fn serve_with<W: io::Write + Send + 'static>(
             ClientMsg::Notify(ClientNotify::AiClose { id }) => ai::close(&state.ai, id),
             ClientMsg::Notify(ClientNotify::AiInterrupt { id }) => ai::interrupt(&state.ai, id),
             ClientMsg::Notify(ClientNotify::AiSetMode { id, mode }) => ai::set_mode(&state.ai, id, mode),
+            ClientMsg::Notify(ClientNotify::AiWorktreePerFeature { on }) => ai::set_worktree_per_feature(&state.ai, on),
             ClientMsg::Notify(ClientNotify::AiAnswer { id, request, allow, message, answers }) => ai::answer(&state.ai, id, &request, allow, message.as_deref(), &answers),
             ClientMsg::Notify(ClientNotify::AiSuspend { id, on }) => {
                 let error = ai::suspend(&state.ai, id, on).err();

@@ -294,6 +294,18 @@ impl App {
     pub(in crate::app) fn ai_accept(&mut self, yes: bool) -> Task<Message> {
         self.ai.accepting = false;
         let Some(f) = self.ai.finished.clone().filter(|_| yes) else { return Task::none() };
+        // Worktree-per-feature on, and some of its work is in the user's tree, where accepting
+        // would leave it uncommitted: not done. It is told to move it, and goes on (D-080).
+        if self.ai.wpf && !f.stray.is_empty() {
+            if let Some(id) = self.ai_shown_session() {
+                let text = format!(
+                    "(nib: the user tried to accept your work, but worktree-per-feature is on and these files you changed are still changed in the shared project folder, not on your branch: {}. Move them (`nib-work start SLUG --carry`, or `nib-work carry` if you have a branch), check your work there, and run nib-mail done again.)",
+                    f.stray.join(", ")
+                );
+                self.ai_tell(id, text);
+                return self.flash_warn(format!("not accepted: {} file(s) of its work are uncommitted in your tree; it was told to move them to its branch", f.stray.len()));
+            }
+        }
         // On its own branch: the work is landed first, and the agent is ended once that worked.
         if let Some(id) = self.ai_shown_session().filter(|id| self.diff_branch(*id).is_some()) {
             return self.diff_land(id, &f);
@@ -910,7 +922,28 @@ impl App {
                 ..Default::default()
             })
         };
-        row![tab(Side::Terminal), tab(Side::Skills), tab(Side::Prompt)].spacing(8).align_y(Alignment::Center).into()
+        row![tab(Side::Terminal), tab(Side::Skills), tab(Side::Prompt), self.ai_wpf_switch()].spacing(8).align_y(Alignment::Center).into()
+    }
+
+    /// WPF: worktree-per-feature (D-080), filled while on. A switch, not a pane: the fill sets
+    /// it apart from the three tabs.
+    fn ai_wpf_switch(&self) -> Element<'_, Message> {
+        let th = &self.theme;
+        let (fg, dim, accent, divider, panel) = (th.foreground, th.dim, th.accent, th.divider, th.panel);
+        let on = self.ai.wpf;
+        let b = button(text("WPF").size(11).color(if on { fg } else { dim }))
+            .on_press(Message::Ai(Msg::Wpf(!on)))
+            .padding([1, 6])
+            .style(move |_: &iced::Theme, _: button::Status| button::Style {
+                background: on.then(|| Color { a: 0.18, ..accent }.into()),
+                border: Border { color: if on { accent } else { divider }, width: 1.0, radius: 3.0.into() },
+                ..Default::default()
+            });
+        let tip = container(text("worktree-per-feature: toggle to require each change to be a git branch committed to main").size(11).color(fg))
+            .padding([4, 8])
+            .max_width(320)
+            .style(move |_| container::Style { background: Some(panel.into()), border: Border { color: divider, width: 1.0, radius: 3.0.into() }, ..Default::default() });
+        tooltip(b, tip, tooltip::Position::Bottom).into()
     }
 
     /// The system prompt pane: what the agent's sessions add to its assistant's own, to edit.
@@ -1626,6 +1659,17 @@ impl App {
             }
             None => format!("accept and end it · {chord}"),
         };
+        // What would be left uncommitted in the user's tree.
+        if !f.stray.is_empty() {
+            let warn = th.warn;
+            let files = f.stray.join(", ");
+            let (head, body) = if ai.wpf {
+                ("NOT ON A BRANCH", format!("worktree-per-feature is on, but these are changed in your tree: {files}. Accepting sends it back to move them to its branch."))
+            } else {
+                ("LEFT IN YOUR TREE", format!("not committed; accepting leaves them as they are: {files}"))
+            };
+            col = col.push(column![text(head).size(10).color(warn), text(body).size(12).color(warn)].spacing(1));
+        }
         let see = button(text(format!("see its work · {see_chord}")).size(12).color(fg))
             .on_press(Message::Ai(Msg::AcceptDiff))
             .padding([3, 10])

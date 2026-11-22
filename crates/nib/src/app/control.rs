@@ -218,6 +218,13 @@ impl App {
                 call.ok(json!({ "following": on }));
                 t
             }
+            "ai.wpf" => {
+                // Worktree-per-feature: set it (`on`), or flip it.
+                let on = call.req.get("on").and_then(Value::as_bool).unwrap_or(!self.ai.wpf);
+                let t = self.handle(Message::Ai(super::ai::Msg::Wpf(on)));
+                call.ok(json!({ "worktree_per_feature": on }));
+                t
+            }
             "ai.side" => {
                 // The pane beside the steps: `side` (terminal, skills, system; `prompt` too), or the older
                 // `skills` switch, or none (`"off": true`).

@@ -5,9 +5,12 @@ description: Talk to the other agents working in the same project at the same ti
 
 # The agents' mailbox
 
-You may not be the only agent working in this project right now. Several agents, from different
-assistants, share one working tree: there are no separate checkouts. If two of you change the
-same file without talking, one overwrites the other. The mailbox is how you avoid that.
+You may not be the only agent working in this project right now. With worktree-per-feature on
+(`nib-work status` says `wpf: on`, the default), each agent that changes files does it on a
+branch of its own (the **nib-work** skill), so you do not overwrite each other; the mailbox is
+for agreeing on who does what, and for news others depend on. With it off, several agents,
+from different assistants, share one working tree: if two of you change the same file without
+talking, one overwrites the other. The mailbox is how you avoid that.
 
 nib tells you when it matters: who else is at work when you start, and when two of you touch
 the same file. You never need to check for mail: nib shows it to you. A message written to you

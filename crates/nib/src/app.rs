@@ -957,6 +957,7 @@ impl App {
                 self.code.lsp_extensions = lsp_extensions.into_iter().collect();
                 self.tree.set_places(scratch, nibdir);
                 self.connected = true;
+                self.ai_tell_wpf();
                 // The tree is there from the start; with no file to edit, the keyboard is in it.
                 self.tree.open = true;
                 let first = match open {

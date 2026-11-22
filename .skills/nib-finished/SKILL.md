@@ -1,6 +1,6 @@
 ---
 name: nib-finished
-description: Tell the user, through nib, that the job you were given is done — a short summary of what was asked, what you found and what you did, which the user accepts (ending your session) or answers with what is left. Use only when you were given a clear job with an end, and you believe it is complete. Not for open-ended research, questions, progress reports, or asking the user to look at something.
+description: Tell the user, through nib, that the job you were given is done — a short summary of what was asked, what you found and what you did, which the user accepts (landing your branch and ending your session) or answers with what is left. Use only when you were given a clear job with an end, and you believe it is complete — and, when worktree-per-feature is on (`nib-work status`), only once your changes are on your own branch. Not for open-ended research, questions, progress reports, or asking the user to look at something.
 ---
 
 # Saying the job is done
@@ -25,15 +25,35 @@ nib-mail done --asked "WHAT YOU WERE ASKED" [--found "WHAT YOU FOUND OUT"] --did
 Run it as the last thing in your turn, after your normal reply, then stop. If the user writes
 to you again, the job is not finished: go on, and run `nib-mail done` again when it is.
 
-## On your own branch
+## Before you run it: where is your work?
 
-If you started a branch with `nib-work start` (the **nib-work** skill), accepting lands it:
-everything on your branch, committed or not, becomes **one commit** on the user's branch, with
-`--did` as its subject, and your work tree is removed. Before answering, the user can open your
-work as a pull request, your plan beside it. If the branch cannot be landed (theirs moved on,
-a conflict) you are told so instead of being ended: `nib-work sync`, resolve, check again, and
-run `nib-mail done` again. They can also send you review comments on your changes: answer each
-(`nib-review reply`, the nib-work skill's "A review"), then run `nib-mail done` again.
+Accepting does one of two things, and nothing else:
+
+- **You have a branch** (`nib-work start`, the **nib-work** skill): accepting **lands it**:
+  everything on your branch, committed or not, becomes **one commit** on the user's branch,
+  with `--did` as its subject, and your work tree is removed.
+- **You have no branch**: accepting **only ends your session. Nothing is committed.** Every
+  file you changed stays changed, uncommitted, in the user's own tree.
+
+So run `nib-work status` first and read two lines:
+
+| `wpf:` | `branch:` | You changed files? | Then |
+|---|---|---|---|
+| `on` | a branch | in your work tree only | run `nib-mail done` |
+| `on` | none | yes | **not done.** `nib-work plan FILE` (if not recorded), `nib-work start SLUG --carry`, check your work there, then `nib-mail done` |
+| `on` | a branch | also in the project folder | **not done.** `nib-work carry`, check, then `nib-mail done` |
+| `on` or `off` | none | no | run `nib-mail done` |
+| `off` | none | yes | run `nib-mail done`, and say in `--did` which files you changed: they stay uncommitted in the user's tree |
+
+`wpf` is worktree-per-feature, the user's WPF switch: when it is on, every change goes on a
+branch of your own. With it on, `nib-mail done` **refuses** while anything you changed is still
+changed in the shared project folder, and names those files: do what it says, then run it again.
+
+Before answering, the user can open your work as a pull request, your plan beside it. If the
+branch cannot be landed (theirs moved on, a conflict) you are told so instead of being ended:
+`nib-work sync`, resolve, check again, and run `nib-mail done` again. They can also send you
+review comments on your changes: answer each (`nib-review reply`, the nib-work skill's "A
+review"), then run `nib-mail done` again.
 
 ## When — and when not
 
@@ -43,7 +63,8 @@ Use it only when **all** of these hold:
    run this migration.
 2. You did it, and checked it as far as you can (it builds, the test passes, you looked at the
    result).
-3. Nothing is left for you to do without the user.
+3. Your work is where accepting puts it (the table above): with `wpf: on`, on your branch.
+4. Nothing is left for you to do without the user.
 
 Do **not** use it when:
 

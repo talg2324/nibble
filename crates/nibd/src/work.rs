@@ -215,10 +215,16 @@ fn slug(s: &str) -> String {
 }
 
 const USAGE: &str = "usage:
-  nib-work plan FILE|-          record your plan (Markdown; - reads it from stdin). Run it again when the plan changes
-  nib-work start SLUG [--fix]   make your own branch (nib/feat/SLUG, or nib/fix/SLUG) in your own work tree, and print where to work
-  nib-work status               your branch, where it is checked out, its base, and the mode you work in
-  nib-work sync                 merge the base branch into yours (when it moved, or the user's merge hit a conflict)";
+  nib-work plan FILE|-                  record your plan (Markdown; - reads it from stdin). Run it again when the plan changes
+  nib-work start SLUG [--fix] [--carry] make your own branch (nib/feat/SLUG, or nib/fix/SLUG) in your own work tree, and print where to work.
+                                        --carry: also move what you already changed in the shared project folder into it
+  nib-work carry                        move what you changed in the shared project folder into your work tree
+  nib-work status                       your branch, where it is checked out, its base, the mode you work in, and whether worktree-per-feature is on
+  nib-work sync                         merge the base branch into yours (when it moved, or the user's merge hit a conflict)";
+
+/// The exit code with which `nib-work guard` says no; the hook's command turns it into Claude
+/// Code's "blocked" (2), so that any other failure (an older nibd) lets the edit through.
+pub const GUARD_NO: i32 = 3;
 
 /// What `nib-work` needs to know about the agent that runs it.
 pub struct Ctx {
@@ -271,12 +277,20 @@ pub fn run(ctx: &Ctx, args: &[String], stdin: impl FnOnce() -> std::io::Result<S
             (format!("plan recorded ({} lines): the user sees it beside your changes. Run this again if the plan changes.", text.lines().count()), 0)
         }
         ["start", rest @ ..] => {
-            let fix = rest.contains(&"--fix");
-            let names: Vec<&&str> = rest.iter().filter(|w| **w != "--fix").collect();
+            let (fix, take) = (rest.contains(&"--fix"), rest.contains(&"--carry"));
+            let names: Vec<&&str> = rest.iter().filter(|w| !matches!(**w, "--fix" | "--carry")).collect();
             let [name] = names.as_slice() else { return (USAGE.to_string(), 2) };
             match start(ctx, name, fix) {
                 Ok(rec) => {
                     told();
+                    let carried = if take {
+                        match carry(ctx, &rec) {
+                            Ok(said) => format!("\n{said}"),
+                            Err(e) => format!("\nnib-work start --carry: the branch is made, but nothing was moved: {e}\nFix that, then run nib-work carry."),
+                        }
+                    } else {
+                        String::new()
+                    };
                     (
                         format!(
                             "branch {} from {}, in a work tree of its own:\n  {}\n\
@@ -288,11 +302,25 @@ pub fn run(ctx: &Ctx, args: &[String], stdin: impl FnOnce() -> std::io::Result<S
                             rec.base,
                             rec.dir.display(),
                             rec.base
-                        ),
+                        ) + &carried,
                         0,
                     )
                 }
                 Err(e) => (format!("nib-work start: {e}"), 1),
+            }
+        }
+        ["carry"] => {
+            let Some(r) = record(&ctx.mailbox, &ctx.agent) else { return ("nib-work carry: you have no branch yet: nib-work start SLUG --carry".to_string(), 1) };
+            match carry(ctx, &r) {
+                Ok(said) => (said, 0),
+                Err(e) => (format!("nib-work carry: {e}"), 1),
+            }
+        }
+        ["guard"] => {
+            let input = stdin().unwrap_or_default();
+            match guard(ctx, &input) {
+                Some(why) => (why, GUARD_NO),
+                None => (String::new(), 0),
             }
         }
         ["status"] => {
@@ -302,7 +330,12 @@ pub fn run(ctx: &Ctx, args: &[String], stdin: impl FnOnce() -> std::io::Result<S
                 Some(r) => format!("branch: {}\nwork in: {}\nbase:   {}", r.branch, r.dir.display(), r.base),
                 None => format!("branch: none yet (nib-work start SLUG); you are in the shared work tree, {}", ctx.root.display()),
             };
-            (format!("{branch}\nplan:   {plan}\nmode:   {mode}"), 0)
+            let wpf = if mail::wpf(&ctx.mailbox) {
+                "on (every change goes on a branch of your own: nib-work start; never edit the shared project folder)"
+            } else {
+                "off (change files in the project folder; accepting your work commits nothing)"
+            };
+            (format!("{branch}\nplan:   {plan}\nmode:   {mode}\nwpf:    {wpf}"), 0)
         }
         ["sync"] => {
             let Some(r) = record(&ctx.mailbox, &ctx.agent) else { return ("nib-work sync: you have no branch (nib-work start SLUG)".to_string(), 1) };
@@ -315,6 +348,124 @@ pub fn run(ctx: &Ctx, args: &[String], stdin: impl FnOnce() -> std::io::Result<S
             }
         }
         _ => (USAGE.to_string(), 2),
+    }
+}
+
+/// Move what the agent changed in the shared project folder (`mail::stray`) into its work tree,
+/// and put those files back as they are at HEAD there. Tracked files go as a patch (three-way, so
+/// a base that moved since is fine); new files are copied. Nothing is changed in the shared
+/// folder unless all of it went in. What it says to the agent.
+fn carry(ctx: &Ctx, rec: &Record) -> Result<String, String> {
+    let files = mail::stray(&ctx.mailbox, &ctx.agent, &ctx.root);
+    if files.is_empty() {
+        return Ok("nothing to carry: you have no changes left in the shared project folder.".to_string());
+    }
+    let root = &ctx.root;
+    let (tracked, new): (Vec<&String>, Vec<&String>) = files.iter().partition(|f| git(root, &["cat-file", "-e", &format!("HEAD:./{f}")]).is_ok());
+    for f in &new {
+        if rec.dir.join(f).exists() {
+            return Err(format!("{f} is new in the shared project folder, but your work tree has one too: move it by hand"));
+        }
+    }
+    if !tracked.is_empty() {
+        let mut args = vec!["diff", "--binary", "HEAD", "--"];
+        args.extend(tracked.iter().map(|f| f.as_str()));
+        let patch = git_raw(root, &args)?;
+        let file = ctx.mailbox.join("work").join(format!("{}.carry.patch", ctx.agent));
+        fs::create_dir_all(ctx.mailbox.join("work")).map_err(|e| e.to_string())?;
+        fs::write(&file, patch).map_err(|e| e.to_string())?;
+        let applied = git(&rec.tree, &["apply", "--3way", &file.to_string_lossy()]);
+        let _ = fs::remove_file(&file);
+        applied.map_err(|e| format!("{e}\nyour changes did not apply in your work tree; the shared project folder is untouched"))?;
+    }
+    for f in &new {
+        let (from, to) = (root.join(f), rec.dir.join(f));
+        if let Some(p) = to.parent() {
+            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        fs::copy(&from, &to).map_err(|e| format!("{f}: {e}"))?;
+    }
+    // In the work tree now: the shared folder goes back to how it was.
+    if !tracked.is_empty() {
+        let mut args = vec!["restore", "--source=HEAD", "--staged", "--worktree", "--"];
+        args.extend(tracked.iter().map(|f| f.as_str()));
+        git(root, &args)?;
+    }
+    for f in &new {
+        let _ = fs::remove_file(root.join(f));
+    }
+    Ok(format!(
+        "carried into {}: {}. They are back as they were in the shared project folder. If another agent had also changed one of them there, its changes came along: check the diff.",
+        rec.dir.display(),
+        files.join(", ")
+    ))
+}
+
+/// For nib's Claude Code hook before an edit tool runs: why the edit in `input` (the hook's
+/// JSON) must not happen, if it must not. With worktree-per-feature on, an agent edits only in
+/// its own work tree: a file of the shared project folder that git does not ignore is refused.
+fn guard(ctx: &Ctx, input: &str) -> Option<String> {
+    if !mail::wpf(&ctx.mailbox) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(input).ok()?;
+    let given = ["file_path", "notebook_path", "path"].iter().find_map(|k| v["tool_input"][k].as_str())?;
+    let mut path = PathBuf::from(given);
+    if path.is_relative() {
+        path = PathBuf::from(v["cwd"].as_str()?).join(path);
+    }
+    let path = canonical_near(&path);
+    let root = canonical_near(&ctx.root);
+    let rel = path.strip_prefix(&root).ok()?;
+    if let Some(r) = record(&ctx.mailbox, &ctx.agent) {
+        if path.starts_with(canonical_near(&r.tree)) {
+            return None;
+        }
+    }
+    // Ignored files never land; they are not the user's work to protect.
+    if ignored(&root, rel) {
+        return None;
+    }
+    let to = match record(&ctx.mailbox, &ctx.agent) {
+        Some(r) => format!("Edit {} instead.", r.dir.join(rel).display()),
+        None => "Record your plan (nib-work plan FILE), run nib-work start SLUG, and edit the same file under the work tree it prints.".to_string(),
+    };
+    Some(format!(
+        "nib: worktree-per-feature is on, and {} is in the shared project folder, where the user's own work is. Agents change files only on a branch of their own (nib-work skill). {to}",
+        path.display()
+    ))
+}
+
+/// Whether git ignores `rel` (a path under `root`, which may not exist yet).
+pub fn ignored(root: &Path, rel: &Path) -> bool {
+    git(root, &["check-ignore", "-q", "--", &rel.to_string_lossy()]).is_ok()
+}
+
+/// `p` with its nearest existing ancestor made canonical (the file may not exist yet).
+pub fn canonical_near(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(c) = nib_proto::path::canonical(at) {
+            return rest.iter().rev().fold(c, |acc: PathBuf, part| acc.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(up), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = up;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
+/// `git` in `dir`, its output as it is (a patch must keep its last newline).
+fn git_raw(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new("git").arg("-C").arg(dir).args(args).stdin(Stdio::null()).output().map_err(|e| format!("could not run git: {e}"))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
@@ -363,6 +514,97 @@ mod tests {
         assert_eq!(slug("  --a__b--  "), "a-b");
         assert_eq!(slug("!!!"), "");
         assert_eq!(slug(&"x".repeat(60)).len(), 40);
+    }
+
+    /// Worktree-per-feature (D-080): what an agent left in the shared project folder is not
+    /// done while it is on; `--carry` moves it to the agent's branch; the hook's guard refuses
+    /// edits there; off, the same summary goes through and says what is left uncommitted.
+    #[test]
+    fn worktree_per_feature_holds_an_agent_to_its_branch() {
+        let dir = std::env::temp_dir().join(format!("nibd-wpf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, mailbox, nibdir) = (dir.join("repo"), dir.join("mailbox"), dir.join("nibdir"));
+        fs::create_dir_all(repo.join("app")).unwrap();
+        fs::create_dir_all(mailbox.join("outbox")).unwrap();
+        if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
+            return; // no git on this machine
+        }
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+            git(&repo, args).unwrap();
+        }
+        fs::write(repo.join("app/a.txt"), "one\n").unwrap();
+        fs::write(repo.join(".gitignore"), "*.log\n").unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["commit", "-q", "-m", "first"]).unwrap();
+        let root = repo.join("app");
+        let ctx = Ctx { mailbox: mailbox.clone(), agent: "claude-1".into(), root: root.clone(), nibdir };
+        let go = |args: &[&str]| run(&ctx, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), || Ok("# Plan\n1. do it\n".to_string()));
+        let done = || mail::run_in(&mailbox, "claude-1", Some(&root), &["done", "--asked", "a sum", "--did", "added it"].map(String::from));
+        let guard_on = |path: &Path| {
+            let input = serde_json::json!({ "tool_name": "Edit", "cwd": root, "tool_input": { "file_path": path } }).to_string();
+            run(&ctx, &["guard".to_string()], || Ok(input))
+        };
+
+        // The agent edited the project folder: a tracked file, a new one, and an ignored one.
+        fs::write(root.join("a.txt"), "one\nmore\n").unwrap();
+        fs::write(root.join("n.txt"), "new\n").unwrap();
+        fs::write(root.join("x.log"), "noise\n").unwrap();
+        let me = mail::Entry {
+            id: "claude-1".into(),
+            name: "claude-1".into(),
+            assistant: "Claude Code".into(),
+            model: None,
+            task: "a sum".into(),
+            busy: true,
+            files: vec!["a.txt".into(), "n.txt".into(), "x.log".into(), "/elsewhere/notes.md".into()],
+            mode: "auto".into(),
+        };
+        mail::write_roster(&mailbox, &[me]);
+        assert_eq!(mail::stray(&mailbox, "claude-1", &root), ["a.txt", "n.txt"], "ignored files and files outside the project do not count");
+
+        // On (no file yet: on by default): status says so, the guard refuses, done refuses.
+        assert!(go(&["status"]).0.contains("wpf:    on"), "{}", go(&["status"]).0);
+        let (why, code) = guard_on(&root.join("a.txt"));
+        assert!(code == GUARD_NO && why.contains("worktree-per-feature is on") && why.contains("nib-work start"), "{code} {why}");
+        assert_eq!(guard_on(&root.join("x.log")).1, 0, "an ignored file may be edited");
+        assert_eq!(guard_on(Path::new("/elsewhere/notes.md")).1, 0, "outside the project");
+        let (out, code) = done();
+        assert!(code == 1 && out.contains("refused") && out.contains("a.txt, n.txt") && out.contains("--carry"), "{out}");
+        assert!(mail::collect(&mailbox).is_empty(), "the user is not told it is done");
+
+        // Off: the guard lets it be, and done goes through, saying what stays uncommitted.
+        mail::set_wpf(&mailbox, false);
+        assert!(go(&["status"]).0.contains("wpf:    off"));
+        assert_eq!(guard_on(&root.join("a.txt")).1, 0);
+        assert_eq!(done().1, 0);
+        let letters = mail::collect(&mailbox);
+        let f: nib_proto::AiFinished = serde_json::from_str(&letters[0].text).unwrap();
+        assert_eq!(f.stray, ["a.txt", "n.txt"]);
+
+        // On again: the agent moves its work onto a branch with --carry.
+        mail::set_wpf(&mailbox, true);
+        assert_eq!(go(&["plan", "-"]).1, 0);
+        let (out, code) = go(&["start", "Add Sum", "--carry"]);
+        assert!(code == 0 && out.contains("carried into") && out.contains("a.txt, n.txt"), "{out}");
+        let rec = record(&mailbox, "claude-1").unwrap();
+        assert_eq!(fs::read_to_string(rec.dir.join("a.txt")).unwrap(), "one\nmore\n", "the change is on the branch");
+        assert_eq!(fs::read_to_string(rec.dir.join("n.txt")).unwrap(), "new\n");
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "one\n", "and the project folder is as it was");
+        assert!(!root.join("n.txt").exists());
+        assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "", "nothing of it is left there (x.log is ignored)");
+        assert_eq!(go(&["carry"]).0, "nothing to carry: you have no changes left in the shared project folder.");
+        // Its own work tree is where it edits; the project folder stays refused and says where to go.
+        assert_eq!(guard_on(&rec.dir.join("a.txt")).1, 0);
+        let (why, code) = guard_on(&root.join("a.txt"));
+        assert!(code == GUARD_NO && why.contains(&rec.dir.join("a.txt").display().to_string()), "{why}");
+        // Done now goes through, and lands.
+        assert_eq!(done().1, 0);
+        let f: nib_proto::AiFinished = serde_json::from_str(&mail::collect(&mailbox).last().unwrap().text).unwrap();
+        assert!(f.stray.is_empty());
+        land(&mailbox, "claude-1", &root, "Add sum").unwrap();
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "one\nmore\n");
+        assert_eq!(git(&repo, &["log", "--format=%s", "-1"]).unwrap(), "Add sum");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

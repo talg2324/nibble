@@ -1,6 +1,6 @@
 ---
 name: nib-work
-description: Do a feature request or a bug fix the organized way when nib runs you as an agent — research it, write a plan the user can see, work on a branch of your own in a work tree of your own (`nib-work`), check it, and hand it over with `nib-mail done` so the user reviews it like a pull request and lands it as one commit. Use when you are asked to add, change or fix something in a git repository and the job has a clear end. Not for questions, research with no change asked for, one-line edits the user wants made in place, or work the user told you to do directly in the project folder.
+description: Do a feature request or a bug fix the organized way when nib runs you as an agent — research it, write a plan the user can see, work on a branch of your own in a work tree of your own (`nib-work`), check it, and hand it over with `nib-mail done` so the user reviews it like a pull request and lands it as one commit. Required whenever you are asked to add, change or fix files in a git repository and `nib-work status` says `wpf: on` (worktree-per-feature, the default) — however small the change. With `wpf: off`, only when the user asks for a branch. Not for questions or research with no change asked for.
 ---
 
 # A feature or a bug fix, on your own branch
@@ -9,6 +9,24 @@ The user sees your work in nib's diff tab as a pull request: your plan beside yo
 When you say you are done they accept it (your branch lands on theirs as **one commit**, and
 your session ends), look at it first, or write back to you. Other agents may be working in the
 same project at the same time; on your own branch you cannot step on each other.
+
+## First: is it required?
+
+```sh
+nib-work status          # its last line: wpf: on|off
+```
+
+- **`wpf: on`** (worktree-per-feature, the user's WPF switch; on unless they turned it off):
+  **every** change to files goes through the steps below, a one-line fix too. Never edit the
+  project folder you started in. nib holds you to it: Claude Code's edit tools are refused
+  there, nib writes to you if you change a file there anyway, and `nib-mail done` refuses
+  while anything you changed is still changed there. Accepting work that is not on a branch
+  commits nothing, so it would sit uncommitted in the user's tree.
+- **`wpf: off`**: change the project folder directly, and tell the other agents what you touch
+  (the **nib-agent-mailbox** skill). Accepting commits nothing for you: say in `nib-mail done`
+  which files you changed. Use the steps below only if the user asks for a branch.
+
+Do not decide this from the size of the job or from what other agents do: `wpf:` decides.
 
 Four steps, in this order. A bug fix is the same as a feature; where it differs is marked.
 
@@ -51,6 +69,11 @@ nib-work start SLUG --fix    # a bug fix: branch nib/fix/SLUG
 `SLUG` is two to four words for the job (`csv-export`, `login-timeout`). It refuses until a
 plan is recorded. It prints the folder of your work tree: **from here on, work only there.**
 
+Already changed files in the project folder (before you knew, or by mistake)? Add `--carry`:
+`nib-work start SLUG --carry` moves what you changed there into your new work tree and puts
+those files back as they were. With a branch already, `nib-work carry` does the same. Check
+the diff afterwards: if another agent had changed one of those files too, its change came along.
+
 - `cd` into it at the start of each command, and use absolute paths under it for the files you
   read and edit. The project folder you started in is not yours to change any more.
 - It holds the tracked files only: no build output, no dependencies folder, no `.env`, nothing
@@ -59,6 +82,7 @@ plan is recorded. It prints the folder of your work tree: **from here on, work o
   do not polish history.
 - Do not switch branches in the work tree, and do not merge into the user's branch or push:
   landing is the user's.
+- Sub-agents of your own that edit files edit in your work tree too: give them its path.
 
 Then check your work, in the work tree: build it, run the tests that cover it, and try the
 change itself.
@@ -73,6 +97,8 @@ nib-mail done --asked "…" [--found "…"] --did "…"
 ```
 
 As the **nib-finished** skill says (at most 100 words; say what is not done or not checked).
+It refuses, naming the files, while anything you changed is still changed in the project
+folder: `nib-work carry`, check, and run it again.
 `--did` becomes the subject of the commit that lands your work, so start it with what changed.
 Run it last, then stop.
 
@@ -125,9 +151,10 @@ nib-review reply ID "…"        # answer one
 ## Not this way
 
 - A question, an explanation, a review with no change asked for: just answer.
-- The user said to edit in place, or the project is not a git repository (`nib-work start`
-  says so): work in the project folder, and tell the other agents what you touch (the
-  **nib-agent-mailbox** skill).
+- `wpf: off`, or the project is not a git repository (`nib-work start` says so): work in the
+  project folder, and tell the other agents what you touch (the **nib-agent-mailbox** skill).
+- The user asks you to edit in place while `wpf: on`: tell them worktree-per-feature is on and
+  that the WPF switch in the agents tab turns it off; do not work around it.
 
 If `nib-work` is not found you are not running inside nib's agents tab: plan in your reply and
 work as you normally would.

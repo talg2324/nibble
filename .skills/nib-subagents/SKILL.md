@@ -46,8 +46,9 @@ what you found, the files, what is already ruled out, how to check the result, a
 should follow the **nib-work** skill (plan, own branch, `nib-mail done`).
 
 Its work tree holds **committed files only**. If the job builds on changes that are not
-committed yet (yours or the user's), say so to the user first: they commit them, or the agent
-is told to work in the project folder instead.
+committed yet (yours or the user's), say so to the user first: they commit them. Only with
+worktree-per-feature off (`nib-work status`: `wpf: off`) may the agent be told to work in the
+project folder instead.
 
 Then, one of:
 

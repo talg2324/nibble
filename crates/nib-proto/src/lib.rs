@@ -848,6 +848,11 @@ pub enum ClientNotify {
     /// Freeze (`on`) or thaw every process of the session, mid-command or mid-request,
     /// without it noticing -> `AiEvent::Suspended`. Unix only.
     AiSuspend { id: AiId, on: bool },
+    /// Worktree-per-feature (D-080): `on`, an agent that changes files must do it on a branch of
+    /// its own (`nib-work start`) that lands on the user's branch; the daemon's hints, `nib-mail
+    /// done`, `nib-work` and nib's Claude Code hook hold agents to it. Sent after `Hello` and
+    /// whenever the user flips it; the daemon takes it as on until told otherwise.
+    AiWorktreePerFeature { on: bool },
     /// The answer to `ServerNotify::Web` `id`: the JSON object the control socket would have
     /// answered (`{"ok": true, …}` or `{"ok": false, "error": "…"}`).
     WebReply { id: u64, reply: String },
@@ -1224,6 +1229,11 @@ pub struct AiFinished {
     pub found: Option<String>,
     /// What it did.
     pub did: String,
+    /// Files it changed that are still changed in the shared project folder (not on a branch of
+    /// its own), relative to the project root: accepting does not commit them. Filled in by
+    /// `nib-mail done`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stray: Vec<String>,
 }
 
 impl AiFinished {

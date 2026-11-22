@@ -418,6 +418,9 @@ pub struct Panel {
     last: Option<(AiAgent, Option<String>)>,
     /// `[ai] pick_model`: a new agent opens the dropdown (off: it starts with `last`).
     pick_model: bool,
+    /// `[ai] worktree_per_feature` (D-080): agents change files only on a branch of their own
+    /// that lands on the user's; the daemon is told (`ClientNotify::AiWorktreePerFeature`).
+    pub(super) wpf: bool,
     /// The terminal installing / signing in an assistant: its key, and which one.
     setup: Option<(u64, AiAgent)>,
     /// The terminal updating an assistant: its key, and which one.
@@ -475,6 +478,7 @@ impl Default for Panel {
             pick_sel: None,
             last: None,
             pick_model: true,
+            wpf: true,
             setup: None,
             update: None,
             warming: Default::default(),
@@ -537,7 +541,7 @@ impl Panel {
         let mut p = Self {
             cloud_models: cfg.cloud_models,
             image_zoom_delay: zoom_delay(cfg.image_zoom_delay),
-            pick_model: cfg.pick_model, last: last.clone(), last_effort: cfg.effort, last_prompt: cfg.prompt.unwrap_or_default(), ..Default::default() };
+            pick_model: cfg.pick_model, wpf: cfg.worktree_per_feature, last: last.clone(), last_effort: cfg.effort, last_prompt: cfg.prompt.unwrap_or_default(), ..Default::default() };
         // The first chat is with the one picked last time.
         if let Some((agent, model)) = last {
             (p.chats[0].agent, p.chats[0].chosen) = (Some(agent), model);
@@ -637,6 +641,8 @@ pub enum Msg {
     NewChat,
     /// Open / close the assistant / model dropdown.
     Switch,
+    /// Worktree-per-feature on (`true`) or off: the WPF switch in the header.
+    Wpf(bool),
     /// Show this assistant's models in the dropdown.
     Tab(AiAgent),
     /// Chat with this one now, with this model (`None`: the one it's set up with).
@@ -1076,6 +1082,7 @@ impl App {
                 self.ai.pick_model = on;
                 return self.ai_save_choice();
             }
+            Msg::Wpf(on) => return self.ai_set_wpf(on),
             Msg::Saved(Some(why)) => return self.flash_warn(format!("couldn't save to config.toml: {why}")),
             Msg::Saved(None) => {}
             Msg::Setup(agent) => return self.ai_setup(agent, false),
@@ -1257,6 +1264,26 @@ impl App {
         self.ai.pick_sel = None;
         // What's installed (and its models) may have changed since.
         self.ai_check(None)
+    }
+
+    /// Worktree-per-feature on or off: the daemon is told (the agents' hints and checks follow
+    /// it at once), and config.toml remembers it.
+    pub(in crate::app) fn ai_set_wpf(&mut self, on: bool) -> Task<Message> {
+        self.ai.wpf = on;
+        self.ai_tell_wpf();
+        let flash = self.flash_info(if on {
+            "worktree-per-feature on: each agent's changes go on a branch of its own, landed on yours as one commit"
+        } else {
+            "worktree-per-feature off: agents change the project folder; accepting commits nothing"
+        });
+        let save = Task::perform(async move { nib_editor::Config::save_ai_wpf(on).err().map(|e| format!("{e:#}")) }, |e| Message::Ai(Msg::Saved(e)));
+        Task::batch([flash, save])
+    }
+
+    /// Tell the daemon whether worktree-per-feature is on (after `Hello`, and when it changes).
+    pub(in crate::app) fn ai_tell_wpf(&mut self) {
+        let on = self.ai.wpf;
+        self.notify(nib_proto::ClientNotify::AiWorktreePerFeature { on });
     }
 
     /// Remember the last pick and the dropdown switch in config.toml, off the UI thread.
@@ -1687,6 +1714,7 @@ impl App {
             "cursor": cursor,
         });
         let mut state = json!({
+            "worktree_per_feature": ai.wpf,
             "agent": ai.agent.map(AiAgent::name),
             "session": session,
             "model": ai.model,
@@ -1731,7 +1759,7 @@ impl App {
                 "name": stage::agent_name(c),
                 "mode": c.mode.name(),
                 "waiting": c.ask.is_some(),
-                "finished": c.finished.as_ref().map(|f| json!({ "asked": f.asked, "found": f.found, "did": f.did })),
+                "finished": c.finished.as_ref().map(|f| json!({ "asked": f.asked, "found": f.found, "did": f.did, "stray": f.stray })),
                 "busy": c.busy,
                 "frozen": c.frozen,
                 "turns": c.turns.len(),
@@ -3119,7 +3147,7 @@ mod tests {
 
     #[test]
     fn a_finished_agent_is_accepted_with_cmd_enter_or_kept_with_any_other_key() {
-        let done = || AiEvent::Finished(nib_proto::AiFinished { asked: "Fix the sum".into(), found: None, did: "Fixed calc.py".into() });
+        let done = || AiEvent::Finished(nib_proto::AiFinished { asked: "Fix the sum".into(), found: None, did: "Fixed calc.py".into(), ..Default::default() });
         let accept = if cfg!(target_os = "macos") { "cmd+enter" } else { "ctrl+enter" };
         let mut a = chatting();
         say(&mut a, "first");
@@ -3153,6 +3181,33 @@ mod tests {
         assert!(a.ai.finished.is_none());
     }
 
+    /// Worktree-per-feature (D-080): an agent whose summary says files of its are uncommitted
+    /// in the user's tree is not ended by ⌘↵ while it is on: it is sent back to move them. Off,
+    /// it is ended as before (and the dialog said what stays).
+    #[test]
+    fn with_worktree_per_feature_on_cmd_enter_sends_back_an_agent_that_left_files_in_the_tree() {
+        let stray = || AiEvent::Finished(nib_proto::AiFinished { asked: "Fix the sum".into(), found: None, did: "Fixed calc.py".into(), stray: vec!["calc.py".into()] });
+        let accept = if cfg!(target_os = "macos") { "cmd+enter" } else { "ctrl+enter" };
+        let mut a = chatting();
+        assert!(a.ai.wpf, "on by default");
+        say(&mut a, "fix the sum");
+        event(&mut a, 7, stray());
+        assert!(a.ai.accepting);
+        key(&mut a, accept);
+        assert!(matches!(a.ai.session, Session::Ready(7)) && a.ai.chats.len() == 1, "not ended");
+        assert!(a.ai.finished.is_none() && a.ai.busy && !a.ai.accepting);
+        let told = &a.ai.turns.last().unwrap().text;
+        assert!(told.contains("worktree-per-feature is on") && told.contains("calc.py") && told.contains("--carry"), "{told}");
+
+        // Off (the WPF switch, as `nib ctl ai wpf off` flips it): accepting ends it.
+        let _ = a.update(Message::Ai(Msg::Wpf(false)));
+        assert!(!a.ai.wpf && a.ai_state_json()["worktree_per_feature"] == false);
+        event(&mut a, 7, AiEvent::TurnDone { error: None });
+        event(&mut a, 7, stray());
+        key(&mut a, accept);
+        assert!(!matches!(a.ai.session, Session::Ready(7)), "ended");
+    }
+
     #[test]
     fn cmd_d_in_an_agents_chat_shows_its_work_and_esc_comes_back() {
         let mut a = chatting();
@@ -3167,7 +3222,7 @@ mod tests {
     #[test]
     fn an_agent_on_its_own_branch_is_seen_in_the_diff_tab_and_landed_on_accept() {
         let (accept, see) = if cfg!(target_os = "macos") { ("cmd+enter", "cmd+d") } else { ("ctrl+enter", "ctrl+d") };
-        let done = || AiEvent::Finished(nib_proto::AiFinished { asked: "Add a sum".into(), found: None, did: "Added sum()\nand a test".into() });
+        let done = || AiEvent::Finished(nib_proto::AiFinished { asked: "Add a sum".into(), found: None, did: "Added sum()\nand a test".into(), ..Default::default() });
         let landing = |a: &App| a.pending.iter().find_map(|(id, p)| matches!(p, Pending::WorkLand { id: 7 }).then_some(*id));
         let mut a = chatting();
         say(&mut a, "add a sum");

@@ -756,6 +756,11 @@ pub struct Sessions {
     frozen: std::collections::HashSet<AiId>,
     /// The agents' mailbox folder (`mail`), once a session has started.
     mail: Option<PathBuf>,
+    /// Worktree-per-feature (D-080) is off: the user said agents may change the shared project
+    /// folder. Off only when told (`set_worktree_per_feature`).
+    wpf_off: bool,
+    /// Sessions already told they changed the shared project folder with worktree-per-feature on.
+    wpf_told: std::collections::HashSet<AiId>,
     /// The project the sessions work in: where every letter is kept (`history::letter`).
     root: Option<PathBuf>,
     /// The post office thread is running.
@@ -936,6 +941,7 @@ impl Watch {
         let (Some((before, since)), Some(root)) = (window, root) else { return };
         let after = diff::changed(&root);
         let mut s = shared.lock().unwrap();
+        let mut mine = Vec::new();
         for (path, now) in after {
             if before.get(&path) == Some(&now) {
                 continue;
@@ -946,8 +952,47 @@ impl Watch {
                 continue;
             }
             s.touched.entry(id).or_default().insert(path.clone());
-            s.edits.entry(path).or_insert(id);
+            s.edits.entry(path.clone()).or_insert(id);
+            mine.push(path);
         }
+        drop(s);
+        if let Some(first) = mine.iter().min() {
+            self.stray_alarm(id, Path::new(first));
+        }
+    }
+
+    /// Session `id` changed `path` in the shared project folder. With worktree-per-feature on
+    /// that is not where its work goes (D-080): it is told so, once, and how to move what it
+    /// did onto a branch of its own. Ignored files are not counted.
+    fn stray_alarm(&self, id: AiId, path: &Path) {
+        let Some(shared) = self.sessions.upgrade() else { return };
+        let (root, dir, name, branch) = {
+            let s = shared.lock().unwrap();
+            if s.wpf_off || s.wpf_told.contains(&id) {
+                return;
+            }
+            let (Some(root), Some(dir), Some(m)) = (s.root.clone(), s.mail.clone(), s.meta.get(&id)) else { return };
+            (root.clone(), dir.clone(), m.name.clone(), work::record(&dir, &m.id_name))
+        };
+        let path = if path.is_relative() { root.join(path) } else { path.to_path_buf() };
+        let (path, root) = (work::canonical_near(&path), work::canonical_near(&root));
+        let Ok(rel) = path.strip_prefix(&root) else { return };
+        if rel.as_os_str().is_empty() || work::ignored(&root, rel) {
+            return;
+        }
+        let to = match &branch {
+            Some(r) => format!("Your work tree is {}: make your changes there, and run `nib-work carry` to move what you changed here into it.", r.dir.display()),
+            None => "Stop changing files here. Record your plan (`nib-work plan FILE`), then run `nib-work start SLUG --carry`: it moves what you changed here into your new work tree and puts these files back as they were. From then on work only in that work tree.".to_string(),
+        };
+        let text = format!(
+            "Worktree-per-feature is on, and you changed (or tried to change) {} in the shared project folder ({}), where the user's own work is: it would not land, and the user would find it uncommitted in their tree. {to} (nib-work skill)",
+            rel.display(),
+            root.display()
+        );
+        if !shared.lock().unwrap().wpf_told.insert(id) {
+            return;
+        }
+        let _ = mail::post(&dir, &mail::Letter { from: mail::NIB.into(), to: name, text, at: 0 });
     }
 
     fn see(&self, id: AiId, event: &AiEvent) {
@@ -966,6 +1011,7 @@ impl Watch {
                 if let Some(s) = self.sessions.upgrade() {
                     s.lock().unwrap().changed(id, path);
                 }
+                self.stray_alarm(id, Path::new(path));
             }
             AiEvent::Mode(mode) => {
                 if let Some(s) = self.sessions.upgrade() {
@@ -1249,6 +1295,9 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
     s.next += 1;
     if s.mail.is_none() {
         s.mail = mail::dir(dirs.scratch);
+        if let Some(dir) = &s.mail {
+            mail::set_wpf(dir, !s.wpf_off);
+        }
     }
     if s.root.is_none() {
         s.root = Some(root.to_path_buf());
@@ -1740,6 +1789,26 @@ fn skills_plugin() -> Option<PathBuf> {
     link_plugin(&crate::places::xdg("XDG_CACHE_HOME", &[".cache"]).join("plugin").join("nib"), &skills)
 }
 
+/// The hook in nib's plugin: before Claude Code edits a file, `nib-work guard` says whether
+/// worktree-per-feature allows it (D-080). Its "no" (exit 3) becomes Claude Code's "blocked"
+/// (2) with the reason; anything else (not in nib, an older nibd) lets the edit through.
+const PLUGIN_HOOKS: &str = r#"{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "nib-work guard || exit $(( $? == 3 ? 2 : 0 ))" }]
+      }
+    ]
+  }
+}
+"#;
+
+fn write_plugin_hooks(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir.join("hooks"))?;
+    std::fs::write(dir.join("hooks").join("hooks.json"), PLUGIN_HOOKS)
+}
+
 #[cfg(unix)]
 fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
     // Not offered unless the user opted in at install (D-044).
@@ -1749,6 +1818,7 @@ fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
     }
     std::fs::create_dir_all(dir.join(".claude-plugin")).ok()?;
     std::fs::write(dir.join(".claude-plugin/plugin.json"), r#"{"name":"nib","description":"Skills for working in the nibble editor","version":"0.1.0"}"#).ok()?;
+    write_plugin_hooks(dir).ok()?;
     let links = dir.join("skills");
     let _ = std::fs::remove_dir_all(&links);
     std::fs::create_dir_all(&links).ok()?;
@@ -1781,6 +1851,7 @@ fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
     }
     std::fs::create_dir_all(dir.join(".claude-plugin")).ok()?;
     std::fs::write(dir.join(".claude-plugin/plugin.json"), r#"{"name":"nib","description":"Skills for working in the nibble editor","version":"0.1.0"}"#).ok()?;
+    write_plugin_hooks(dir).ok()?;
     let copies = dir.join("skills");
     let _ = std::fs::remove_dir_all(&copies);
     for s in skills {
@@ -2675,14 +2746,15 @@ pub fn send(sessions: &Shared, id: AiId, text: &str, images: &[AiImage]) {
         let others: Vec<&Meta> = s.meta.iter().filter(|(other, m)| **other != id && !m.task.is_empty()).map(|(_, m)| m).collect();
         if !others.is_empty() {
             let list: Vec<String> = others.iter().map(|m| format!("{} ({}): {}", m.name, if m.busy.load(Ordering::Relaxed) { "working" } else { "idle" }, m.task)).collect();
-            text.push_str(&format!(
-                "\n\n(nib: you are {}. Other agents share this working tree right now:\n{}\nIf you will change files, first run `nib-mail who` (it lists the files each agent changed) and write only to the agents whose files or task overlap yours, by name (nib-agent-mailbox skill). If none do, write to nobody.)",
-                me.name,
-                list.join("\n")
-            ));
+            let how = if s.wpf_off {
+                "share this working tree right now:\n{list}\nIf you will change files, first run `nib-mail who` (it lists the files each agent changed) and write only to the agents whose files or task overlap yours, by name (nib-agent-mailbox skill). If none do, write to nobody."
+            } else {
+                "are at work in this project right now:\n{list}\nEach changes files on a branch of its own (nib-work), so you do not share files with them. If your task may overlap theirs, run `nib-mail who` and write only to those agents, by name (nib-agent-mailbox skill)."
+            };
+            text.push_str(&format!("\n\n(nib: you are {}. Other agents {})", me.name, how.replace("{list}", &list.join("\n"))));
         }
         if s.mail.is_some() {
-            text.push_str("\n\n(nib: if this is a clear job with an end, then when you have done it and checked it, run `nib-mail done` as the last thing you do (nib-finished skill), so the user sees it is finished.)");
+            text.push_str(finish_hint(!s.wpf_off));
         }
     }
     // Letters that waited in its inbox while it was idle come with it.
@@ -2781,6 +2853,26 @@ fn with_answers(mut input: Value, answers: &[String]) -> Value {
         o.insert("answers".into(), Value::Object(by_question));
     }
     input
+}
+
+/// Worktree-per-feature on or off (D-080), for every agent: the hints they are given from now
+/// on, and what `nib-mail done` and `nib-work guard` hold them to.
+pub fn set_worktree_per_feature(sessions: &Shared, on: bool) {
+    let mut s = sessions.lock().unwrap();
+    s.wpf_off = !on;
+    if let Some(dir) = &s.mail {
+        mail::set_wpf(dir, on);
+    }
+}
+
+/// What a new agent's first message is followed by: how to change files, and how to say it is
+/// done, by whether worktree-per-feature is on.
+fn finish_hint(wpf: bool) -> &'static str {
+    if wpf {
+        "\n\n(nib: worktree-per-feature is on. If this asks you to change files, follow the nib-work skill: record your plan (`nib-work plan`), run `nib-work start SLUG`, and make every change in the work tree it prints, never in this project folder. When it is done and checked, run `nib-mail done` as the last thing you do (nib-finished skill): the user then lands your branch as one commit. A question or research with no change asked for: just answer.)"
+    } else {
+        "\n\n(nib: worktree-per-feature is off: change files here, in the project folder; nothing is committed for you, and accepting your work commits nothing. If this is a clear job with an end, then when you have done it and checked it, run `nib-mail done` as the last thing you do (nib-finished skill), so the user sees it is finished.)"
+    }
 }
 
 /// Change the agent's mode. Claude Code switches at once and confirms (`AiEvent::Mode`); the
@@ -3044,6 +3136,78 @@ mod tests {
         close(&shared, new);
         history::delete(&root, &history_id).unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Worktree-per-feature (D-080): the first message says which way to work, and an agent
+    /// that changes the shared project folder while it is on is written to, once.
+    #[test]
+    fn worktree_per_feature_hints_and_the_letter_when_an_agent_edits_the_shared_tree() {
+        assert!(finish_hint(true).contains("nib-work start") && finish_hint(true).contains("never in this project folder"));
+        assert!(finish_hint(false).contains("accepting your work commits nothing") && !finish_hint(false).contains("nib-work start"));
+
+        let dir = std::env::temp_dir().join(format!("nibd-ai-wpf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("mailbox/outbox")).unwrap();
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let sh = |args: &[&str]| Command::new("git").arg("-C").arg(&root).args(args).output().is_ok_and(|o| o.status.success());
+        if !sh(&["init", "-q"]) {
+            return; // no git on this machine
+        }
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        let mailbox = dir.join("mailbox");
+        let shared: Shared = Default::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let watch = Watch { sessions: Arc::downgrade(&shared), busy: Arc::new(AtomicBool::new(false)), rec: Arc::new(Mutex::new(history::Recorder::new(&root, AiAgent::Claude, None))) };
+        {
+            let mut s = shared.lock().unwrap();
+            s.root = Some(root.clone());
+            s.mail = Some(mailbox.clone());
+            let m = Meta { id_name: "claude-1".into(), name: "add-sum".into(), agent: AiAgent::Claude, model: None, task: "t".into(), mode: AiMode::Auto, busy: watch.busy.clone(), tx, rec: watch.rec.clone() };
+            s.meta.insert(1, m);
+        }
+        let letters = || mail::collect(&mailbox);
+        // Off: nothing said. Ignored files and files elsewhere: nothing said either.
+        set_worktree_per_feature(&shared, false);
+        assert!(!mail::wpf(&mailbox));
+        watch.stray_alarm(1, &root.join("a.txt"));
+        set_worktree_per_feature(&shared, true);
+        assert!(mail::wpf(&mailbox));
+        watch.stray_alarm(1, &root.join("x.log"));
+        watch.stray_alarm(1, &dir.join("scratch.md"));
+        assert!(letters().is_empty());
+        // On: told once, with the way out.
+        watch.stray_alarm(1, &root.join("a.txt"));
+        watch.stray_alarm(1, &root.join("b.txt"));
+        let got = letters();
+        assert_eq!(got.len(), 1, "once");
+        assert_eq!((got[0].from.as_str(), got[0].to.as_str()), (mail::NIB, "add-sum"));
+        assert!(got[0].text.contains("a.txt") && got[0].text.contains("nib-work start SLUG --carry"), "{}", got[0].text);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The hook's command: `nib-work guard`'s "no" (3) blocks the edit (2, its reason to Claude
+    /// Code); anything else lets it through, so an older nibd's usage error (2) never blocks.
+    #[cfg(unix)]
+    #[test]
+    fn the_plugin_hook_blocks_only_on_the_guards_no() {
+        let v: serde_json::Value = serde_json::from_str(PLUGIN_HOOKS).unwrap();
+        let hook = &v["hooks"]["PreToolUse"][0];
+        assert_eq!(hook["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
+        let cmd = hook["hooks"][0]["command"].as_str().unwrap();
+        let bin = std::env::temp_dir().join(format!("nibd-hook-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        for (guard_exit, hook_exit) in [(0, 0), (crate::work::GUARD_NO, 2), (2, 0), (1, 0)] {
+            std::fs::write(bin.join("nib-work"), format!("#!/bin/sh\nexit {guard_exit}\n")).unwrap();
+            Command::new("chmod").arg("+x").arg(bin.join("nib-work")).status().unwrap();
+            let got = Command::new("bash").arg("-c").arg(cmd).env("PATH", &path).status().unwrap().code();
+            assert_eq!(got, Some(hook_exit), "guard exited {guard_exit}");
+        }
+        let plugin = bin.join("plugin");
+        write_plugin_hooks(&plugin).unwrap();
+        assert_eq!(std::fs::read_to_string(plugin.join("hooks/hooks.json")).unwrap(), PLUGIN_HOOKS);
+        let _ = std::fs::remove_dir_all(bin);
     }
 
     #[test]

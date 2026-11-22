@@ -80,6 +80,11 @@ pub struct AiConfig {
     /// Seconds the mouse rests on a picture in the chat before it is shown four times bigger.
     #[serde(default = "default_image_zoom_delay")]
     pub image_zoom_delay: f32,
+    /// Worktree-per-feature (D-080): an agent that changes files does it on a branch of its own
+    /// that lands on yours as one commit (`nib-work`), and is held to it. Off: agents change the
+    /// project folder and nothing is committed for them. The WPF switch in the agents tab.
+    #[serde(default = "yes")]
+    pub worktree_per_feature: bool,
 }
 
 fn yes() -> bool {
@@ -100,6 +105,7 @@ impl Default for AiConfig {
             effort: None,
             prompt: None,
             image_zoom_delay: default_image_zoom_delay(),
+            worktree_per_feature: true,
         }
     }
 }
@@ -724,6 +730,14 @@ impl Config {
                 set_or_default(doc, "ai", "model", model.map(toml_edit::value));
             }
             set_or_default(doc, "ai", "pick_model", (!pick_model).then(|| toml_edit::value(false)));
+            Ok(())
+        })
+    }
+
+    /// Write `[ai] worktree_per_feature` (only when off, the default being on).
+    pub fn save_ai_wpf(on: bool) -> anyhow::Result<PathBuf> {
+        Self::edit(|doc| {
+            set_or_default(doc, "ai", "worktree_per_feature", (!on).then(|| toml_edit::value(false)));
             Ok(())
         })
     }

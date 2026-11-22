@@ -239,6 +239,40 @@ pub fn mode_of(dir: &Path, id: &str) -> Option<String> {
     roster(dir).into_iter().find(|e| e.id == id).map(|e| e.mode).filter(|m| !m.is_empty())
 }
 
+/// Worktree-per-feature (D-080) as the daemon last told the agents' commands: on unless the
+/// mailbox's `wpf` file says `off`.
+pub fn wpf(dir: &Path) -> bool {
+    fs::read_to_string(dir.join("wpf")).map_or(true, |s| s.trim() != "off")
+}
+
+/// Tell the agents' commands whether worktree-per-feature is on.
+pub fn set_wpf(dir: &Path, on: bool) {
+    let _ = fs::write(dir.join("wpf"), if on { "on" } else { "off" });
+}
+
+/// The files agent `me` changed that are still changed in the shared project folder at `root`
+/// (git's account: ignored files are not counted), relative to `root`, sorted. What accepting
+/// its work would leave uncommitted in the user's tree.
+pub fn stray(dir: &Path, me: &str, root: &Path) -> Vec<String> {
+    let mine = roster(dir).into_iter().find(|e| e.id == me).map(|e| e.files).unwrap_or_default();
+    if mine.is_empty() {
+        return Vec::new();
+    }
+    let canon = nib_proto::path::canonical(root).unwrap_or_else(|_| root.to_path_buf());
+    let changed = crate::diff::changed(root);
+    let mut out: Vec<String> = mine
+        .iter()
+        .filter_map(|f| {
+            let p = Path::new(f);
+            let rel = if p.is_absolute() { p.strip_prefix(root).or_else(|_| p.strip_prefix(&canon)).ok()? } else { p };
+            changed.contains_key(&canon.join(rel)).then(|| rel.to_string_lossy().replace('\\', "/"))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn roster(dir: &Path) -> Vec<Entry> {
     fs::read(dir.join("roster.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
@@ -294,7 +328,8 @@ pub fn cli(args: &[String]) -> i32 {
         eprintln!("nib-mail: only works inside an agent that nib started (NIB_MAILBOX and NIB_AGENT are not set)");
         return 2;
     };
-    let (out, code) = run(&dir, &me, args);
+    let root = std::env::var_os("NIB_ROOT").filter(|r| !r.is_empty()).map(PathBuf::from);
+    let (out, code) = run_in(&dir, &me, root.as_deref(), args);
     if code == 0 {
         println!("{out}");
     } else {
@@ -304,7 +339,14 @@ pub fn cli(args: &[String]) -> i32 {
 }
 
 /// `cli`, for the agent `me` with its mailbox in `dir`: what to print, and the exit code.
+#[cfg(test)]
 pub fn run(dir: &Path, me: &str, args: &[String]) -> (String, i32) {
+    run_in(dir, me, None, args)
+}
+
+/// `run`, knowing the project root (`$NIB_ROOT`), so `done` can tell what the agent left in the
+/// shared project folder.
+pub fn run_in(dir: &Path, me: &str, root: Option<&Path>, args: &[String]) -> (String, i32) {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let everyone = roster(dir);
     // What the others call this agent.
@@ -381,6 +423,20 @@ pub fn run(dir: &Path, me: &str, args: &[String]) -> (String, i32) {
             let n = f.words();
             if n > AiFinished::WORDS {
                 return (format!("nib-mail done: {n} words; say it in at most {} (all three parts together) and run it again", AiFinished::WORDS), 1);
+            }
+            // What it changed in the shared project folder is not on a branch: accepting commits
+            // none of it. With worktree-per-feature on, that is not done (D-080).
+            f.stray = root.map(|r| stray(dir, me, r)).unwrap_or_default();
+            if !f.stray.is_empty() && wpf(dir) {
+                return (
+                    format!(
+                        "nib-mail done: refused. Worktree-per-feature is on, and files you changed are still changed in the shared project folder, not on a branch of yours: {}. \
+                         Accepting would leave them uncommitted in the user's tree. Move them to your branch: if you have none, `nib-work plan FILE` (if not recorded yet) then `nib-work start SLUG --carry`; \
+                         if you have one, `nib-work carry`. Then check your work in your work tree, commit, and run nib-mail done again (nib-work skill).",
+                        f.stray.join(", ")
+                    ),
+                    1,
+                );
             }
             let text = serde_json::to_string(&f).unwrap_or_default();
             match post(dir, &Letter { from: my_name, to: NIB.to_string(), text, at: now() }) {
