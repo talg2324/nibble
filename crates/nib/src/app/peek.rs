@@ -1,4 +1,5 @@
-//! A picture in the AI chat that the mouse rests on for a second is shown bigger, over everything:
+//! A picture in the AI chat that the mouse rests on (`[ai] image_zoom_delay`, a second by
+//! default) is shown bigger, over everything:
 //! four times its size in the chat each way (less if the window is too small, same shape). Any
 //! move of the mouse puts it away. Its state lives in the widget tree, so the app holds nothing
 //! for it, and the bigger picture is only drawn (from the chat's own handle) while it is up.
@@ -13,22 +14,23 @@ use iced::{mouse, window, Border, Color, Element, Event, Length, Rectangle, Shad
 
 use super::viewers::PreviewImage;
 
-/// How long the mouse rests on a picture before it is shown bigger.
-const DELAY: Duration = Duration::from_secs(1);
 /// How many times bigger, each way.
 const SCALE: f32 = 4.0;
 /// The space kept clear between the bigger picture and the window's edges.
 const MARGIN: f32 = 12.0;
 
-/// `content` (the picture as drawn in the chat) that shows `picture` bigger when rested on.
-pub(super) fn peek<'a, Message: 'a>(content: impl Into<Element<'a, Message>>, picture: &PreviewImage) -> Element<'a, Message> {
-    Element::new(Peek { content: content.into(), picture: picture.clone() })
+/// `content` (the picture as drawn in the chat) that shows `picture` bigger when rested on for
+/// `delay`.
+pub(super) fn peek<'a, Message: 'a>(content: impl Into<Element<'a, Message>>, picture: &PreviewImage, delay: Duration) -> Element<'a, Message> {
+    Element::new(Peek { content: content.into(), picture: picture.clone(), delay })
 }
 
 struct Peek<'a, Message> {
     content: Element<'a, Message>,
     /// A handle: shares the chat's decoded pixels.
     picture: PreviewImage,
+    /// How long the mouse rests on the picture before it is shown bigger.
+    delay: Duration,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -90,7 +92,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for Peek<'a, Message> {
                 }
                 *state = if over {
                     let now = Instant::now();
-                    shell.request_redraw_at(now + DELAY);
+                    shell.request_redraw_at(now + self.delay);
                     State::Resting(now)
                 } else {
                     State::Idle
@@ -100,12 +102,12 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for Peek<'a, Message> {
                 if let State::Resting(since) = *state {
                     if !over {
                         *state = State::Idle;
-                    } else if now.duration_since(since) >= DELAY {
+                    } else if now.duration_since(since) >= self.delay {
                         *state = State::Open;
                         shell.invalidate_layout();
                         shell.request_redraw();
                     } else {
-                        shell.request_redraw_at(since + DELAY);
+                        shell.request_redraw_at(since + self.delay);
                     }
                 }
             }

@@ -1242,7 +1242,7 @@ impl App {
                         _ => None,
                     };
                     match pic {
-                        Some(p) => mark(icon, column![row, container(crate::app::peek::peek(p.view(), p)).max_height(PICTURE_HEIGHT)].spacing(4).into()),
+                        Some(p) => mark(icon, column![row, container(crate::app::peek::peek(p.view(), p, self.ai.image_zoom_delay)).max_height(PICTURE_HEIGHT)].spacing(4).into()),
                         None => mark(icon, row),
                     }
                 }
@@ -1277,7 +1277,13 @@ impl App {
                     Element::from(row![space::horizontal().width(Length::FillPortion(1)), container(bubble).width(Length::FillPortion(5)).align_right(Length::Fill)])
                 }
                 (Who::Assistant, _) => {
-                    let viewer = crate::app::code::MarkdownViewer { font: self.face.font, size, color: fg, math: Some(&t.math), images: Some(&t.images) };
+                    let viewer = crate::app::code::MarkdownViewer {
+                        font: self.face.font,
+                        size,
+                        color: fg,
+                        math: Some(&t.math),
+                        images: Some((&t.images, self.ai.image_zoom_delay)),
+                    };
                     // Outlined, on the feed's own background: the reply stands apart from the steps
                     // around it without competing with the user's filled bubble.
                     let reply = container(with_copy(markdown::view_with(t.md.items(), settings, &viewer), i, true)).padding([6, 10]).width(Length::Fill).style(move |_| container::Style {

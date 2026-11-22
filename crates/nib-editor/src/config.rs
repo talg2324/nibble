@@ -77,15 +77,30 @@ pub struct AiConfig {
     /// The system prompt last used: new agents start with it. Written by nib when an agent
     /// starts.
     pub prompt: Option<String>,
+    /// Seconds the mouse rests on a picture in the chat before it is shown four times bigger.
+    #[serde(default = "default_image_zoom_delay")]
+    pub image_zoom_delay: f32,
 }
 
 fn yes() -> bool {
     true
 }
 
+pub fn default_image_zoom_delay() -> f32 {
+    1.0
+}
+
 impl Default for AiConfig {
     fn default() -> Self {
-        Self { cloud_models: false, agent: None, model: None, pick_model: true, effort: None, prompt: None }
+        Self {
+            cloud_models: false,
+            agent: None,
+            model: None,
+            pick_model: true,
+            effort: None,
+            prompt: None,
+            image_zoom_delay: default_image_zoom_delay(),
+        }
     }
 }
 
@@ -749,6 +764,9 @@ mod tests {
         assert!(c.ai.pick_model, "a new agent asks for its model unless told not to");
         let last: Config = toml::from_str("[ai]\nagent = \"codex\"\nmodel = \"gpt-6\"\npick_model = false").unwrap();
         assert_eq!((last.ai.agent.as_deref(), last.ai.model.as_deref(), last.ai.pick_model), (Some("codex"), Some("gpt-6"), false));
+        assert_eq!(c.ai.image_zoom_delay, 1.0);
+        let quick: Config = toml::from_str("[ai]\nimage_zoom_delay = 0.3").unwrap();
+        assert_eq!(quick.ai.image_zoom_delay, 0.3);
     }
 
     #[test]

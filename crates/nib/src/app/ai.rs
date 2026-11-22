@@ -430,6 +430,9 @@ pub struct Panel {
     return_to: Option<Focus>,
     /// `[ai] cloud_models`: list OpenCode's cloud models, not only the downloaded ones.
     cloud_models: bool,
+    /// `[ai] image_zoom_delay`: how long the mouse rests on a picture in the chat before it is
+    /// shown bigger.
+    image_zoom_delay: std::time::Duration,
     /// nib's and the user's skills, on this machine.
     local_skills: Vec<nib_proto::AiSkill>,
 }
@@ -474,6 +477,7 @@ impl Default for Panel {
             setup_failed: None,
             return_to: None,
             cloud_models: false,
+            image_zoom_delay: zoom_delay(nib_editor::config::default_image_zoom_delay()),
             local_skills: Vec::new(),
         }
     }
@@ -521,7 +525,10 @@ struct Pull {
 impl Panel {
     pub fn new(cfg: nib_editor::config::AiConfig) -> Self {
         let last = cfg.agent.as_deref().and_then(AiAgent::from_id).map(|a| (a, cfg.model.clone()));
-        let mut p = Self { cloud_models: cfg.cloud_models, pick_model: cfg.pick_model, last: last.clone(), last_effort: cfg.effort, last_prompt: cfg.prompt.unwrap_or_default(), ..Default::default() };
+        let mut p = Self {
+            cloud_models: cfg.cloud_models,
+            image_zoom_delay: zoom_delay(cfg.image_zoom_delay),
+            pick_model: cfg.pick_model, last: last.clone(), last_effort: cfg.effort, last_prompt: cfg.prompt.unwrap_or_default(), ..Default::default() };
         // The first chat is with the one picked last time.
         if let Some((agent, model)) = last {
             (p.chats[0].agent, p.chats[0].chosen) = (Some(agent), model);
@@ -539,7 +546,8 @@ impl Panel {
     /// config.toml's `[ai] effort` / `prompt` changed: new agents start with them. The thinking
     /// level is each agent's own, like its model, so open agents keep theirs; the prompt goes to
     /// the agents that had the old one and haven't started talking.
-    pub(super) fn retune(&mut self, effort: Option<String>, prompt: Option<String>) {
+    pub(super) fn retune(&mut self, effort: Option<String>, prompt: Option<String>, image_zoom_delay: f32) {
+        self.image_zoom_delay = zoom_delay(image_zoom_delay);
         self.last_effort = effort;
         let old_prompt = std::mem::replace(&mut self.last_prompt, prompt.unwrap_or_default());
         // A save on its way would write back the old prompt.
@@ -2774,6 +2782,11 @@ fn limit_label(l: &AiLimit) -> String {
 }
 
 /// The models the dropdown lists for `info`. OpenCode is the one for your own models: unless
+/// `[ai] image_zoom_delay` (seconds) as a wait; a negative or non-finite one is no wait.
+fn zoom_delay(seconds: f32) -> std::time::Duration {
+    std::time::Duration::try_from_secs_f32(seconds).unwrap_or_default()
+}
+
 /// `[ai] cloud_models` is on, only those downloaded to the machine. The others are cloud
 /// services only, so all of theirs.
 fn shown_models(info: &AiAgentInfo, cloud_models: bool) -> Vec<&AiModel> {
@@ -3609,7 +3622,7 @@ mod tests {
 
         // config.toml edited: an agent that hasn't talked takes the new prompt, but keeps its
         // own thinking level; new agents start with both.
-        a.ai.retune(Some("low".into()), Some("Be kind.".into()));
+        a.ai.retune(Some("low".into()), Some("Be kind.".into()), 1.0);
         assert_eq!((a.ai.effort.as_deref(), a.ai.prompt.text().trim()), (Some("high"), "Be kind."));
         assert_eq!(a.ai.last_effort.as_deref(), Some("low"));
         assert_eq!(a.ai.prompt_save_seq, seq + 1, "a pending save is dropped");

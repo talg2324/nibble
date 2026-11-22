@@ -82,6 +82,7 @@ root = "~/src/nibble"    # neither ssh nor wsl = local
 # model = "opus"
 # effort = "high"       # nib writes these two as you set them: the thinking level and the
 # prompt = "Be terse."  # system prompt added to the assistant's own (both set in the agents tab)
+# image_zoom_delay = 1.0 # seconds the mouse rests on a picture in the chat before it shows 4x bigger
 
 # Override shortcuts: chord = command name, or "none" to unbind.
 # Command names: see `nib --commands`.
