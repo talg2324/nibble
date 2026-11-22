@@ -15,6 +15,7 @@ use super::act::Act;
 use super::ink::{self, Ink};
 use super::caret::next_char;
 use super::{compose, wait, Chat, Effort, Msg, Session, Side, Step, Turn, Who, TRANSCRIPT_ID};
+use crate::app::plan::{self, Outcome, PlanMsg};
 use crate::app::{async_sleep, App, Focus, Message};
 use iced::advanced::widget::{operate, operation, Id as WidgetId};
 
@@ -110,6 +111,20 @@ pub(super) fn agent_name(c: &Chat) -> Option<String> {
 
 /// A small outlined button that answers what the agent asks.
 fn answer_key<'a>(label: &'static str, color: Color, msg: Msg) -> button::Button<'a, Message> {
+    button(text(label).size(11).color(color)).on_press(Message::Ai(msg)).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
+        border: Border { color, width: 1.0, radius: 3.0.into() },
+        ..Default::default()
+    })
+}
+
+/// A plan Claude Code keeps while in plan mode (`~/.claude/plans/*.md`).
+fn is_plan_file(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    p.contains("/.claude/plans/") && p.ends_with(".md")
+}
+
+/// `answer_key` with a label made at run time.
+fn answer_key_owned<'a>(label: String, color: Color, msg: Msg) -> button::Button<'a, Message> {
     button(text(label).size(11).color(color)).on_press(Message::Ai(msg)).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
         border: Border { color, width: 1.0, radius: 3.0.into() },
         ..Default::default()
@@ -579,6 +594,9 @@ impl App {
                 };
                 line("Read", self.ai_rel(path).to_string(), lines)
             }
+            // Claude Code keeps its plan in a file under ~/.claude/plans: the plan itself shows as
+            // a card when it is handed over, so its Markdown source isn't shown here too.
+            AiStepKind::Edit { path, .. } | AiStepKind::Write { path, .. } if is_plan_file(path) => line("Plan", "writes its plan".into(), self.ai_rel(path).rsplit('/').next().unwrap_or_default().to_string()),
             AiStepKind::Edit { path, old, new } => {
                 let at = s.done.as_ref().and_then(|d| d.line).map(|l| format!(":{l}")).unwrap_or_default();
                 let head = line("Edit", format!("{}{at}", self.ai_rel(path)), format!("+{} −{}", new.lines().count(), old.lines().count()));
@@ -1059,6 +1077,93 @@ impl App {
         container(card).padding(10).width(Length::Fill).style(move |_| container::Style { border: Border { color: warn, width: 1.0, radius: 3.0.into() }, ..Default::default() }).into()
     }
 
+    /// How plans and the comments on them are drawn here.
+    fn ai_plan_look(&self) -> plan::Look {
+        plan::Look::of(&self.theme, self.face.font, self.face.size.min(14.0))
+    }
+
+    /// A plan the shown agent handed over. The one it is waiting on (`ok` is `None` and it is
+    /// asked about) can be commented on and answered; any other is a record, folded to its
+    /// title, of what became of it. `ok`: how the step that carried it ended, if it has.
+    fn ai_plan_card<'a>(&'a self, key: &'a str, ok: Option<bool>) -> Element<'a, Message> {
+        let ai = &self.ai;
+        let Some(p) = ai.plans.get(key) else { return space().into() };
+        let th = &self.theme;
+        let (accent, dim, fg, panel) = (th.accent, th.dim, th.foreground, th.panel);
+        let live = ai.asked_plan().is_some_and(|k| k == key);
+        let look = self.ai_plan_look();
+        let small = |t: String, c: Color| text(t).size(11).color(c);
+        let n = p.comments.len();
+        let comments = match n {
+            0 => String::new(),
+            1 => "1 comment".into(),
+            n => format!("{n} comments"),
+        };
+        let on = move |m: PlanMsg| Message::Ai(Msg::Plan(key.to_string(), m));
+        let bold = Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT };
+        if !live {
+            // A record: what it was called, what became of it, unfolded on a click.
+            let (word, c) = match p.outcome.or(match ok {
+                Some(true) => Some(Outcome::Approved),
+                Some(false) => Some(Outcome::Revise),
+                None => None,
+            }) {
+                Some(Outcome::Approved) => ("approved", OK),
+                Some(Outcome::Revise) => ("sent back", th.warn),
+                Some(Outcome::Declined) => ("declined", BAD),
+                None => ("not answered", dim),
+            };
+            let fold = if p.open { "▾" } else { "▸" };
+            let head = button(
+                row![small(fold.into(), dim), text("Plan").size(12).font(bold).color(fg), container(small(p.title_text(), fg).wrapping(text::Wrapping::None)).width(Length::Fill).clip(true), small(comments, dim), small(word.into(), c)]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .on_press(on(PlanMsg::Fold))
+            .padding(0)
+            .style(|_: &iced::Theme, _: button::Status| button::Style::default());
+            let mut body = column![head].spacing(10);
+            if p.open {
+                body = body.push(plan::view(p, &look, false, on));
+            }
+            let edge = c;
+            return container(body).padding([6, 10]).width(Length::Fill).style(move |_| container::Style { border: Border { color: Color { a: 0.5, ..edge }, width: 1.0, radius: 6.0.into() }, ..Default::default() }).into();
+        }
+        // Waiting for the user: the whole plan, rendered, then how to answer it.
+        let head = row![text("Plan for your approval").size(12).font(bold).color(th.warn), space::horizontal(), small(comments, accent)].align_y(Alignment::Center);
+        let typed = !ai.input.trim().is_empty();
+        // A comment being written is filed with the rest.
+        let n = n + usize::from(p.comments.draft.as_ref().is_some_and(|d| !d.blank()));
+        let plural = if n == 1 { "" } else { "s" };
+        // Two ways it can end: approved, or sent back with what the user said. ↵ does whichever
+        // applies; the other is a click away.
+        let mut keys = row![].spacing(12).align_y(Alignment::Center);
+        if n > 0 || typed {
+            let label = match (n, typed) {
+                (0, _) => "send back with your reply · ↵".to_string(),
+                (n, true) => format!("send back with {n} comment{plural} + your reply · ↵"),
+                (n, false) => format!("send back with {n} comment{plural} · ↵"),
+            };
+            keys = keys.push(answer_key_owned(label, th.warn, Msg::Revise));
+            keys = keys.push(answer_key("approve anyway", dim, Msg::Answer(true)));
+        } else {
+            keys = keys.push(answer_key("approve · ↵", OK, Msg::Answer(true)));
+            keys = keys.push(button(text("send back").size(11).color(dim)).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
+                border: Border { color: Color { a: 0.5, ..dim }, width: 1.0, radius: 3.0.into() },
+                ..Default::default()
+            }));
+            keys = keys.push(small("comment on rows or type a reply to send it back".into(), dim));
+        }
+        let hint = if p.comments.draft.is_some() { "" } else { "↑↓ select a row · ⇧↑↓ several · ↵ comment on them · type below to reply to the whole plan" };
+        let warn = th.warn;
+        let card = column![head, plan::view(p, &look, true, on), container(space().height(1)).width(Length::Fill).style(move |_| container::Style { background: Some(Color { a: 0.4, ..dim }.into()), ..Default::default() }), keys, small(hint.into(), dim)].spacing(10);
+        container(card).padding(Padding { left: 6.0, right: 12.0, top: 10.0, bottom: 10.0 }).width(Length::Fill).style(move |_| container::Style {
+            background: Some(Color { a: 0.35, ..panel }.into()),
+            border: Border { color: warn, width: 1.0, radius: 6.0.into() },
+            ..Default::default()
+        }).into()
+    }
+
     fn ai_feed<'a>(&'a self) -> Element<'a, Message> {
         let ai = &self.ai;
         let th = &self.theme;
@@ -1106,6 +1211,9 @@ impl App {
         };
         for (i, t) in ai.turns.iter().enumerate() {
             let turn: Element<'a, Message> = match (t.who, &t.step) {
+                // The plan being asked about shows at the end, with what to answer.
+                (_, Some(s)) if ai.asked_plan() == Some(&s.id) => continue,
+                (_, Some(s)) if ai.plans.contains_key(&s.id) => mark(emoji("📋"), self.ai_plan_card(&s.id, s.done.as_ref().map(|d| d.ok))),
                 (_, Some(s)) => {
                     let icon = match s.kind {
                         AiStepKind::Agent { .. } => svg(self.icons.network.clone()).width(13).height(13).into(),
@@ -1168,6 +1276,8 @@ impl App {
         }
         if let Some(ask) = ai.ask.as_ref().filter(|a| !a.questions.is_empty()) {
             feed = feed.push(mark(emoji("❓"), self.ai_questions(ask)));
+        } else if let Some(key) = ai.asked_plan() {
+            feed = feed.push(mark(emoji("📋"), self.ai_plan_card(key, None)));
         } else if let Some(ask) = &ai.ask {
             let warn = th.warn;
             let title = match ask.tool.as_str() {
@@ -1249,7 +1359,14 @@ impl App {
         let name = self.ai_name();
         // What a message does depends on what the agent is doing.
         let steers = ai.busy && ai.agent == Some(AiAgent::Claude);
-        let caption = if let Some(ask) = &ai.ask {
+        let caption = if let Some(p) = ai.asked_plan().and_then(|k| ai.plans.get(k)) {
+            match p.comments.len() {
+                _ if p.comments.draft.is_some() => "Writing a comment: ↵ files it · ⇧↵ new line · ⇧↑↓ more rows · esc drops it".to_string(),
+                _ if p.sel.is_some() => "↵ comments on the selected rows · ⇧↑↓ selects more · esc lets go".to_string(),
+                0 => "↵ approves · ↑↓ selects rows to comment on · or type a reply here to send it back…".to_string(),
+                n => format!("↵ sends the plan back with {n} comment{} · type here to add a reply…", if n == 1 { "" } else { "s" }),
+            }
+        } else if let Some(ask) = &ai.ask {
             if ask.questions.is_empty() { "↵ allows, esc refuses, or say what to do instead…".to_string() } else { "Or answer in your own words…".to_string() }
         } else if steers {
             format!("Steer {name}: it reads this after its current step")

@@ -1,11 +1,13 @@
 mod ai;
 mod code;
+mod comment;
 mod connection;
 mod control;
 mod drop;
 mod git;
 mod pdf_tab;
 mod peek;
+mod plan;
 mod search;
 mod settings;
 mod ssh;

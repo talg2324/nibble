@@ -24,6 +24,7 @@ mod stage;
 mod wait;
 
 use super::viewers::PreviewImage;
+use super::plan::{Outcome, Plan, PlanMsg};
 use super::{App, Focus, Message, Pending};
 use crate::links;
 use crate::math;
@@ -157,9 +158,15 @@ pub struct Chat {
     ask: Option<AiAsk>,
     /// The answers being picked, when what it asks is questions.
     form: question::Form,
+    /// The plans it handed over to approve (`ExitPlanMode`), by the step that carried them (or
+    /// the request, if no step showed): rendered, with the user's comments.
+    plans: HashMap<String, Plan>,
     /// What was answered (allowed, the answers): the tests' connection doesn't keep it.
     #[cfg(test)]
     answered: Vec<(bool, Vec<String>)>,
+    /// What went with the last refusal.
+    #[cfg(test)]
+    told: Option<String>,
     /// It said its job is done, and the user hasn't answered: outlined green in the list.
     finished: Option<AiFinished>,
     /// The accept dialog is up for it (it is shown, and finished).
@@ -228,7 +235,28 @@ impl Side {
     }
 }
 
+/// The plan in a step that hands one over to approve.
+fn plan_of(kind: &AiStepKind) -> Option<String> {
+    let AiStepKind::Other { tool, input } = kind else { return None };
+    if tool != "ExitPlanMode" {
+        return None;
+    }
+    serde_json::from_str::<Value>(input).ok()?.get("plan")?.as_str().map(str::to_string)
+}
+
 impl Chat {
+    /// The key of the plan it asks to have approved, if that is what it asks.
+    pub(super) fn asked_plan(&self) -> Option<&String> {
+        let a = self.ask.as_ref().filter(|a| a.tool == "ExitPlanMode")?;
+        let key = a.step.as_ref().unwrap_or(&a.request);
+        self.plans.contains_key(key).then_some(key)
+    }
+
+    pub(super) fn asked_plan_mut(&mut self) -> Option<&mut Plan> {
+        let key = self.asked_plan()?.clone();
+        self.plans.get_mut(&key)
+    }
+
     /// Nothing has been said or typed in it, and no session started.
     pub(super) fn blank(&self) -> bool {
         self.turns.is_empty() && self.input.is_empty() && matches!(self.session, Session::None)
@@ -628,6 +656,11 @@ pub enum Msg {
     Answer(bool),
     /// Pick option `.1` of question `.0` of what the shown agent asks.
     Pick(usize, usize),
+    /// Something done in the plan of the shown agent kept under this key (`Chat::plans`).
+    Plan(String, PlanMsg),
+    /// Send the plan the shown agent asks to have approved back to it, with the comments on it
+    /// and what is typed in the message box.
+    Revise,
     /// Accept the shown agent's word that its job is done, ending it (`true`), or go back to it.
     Accept(bool),
     /// Paste was pressed in the message box: what the clipboard held.
@@ -695,10 +728,23 @@ impl App {
     fn ai_send_answer(&mut self, allow: bool, message: Option<String>, answers: Vec<String>) {
         let (Some(ask), Session::Ready(id)) = (self.ai.ask.take(), &self.ai.session) else { return };
         let id = *id;
+        let plan = ask.tool == "ExitPlanMode";
         let message = match message {
             None if !ask.questions.is_empty() => Some("The user chose not to answer.".to_string()),
+            None if plan && !allow => Some("The user declined this plan. Don't carry it out, and don't hand in another one unasked: stop and wait for what they say next.".to_string()),
             m => m,
         };
+        // The plan stays in the feed, folded, with what became of it and the comments sent.
+        if let Some(p) = plan.then(|| self.ai.plans.get_mut(ask.step.as_ref().unwrap_or(&ask.request))).flatten() {
+            p.comments.cancel();
+            p.sel = None;
+            p.open = false;
+            p.outcome = Some(match (allow, &message) {
+                (true, _) => Outcome::Approved,
+                (false, Some(m)) if m.starts_with("The user declined") => Outcome::Declined,
+                (false, _) => Outcome::Revise,
+            });
+        }
         if !answers.is_empty() {
             let one = ask.questions.len() == 1;
             let text = ask.questions.iter().zip(&answers).map(|(q, a)| if one { a.clone() } else { format!("{} → {a}", q.question) }).collect::<Vec<_>>().join("\n");
@@ -706,7 +752,90 @@ impl App {
         }
         #[cfg(test)]
         self.ai.answered.push((allow, answers.clone()));
+        #[cfg(test)]
+        {
+            self.ai.told = message.clone();
+        }
         self.notify(ClientNotify::AiAnswer { id, request: ask.request, allow, message, answers });
+    }
+
+    /// Send the plan the shown agent asks to have approved back for a revision: the comments
+    /// on it (a draft with words is filed first) and what is typed as the reply to it all.
+    /// Nothing to send: nothing happens.
+    pub(super) fn ai_revise(&mut self) -> Task<Message> {
+        let reply = self.ai.input.trim().to_string();
+        let Some(p) = self.ai.asked_plan_mut() else { return Task::none() };
+        p.save();
+        if p.comments.is_empty() && reply.is_empty() {
+            return Task::none();
+        }
+        let n = p.comments.len();
+        let message = p.feedback(&reply);
+        // The transcript says what the user sent, briefly; the plan's card keeps the comments.
+        let said = match (n, reply.is_empty()) {
+            (0, _) => reply.clone(),
+            (n, true) => format!("Sent the plan back with {n} comment{}.", if n == 1 { "" } else { "s" }),
+            (n, false) => format!("{reply}\n\n(and {n} comment{} on the plan)", if n == 1 { "" } else { "s" }),
+        };
+        self.ai.input.clear();
+        self.ai.back = 0;
+        self.ai.anchor = None;
+        self.ai.turns.push(Turn { who: Who::User, md: markdown::Content::new(), text: said, math: Default::default(), images: Default::default(), step: None });
+        self.ai_answer(false, Some(message));
+        self.ai_scroll_to_end()
+    }
+
+    /// A key while the shown agent asks to have a plan approved. The plan is read and answered
+    /// from the keyboard, one way for each thing:
+    /// - ↑ / ↓ move a cursor over its rows, ⇧ takes in more rows, Esc lets go of them;
+    /// - ↵ on picked rows opens a comment on them (or the one there, to change it); while one is
+    ///   being written every key goes to it: ↵ files it, ⇧↵ starts a new line, ⇧↑ / ⇧↓ take in
+    ///   more rows, Esc drops it;
+    /// - with nothing picked, ↵ approves, or sends the plan back once there are comments or
+    ///   words in the message box (a reply to the whole plan).
+    ///
+    /// Nothing here refuses the plan without saying why: Esc only lets go. `None`: the key isn't
+    /// the plan's (typing goes to the message box).
+    fn ai_plan_key(&mut self, chord: KeyChord, text: Option<&str>) -> Option<Task<Message>> {
+        let held = chord.ctrl || chord.logo;
+        let plain = !held && !chord.alt;
+        let empty = self.ai.input.is_empty() && self.ai.images.is_empty();
+        let command = self.keymap.lookup(&chord);
+        let p = self.ai.asked_plan_mut()?;
+        let vertical = match chord.key {
+            Key::Up => Some(-1),
+            Key::Down => Some(1),
+            _ => None,
+        };
+        if let Some(d) = p.comments.draft.as_mut() {
+            match chord.key {
+                Key::Esc => p.cancel(),
+                Key::Enter if chord.shift => d.insert("\n"),
+                Key::Enter if plain => p.save(),
+                Key::Backspace if held => d.backspace_line(),
+                Key::Backspace if chord.alt => d.backspace_word(),
+                Key::Backspace => d.backspace(),
+                _ if vertical.is_some() && chord.shift && plain => p.step(vertical.unwrap(), true),
+                _ => match command {
+                    Some(Command::Paste) => return Some(iced::clipboard::read().map(|s| Message::Ai(Msg::Pasted(s)))),
+                    Some(c) if super::app_wide(c) => return Some(self.exec(c)),
+                    _ if !held => d.insert(&text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect::<String>()),
+                    _ => {}
+                },
+            }
+            return Some(Task::none());
+        }
+        match chord.key {
+            // The arrows are the plan's while nothing is typed (with words, they move the caret).
+            _ if vertical.is_some() && plain && empty => p.step(vertical.unwrap(), chord.shift),
+            Key::Esc => p.sel = None,
+            Key::Enter if plain && !chord.shift && empty && p.sel.is_some() => {
+                p.enter();
+            }
+            Key::Enter if plain && !chord.shift && empty && p.has_feedback() => return Some(self.ai_revise()),
+            _ => return None,
+        }
+        Some(Task::none())
     }
 
     /// Answers given from outside (`nib ctl ai answer`), one per question: an option's number
@@ -930,6 +1059,17 @@ impl App {
                 }
             }
             Msg::Answer(allow) => self.ai_answer(allow, None),
+            Msg::Plan(key, m) => {
+                let comments = matches!(m, PlanMsg::Row(_));
+                if let Some(p) = self.ai.plans.get_mut(&key) {
+                    p.update(m);
+                }
+                // The keys go to the comment being written.
+                if comments {
+                    self.focus = Focus::Ai;
+                }
+            }
+            Msg::Revise => return self.ai_revise(),
             Msg::Pick(q, o) => return self.ai_pick_answer(q, o),
             Msg::Accept(yes) => return self.ai_accept(yes),
             Msg::Clip(Clip::Text(s)) => {
@@ -987,6 +1127,8 @@ impl App {
                 if let Some(s) = s {
                     if self.ai.pull_focus && self.ai.picking {
                         self.ai.pull_input.push_str(s.trim());
+                    } else if let Some(d) = self.ai.asked_plan_mut().and_then(|p| p.comments.draft.as_mut()) {
+                        d.insert(&s);
                     } else {
                         self.ai.insert(&s.replace("\r\n", "\n"));
                     }
@@ -1434,6 +1576,7 @@ impl App {
             "history": self.ai_history_json(),
             "follow": ai.follow.as_ref().map(|f| json!({ "chat": ai.chats.iter().position(|c| c.key == f.chat), "tab": f.tab, "queued": self.ai_follow_queued() })),
             "mode": ai.mode.name(),
+            "plan": ai.asked_plan().and_then(|k| ai.plans.get(k)).map(Plan::json),
             "ask": ai.ask.as_ref().map(|a| json!({ "tool": a.tool, "what": a.what, "step": a.step, "questions": a.questions.iter().enumerate().map(|(i, q)| json!({
                 "header": q.header,
                 "question": q.question,
@@ -1719,6 +1862,15 @@ impl App {
             }
             AiEvent::Step(s) => {
                 ai.busy = true;
+                if let Some(text) = plan_of(&s.kind) {
+                    // Asked about later, if at all (a replayed conversation): shown folded. A step
+                    // sent again never replaces the plan, nor what the user did in it.
+                    ai.plans.entry(s.id.clone()).or_insert_with(|| {
+                        let mut plan = Plan::new(&text);
+                        plan.open = false;
+                        plan
+                    });
+                }
                 // The agent reading a picture: it is shown under the step (read on the daemon's
                 // side, where the agent runs), keyed by the path the step names.
                 let picture = match &s.kind {
@@ -1771,6 +1923,13 @@ impl App {
             AiEvent::Ask(a) => {
                 ai.busy = true;
                 ai.form = question::Form::new(&a.questions);
+                // A plan: kept under its step, and fresh (the step's copy may be clipped).
+                if a.tool == "ExitPlanMode" {
+                    let key = a.step.clone().unwrap_or_else(|| a.request.clone());
+                    if ai.plans.get(&key).is_none_or(|p| p.text != a.what || p.outcome.is_some()) {
+                        ai.plans.insert(key, Plan::new(&a.what));
+                    }
+                }
                 ai.ask = Some(a);
             }
             AiEvent::Finished(f) => {
@@ -1840,6 +1999,9 @@ impl App {
         if self.ai.ask.as_ref().is_some_and(|a| !a.questions.is_empty()) {
             self.ai.input.clear();
             return self.ai_question_enter(Some(text));
+        }
+        if self.ai.asked_plan().is_some() {
+            return self.ai_revise();
         }
         if self.ai.ask.is_some() {
             self.ai.input.clear();
@@ -1978,6 +2140,9 @@ impl App {
             if let Some(t) = self.ai_picker_key(chord) {
                 return t;
             }
+        }
+        if let Some(t) = self.ai_plan_key(chord, text.as_deref()) {
+            return t;
         }
         if let Some(t) = self.ai_menu_key(chord) {
             return t;
@@ -2831,6 +2996,59 @@ mod tests {
     /// What went to the daemon last, if it was an answer: allowed, and the answers.
     fn last_answer(a: &App) -> Option<(bool, Vec<String>)> {
         a.ai.answered.last().cloned()
+    }
+
+    #[test]
+    fn a_plan_is_approved_or_sent_back_with_a_reply_or_comments() {
+        const PLAN: &str = "# Cache\n\nWhy: slow.\n\n1. Add a cache\n2. Use it";
+        let mut a = chatting();
+        say(&mut a, "plan it");
+        let input = json!({ "plan": PLAN }).to_string();
+        let ask_plan = |a: &mut App, n: u32| {
+            let id = format!("t{n}");
+            event(a, 7, step(&id, AiStepKind::Other { tool: "ExitPlanMode".into(), input: input.clone() }));
+            event(a, 7, AiEvent::Ask(AiAsk { request: format!("r{n}"), step: Some(id), tool: "ExitPlanMode".into(), what: PLAN.into(), questions: vec![] }));
+        };
+        // A: Enter approves.
+        ask_plan(&mut a, 1);
+        assert_eq!(a.ai_state_json()["plan"]["rows"], json!([[1, 1], [3, 3], [5, 5], [6, 6]]));
+        key(&mut a, "enter");
+        assert_eq!(last_answer(&a), Some((true, vec![])));
+        assert_eq!(a.ai.plans["t1"].outcome, Some(Outcome::Approved));
+        // Esc never answers: it only lets go of the rows picked.
+        ask_plan(&mut a, 2);
+        key(&mut a, "down");
+        key(&mut a, "esc");
+        assert!(a.ai.ask.is_some() && a.ai.plans["t2"].sel.is_none());
+        key(&mut a, "esc");
+        assert!(a.ai.ask.is_some(), "nothing is refused without a reason");
+        say(&mut a, "drop it, fix the bug first");
+        assert_eq!(a.ai.plans["t2"].outcome, Some(Outcome::Revise));
+        // C: words send it back for a revision.
+        ask_plan(&mut a, 3);
+        say(&mut a, "split step 2");
+        let told = a.ai.told.clone().unwrap();
+        assert!(told.contains("split step 2") && told.contains("ExitPlanMode"), "{told}");
+        assert_eq!(a.ai.plans["t3"].outcome, Some(Outcome::Revise));
+        // D: comments from the keyboard on lines 3-5, then Enter sends them.
+        ask_plan(&mut a, 4);
+        key(&mut a, "down");
+        key(&mut a, "down");
+        key(&mut a, "shift+down");
+        key(&mut a, "enter");
+        type_str(&mut a, "why a cache?");
+        key(&mut a, "shift+enter");
+        type_str(&mut a, "measure first");
+        assert!(a.ai.ask.is_some() && a.ai.input.is_empty(), "the comment takes the keys, not the message box");
+        key(&mut a, "enter");
+        assert_eq!(a.ai_state_json()["plan"]["comments"][0]["start_line"], 3);
+        assert_eq!(a.ai_state_json()["plan"]["comments"][0]["end_line"], 5);
+        assert!(a.ai.ask.is_some(), "filing a comment doesn't answer");
+        key(&mut a, "enter");
+        let told = a.ai.told.clone().unwrap();
+        assert!(told.contains("On lines 3–5:\n> Why: slow.\n>\n> 1. Add a cache\nwhy a cache?\nmeasure first"), "{told}");
+        assert_eq!(a.ai.plans["t4"].outcome, Some(Outcome::Revise));
+        assert_eq!(a.ai.turns.last().map(|t| t.text.as_str()), Some("Sent the plan back with 1 comment."));
     }
 
     #[test]
