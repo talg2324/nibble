@@ -281,7 +281,7 @@ Editing is built on [helix-core](https://github.com/helix-editor/helix) (rope, s
 - [x] **v0.1**: the editor, SSH remotes, the agents tab with Follow and the mailbox, `nib ctl`, `nib ai`, runtime grammars and language servers. macOS and Linux.
 - [x] **v0.2**: Windows support and a revamped diff experience. Native Windows works for local projects (editor, tree, search, git, terminals, language servers, `nib ctl`) and SSH remotes, and nibble runs inside WSL. The diff tab shows your changes and each agent's like a pull request, live: agents work on a branch of their own (`nib-work`), you comment on their diff and send it back, and accepting lands the branch as one commit.
 - [ ] **v0.3**: localhost integration: see web servers running on the remote (dev servers, notebooks, dashboards) inside nibble, with agents able to read and act on the page.
-- [ ] **v0.4**: GitHub Actions that build and publish binaries. Until then, you build nibble yourself.
+- [ ] **v0.4**: polish, a security review (pen test) and performance work; GitHub Actions that build and publish binaries. Until then, you build nibble yourself.
 - [ ] **v0.5**: model routing: nibble picks the model (and thinking level) for each task, with a small local model deciding and the user able to override.
 
 ## Contributing
