@@ -299,8 +299,7 @@ impl App {
         self.ai.open = true;
         self.ai.front = true;
         self.focus = Focus::Ai;
-        let blank = |c: &Chat| c.turns.is_empty() && c.input.is_empty() && matches!(c.session, Session::None);
-        let i = match self.ai.chats.iter().position(blank) {
+        let i = match self.ai.chats.iter().position(Chat::blank) {
             // It may have been seeded before the last thinking level / system prompt was set.
             Some(i) => {
                 let c = std::mem::take(&mut self.ai.chats[i]);

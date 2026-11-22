@@ -9,7 +9,7 @@
 //! Tab switches it to the mailbox: every message the project's agents sent each other, the latest
 //! first, searched the same way.
 
-use super::{end_steps, step_copy, Chat, Msg, Step, StepEnd, Turn, Who};
+use super::{end_steps, step_copy, Chat, Msg, Session, Step, StepEnd, Turn, Who};
 use crate::app::{async_sleep, App, Focus, Message, Pending};
 use crate::{links, math};
 use iced::widget::text::Span;
@@ -216,8 +216,9 @@ impl App {
         self.ai.next_key += 1;
         let agent = past.agent;
         let chat = self.ai.seeded(revive(key, past, entries, &self.root));
-        // A blank agent makes way for it.
-        match self.ai.chats.iter().position(Chat::blank) {
+        // A blank agent with nothing running makes way for it (replacing one with a session
+        // would leave that session running with nobody to end it).
+        match self.ai.chats.iter().position(|c| c.blank() && matches!(c.session, Session::None)) {
             Some(i) => self.ai.chats[i] = chat,
             None => self.ai.chats.push(chat),
         }

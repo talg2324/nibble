@@ -257,9 +257,11 @@ impl Chat {
         self.plans.get_mut(&key)
     }
 
-    /// Nothing has been said or typed in it, and no session started.
+    /// Nothing has been said, typed or attached in it, and it wasn't reopened from history. Its
+    /// session may already be up: one starts by itself as soon as the assistants are known, so
+    /// a new agent is ready for its first message. That doesn't make it any less new.
     pub(super) fn blank(&self) -> bool {
-        self.turns.is_empty() && self.input.is_empty() && matches!(self.session, Session::None)
+        self.turns.is_empty() && self.input.is_empty() && self.images.is_empty() && self.past.is_none() && self.queued.is_none()
     }
 }
 
@@ -3443,6 +3445,22 @@ mod tests {
         assert!(a.ai.shown());
         let _ = a.update(Message::Control(Command::CloseTab));
         assert!(!a.ai.shown(), "a lone blank agent: the area closes");
+    }
+
+    #[test]
+    fn a_new_agent_whose_session_started_by_itself_closes_with_one_cmd_w() {
+        // The panel opens and its agent's session comes up before anything is said in it.
+        let mut a = chatting();
+        assert!(matches!(a.ai.session, Session::Ready(_)) && a.ai.chats.len() == 1);
+        let _ = a.update(Message::Control(Command::CloseTab));
+        assert!(!a.ai.shown(), "nothing said in it: one ⌘W closes the area");
+        assert_eq!(a.ai.chats.len(), 1, "and it isn't killed: its session waits for next time");
+        // The next new agent is that one, not a second beside it.
+        let _ = a.update(Message::Control(Command::NewAgent));
+        assert!(a.ai.shown());
+        assert_eq!(a.ai.chats.len(), 1);
+        let _ = a.update(Message::Control(Command::CloseTab));
+        assert!(!a.ai.shown());
     }
 
     #[test]
