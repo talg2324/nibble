@@ -142,14 +142,43 @@ pub fn land(mailbox: &Path, agent: &str, root: &Path, message: &str) -> Result<S
             }
         }
     };
-    // The work is on the base now; these only tidy up.
-    let _ = git(root, &["worktree", "remove", "--force", &rec.tree.to_string_lossy()]);
+    // The work is on the base now; these only tidy up. The work tree can hold gigabytes of
+    // build output, which take seconds to delete: it is moved aside (instant, on the same disk)
+    // and deleted on a thread of its own, so the user hears it landed without waiting for that.
+    let landed = rec.tree.parent().map(|p| p.join(LANDED));
+    let aside = landed.as_ref().and_then(|d| {
+        let name = rec.tree.file_name()?.to_string_lossy();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        fs::create_dir_all(d).ok()?;
+        fs::rename(&rec.tree, d.join(format!("{name}-{stamp}"))).ok()
+    });
+    match (aside, landed) {
+        // git forgets the work tree that is not where it was.
+        (Some(()), Some(landed)) => {
+            let _ = git(root, &["worktree", "prune"]);
+            std::thread::spawn(move || sweep(&landed));
+        }
+        _ => {
+            let _ = git(root, &["worktree", "remove", "--force", &rec.tree.to_string_lossy()]);
+        }
+    }
     let _ = git(root, &["branch", "-D", &rec.branch]);
     let _ = fs::remove_file(record_file(mailbox, agent));
     let _ = fs::remove_file(plan_file(mailbox, agent));
     crate::review::forget(mailbox, agent);
     let _ = git(root, &["update-ref", "-d", &crate::diff::round_ref(&rec.branch)]);
     Ok(format!("{said}\nlanded {} on {}", rec.branch, rec.base))
+}
+
+/// Where landed work trees wait to be deleted, beside the work trees (no slug starts with a dot).
+const LANDED: &str = ".landed";
+
+/// Delete everything in `landed`: the work tree just landed, and any a nibd that stopped
+/// meanwhile left behind.
+fn sweep(landed: &Path) {
+    for e in fs::read_dir(landed).into_iter().flatten().flatten() {
+        let _ = fs::remove_dir_all(e.path());
+    }
 }
 
 /// git at `dir`: its stdout when it succeeded, else what it said.
@@ -423,6 +452,17 @@ mod tests {
         assert!(repo.join("app/new.txt").is_file());
         assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "M app/b.txt");
         assert!(!rec.tree.exists() && record(&mailbox, "claude-1").is_none() && plan(&mailbox, "claude-1").is_none());
+        assert_eq!(git(&repo, &["worktree", "list", "--porcelain"]).unwrap().matches("worktree ").count(), 1, "git forgot it");
+        // Its files are deleted after the answer, on their own.
+        let landed = ctx.nibdir.join("worktrees").join(LANDED);
+        let gone = || fs::read_dir(&landed).map_or(true, |mut d| d.next().is_none());
+        for _ in 0..200 {
+            if gone() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(gone(), "the landed work tree was deleted");
         assert!(git(&repo, &["rev-parse", "--verify", "-q", "refs/heads/nib/feat/add-sum"]).is_err());
         assert!(land(&mailbox, "claude-1", &ctx.root, "again").is_err());
         // Landed: nothing is kept any more, and a branch whose work tree is gone stays gone.
