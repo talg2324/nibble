@@ -705,6 +705,10 @@ struct PerTurn {
     resume: Mutex<Option<String>>,
     /// The run answering now.
     child: Mutex<Option<Child>>,
+    /// Codex app-server's JSON-RPC input while a turn is running.
+    codex_input: Mutex<Option<ChildStdin>>,
+    /// Question IDs kept until the user answers the matching app-server request.
+    codex_questions: Mutex<HashMap<String, (Value, Vec<(String, Vec<String>)>)>>,
     /// The model runs on this machine (an Ollama one): its speed is shown, not a cost.
     local: bool,
     /// What the chat has cost so far (OpenCode).
@@ -1196,28 +1200,6 @@ impl Tuning {
         a
     }
 
-    /// Codex's config overrides for it (`-c key=value`, the value read as TOML: a JSON string
-    /// is a TOML basic string).
-    fn codex_args(&self, tools: bool) -> Vec<String> {
-        let mut a = Vec::new();
-        if let Some(e) = &self.effort {
-            a.extend(["-c".to_string(), format!("model_reasoning_effort={}", Value::from(e.as_str()))]);
-        }
-        let mut instructions = self.prompt.clone().unwrap_or_default();
-        if tools {
-            let catalog = codex_skill_catalog(&bundled_skills());
-            if !catalog.is_empty() {
-                if !instructions.is_empty() {
-                    instructions.push_str("\n\n");
-                }
-                instructions.push_str(&catalog);
-            }
-        }
-        if !instructions.is_empty() {
-            a.extend(["-c".to_string(), format!("developer_instructions={}", Value::from(instructions))]);
-        }
-        a
-    }
 }
 
 /// Codex has no `--plugin-dir` equivalent. Give it the bundled skills' metadata and paths so it
@@ -1340,6 +1322,8 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
             id,
             resume: Mutex::new(session),
             child: Mutex::new(None),
+            codex_input: Mutex::new(None),
+            codex_questions: Mutex::new(HashMap::new()),
             carry: Mutex::new(None),
         })),
     };
@@ -1406,7 +1390,7 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
 
 /// Codex's sandbox lets a run write in the folder it is started in and nowhere else. Nib's
 /// scratch, persistent data, mailbox, work trees, and git metadata may all live outside it.
-fn codex_writable(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
+fn codex_roots(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
     let var = |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| PathBuf::from(v));
     let mut roots: Vec<PathBuf> = Vec::new();
     roots.extend(var("NIB_SCRATCH"));
@@ -1419,14 +1403,9 @@ fn codex_writable(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> 
             roots.push(PathBuf::from(dir));
         }
     }
-    if roots.is_empty() {
-        return Vec::new();
-    }
-    // A JSON list of strings is a TOML one.
     roots.sort();
     roots.dedup();
-    let list = Value::from(roots.iter().map(|r| r.to_string_lossy().into_owned()).collect::<Vec<_>>());
-    vec!["-c".to_string(), format!("sandbox_workspace_write.writable_roots={list}")]
+    roots.iter().map(|r| r.to_string_lossy().into_owned()).collect()
 }
 
 /// The folder agents' work trees go in (`$NIBDIR/worktrees`), made if needed.
@@ -1930,25 +1909,11 @@ fn opencode_permissions(mode: AiMode) -> Value {
     serde_json::json!({ "edit": edit, "bash": bash, "webfetch": bash, "task": "deny", "external_directory": "deny" })
 }
 
-/// The arguments for one Codex / Grok / OpenCode run. Grok has no model list, so no `model`.
-fn one_shot_args(agent: AiAgent, model: Option<&str>, resume: Option<&str>, mode: AiMode, images: &[PathBuf], text: &str) -> Vec<String> {
+/// The arguments for one Grok / OpenCode run. Grok has no model list, so no `model`.
+fn one_shot_args(agent: AiAgent, model: Option<&str>, resume: Option<&str>, _mode: AiMode, images: &[PathBuf], text: &str) -> Vec<String> {
     let files = |flag: &str| images.iter().flat_map(|p| [flag.to_string(), p.to_string_lossy().into_owned()]).collect::<Vec<_>>();
-    let acts = matches!(mode, AiMode::AcceptEdits | AiMode::Auto);
     let mut a: Vec<String> = Vec::new();
     match agent {
-        AiAgent::Codex => {
-            // Its sandbox: look at the project only, or work in it (edits and commands, nothing
-            // outside, no network). A run can't ask, so there is nothing between the two.
-            a.extend(["exec", "--json", "--skip-git-repo-check", "--sandbox", if acts { "workspace-write" } else { "read-only" }].map(String::from));
-            a.extend(files("--image"));
-            if let Some(m) = model {
-                a.extend(["--model".to_string(), m.to_string()]);
-            }
-            if let Some(id) = resume {
-                a.extend(["resume".to_string(), id.to_string()]);
-            }
-            a.extend(["--".to_string(), text.to_string()]);
-        }
         AiAgent::Grok => {
             a.extend(["--output-format", "streaming-json", "--tools", "read_file,grep,list_dir"].map(String::from));
             if let Some(id) = resume {
@@ -1971,7 +1936,7 @@ fn one_shot_args(agent: AiAgent, model: Option<&str>, resume: Option<&str>, mode
             a.extend(files("--file"));
             a.extend(["--".to_string(), text.to_string()]);
         }
-        AiAgent::Claude => unreachable!("Claude Code chats over one process"),
+        AiAgent::Claude | AiAgent::Codex => unreachable!("this assistant does not use one-shot arguments"),
     }
     a
 }
@@ -2209,6 +2174,10 @@ impl PerTurn {
     fn run(self: &Arc<Self>, text: &str, images: &[PathBuf], purpose: Run) {
         // A chat only reads; so does the run that writes a compaction's summary.
         let mode = if self.tools && purpose == Run::Chat { *self.mode.lock().unwrap() } else { AiMode::Plan };
+        if self.agent == AiAgent::Codex {
+            self.run_codex(text, images, purpose, mode);
+            return;
+        }
         let send = |event| {
             let _ = self.tx.send(ServerMsg::Notify(ServerNotify::AiEvent { id: self.id, event }));
         };
@@ -2244,15 +2213,7 @@ impl PerTurn {
             }
             _ => text,
         };
-        let mut args = one_shot_args(self.agent, self.model.as_deref(), resume.as_deref(), mode, images, text);
-        if self.agent == AiAgent::Codex {
-            // Right after `exec`: before `resume`, whose own options these aren't.
-            let mut more = self.tuning.codex_args(self.tools);
-            if matches!(mode, AiMode::AcceptEdits | AiMode::Auto) {
-                more.extend(codex_writable(&self.root, &self.env));
-            }
-            args.splice(1..1, more);
-        }
+        let args = one_shot_args(self.agent, self.model.as_deref(), resume.as_deref(), mode, images, text);
         if self.agent == AiAgent::OpenCode && purpose == Run::Chat {
             // It tells of a command only once it is over: what the whole run changes in the
             // shared work tree is its (nothing is watched for an agent on its own branch).
@@ -2269,7 +2230,7 @@ impl PerTurn {
             .env("PWD", dir)
             .args(args)
             .current_dir(dir)
-            // Codex adds piped-in text to the prompt; there is none.
+            // One-shot agents receive their prompt as an argument.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2382,9 +2343,235 @@ impl PerTurn {
     }
 
     fn stop(&self) {
+        self.codex_questions.lock().unwrap().clear();
+        self.codex_input.lock().unwrap().take();
         if let Some(mut c) = self.child.lock().unwrap().take() {
             let _ = c.kill();
             let _ = c.wait();
+        }
+    }
+}
+
+fn codex_rpc(input: &mut ChildStdin, value: &Value) -> std::io::Result<()> {
+    writeln!(input, "{value}")?;
+    input.flush()
+}
+
+/// App-server's item names are camelCase; the existing Codex event reader uses exec's snake_case.
+fn codex_app_event(shot: &mut OneShot, method: &str, params: &Value) -> Vec<AiEvent> {
+    match method {
+        "item/started" | "item/completed" => {
+            let item = &params["item"];
+            let ty = item["type"].as_str().unwrap_or("");
+            if method == "item/started" && ty != "commandExecution" { return Vec::new() }
+            let translated = match ty {
+                "commandExecution" => serde_json::json!({
+                    "id": item["id"], "type": "command_execution", "command": item["command"],
+                    "aggregated_output": item["aggregatedOutput"], "exit_code": item["exitCode"], "status": item["status"],
+                }),
+                "fileChange" => serde_json::json!({ "id": item["id"], "type": "file_change", "changes": item["changes"], "status": item["status"] }),
+                "agentMessage" => serde_json::json!({ "id": item["id"], "type": "agent_message", "text": item["text"] }),
+                _ => return Vec::new(),
+            };
+            shot.read(AiAgent::Codex, &serde_json::json!({ "type": if method == "item/started" { "item.started" } else { "item.completed" }, "item": translated }))
+        }
+        "turn/completed" => {
+            let turn = &params["turn"];
+            let failed = turn["status"].as_str() != Some("completed");
+            let error = turn.pointer("/error/message").and_then(Value::as_str).unwrap_or("the reply was interrupted");
+            shot.finish(failed.then(|| error.to_string()))
+        }
+        "error" => shot.read(AiAgent::Codex, &serde_json::json!({ "type": "error", "message": params["message"] })),
+        _ => Vec::new(),
+    }
+}
+
+fn codex_question(request: &Value) -> Option<(AiAsk, Vec<(String, Vec<String>)>)> {
+    let id = request.get("id")?;
+    let key = format!("codex-{id}");
+    let params = request.get("params")?;
+    let mut ids = Vec::new();
+    let questions = params.get("questions")?.as_array()?.iter().filter_map(|q| {
+        let question = q.get("question")?.as_str()?;
+        let question_id = q.get("id")?.as_str()?.to_string();
+        let options: Vec<AiOption> = q.get("options").and_then(Value::as_array).into_iter().flatten().filter_map(|o| Some(AiOption {
+            label: o.get("label")?.as_str()?.to_string(),
+            description: o.get("description").and_then(Value::as_str).unwrap_or("").to_string(), preview: None,
+        })).collect();
+        ids.push((question_id, options.iter().map(|o| o.label.clone()).collect()));
+        Some(AiQuestion { header: q.get("header").and_then(Value::as_str).unwrap_or("").to_string(), question: question.to_string(), options, multi: false })
+    }).collect::<Vec<_>>();
+    if questions.is_empty() { return None }
+    Some((AiAsk {
+        request: key, step: params.get("itemId").and_then(Value::as_str).map(str::to_string),
+        tool: "AskUserQuestion".into(), what: String::new(), questions,
+    }, ids))
+}
+
+fn codex_answers(questions: Vec<(String, Vec<String>)>, allow: bool, answers: &[String]) -> Value {
+    let values: serde_json::Map<String, Value> = questions.into_iter().zip(answers).filter_map(|((id, options), answer)| {
+        if !allow || answer.trim().is_empty() { return None }
+        let answer = if options.iter().any(|o| o == answer) { answer.clone() } else { format!("user_note: {answer}") };
+        Some((id, serde_json::json!({ "answers": [answer] })))
+    }).collect();
+    serde_json::json!({ "answers": values })
+}
+
+impl PerTurn {
+    /// One Codex turn on app-server. A fresh process per turn preserves nib's existing lifecycle
+    /// while allowing a server request to pause the turn until nib answers it.
+    fn run_codex(self: &Arc<Self>, text: &str, images: &[PathBuf], purpose: Run, mode: AiMode) {
+        let mut cmd = Command::new(&self.exe);
+        cmd.args(["app-server", "--stdio", "--enable", "default_mode_request_user_input"])
+            .current_dir(&self.root)
+            .envs(self.env.iter().map(|(k, v)| (*k, v.as_os_str())))
+            .env("PWD", &self.root)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = self.tx.send(ServerMsg::Notify(ServerNotify::AiEvent { id: self.id, event: AiEvent::TurnDone { error: Some(format!("starting Codex app-server: {e}")) } }));
+                return;
+            }
+        };
+        let stdout = child.stdout.take().expect("piped");
+        let errors = stderr_tail(child.stderr.take().expect("piped"));
+        let mut input = child.stdin.take().expect("piped");
+        let init = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "clientInfo": { "name": "nibble", "title": "nibble", "version": env!("CARGO_PKG_VERSION") },
+            "capabilities": { "experimentalApi": true }
+        }});
+        if let Err(e) = codex_rpc(&mut input, &init) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = self.tx.send(ServerMsg::Notify(ServerNotify::AiEvent { id: self.id, event: AiEvent::TurnDone { error: Some(format!("initializing Codex app-server: {e}")) } }));
+            return;
+        }
+        *self.codex_input.lock().unwrap() = Some(input);
+        *self.child.lock().unwrap() = Some(child);
+        let me = Arc::clone(self);
+        let prompt = text.to_string();
+        let pictures = images.to_vec();
+        thread::spawn(move || {
+            let send = |event: AiEvent| {
+                me.watch.see(me.id, &event);
+                me.tx.send(ServerMsg::Notify(ServerNotify::AiEvent { id: me.id, event })).is_ok()
+            };
+            let mut shot = OneShot::default();
+            let mut summary = String::new();
+            let mut failure = None;
+            let mut context_window = None;
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                if v.get("method").and_then(Value::as_str) == Some("item/tool/requestUserInput") {
+                    if let Some((ask, ids)) = codex_question(&v) {
+                        me.codex_questions.lock().unwrap().insert(ask.request.clone(), (v["id"].clone(), ids));
+                        let _ = send(AiEvent::Ask(ask));
+                    }
+                    continue;
+                }
+                if let Some(id) = v.get("id") {
+                    if let Some(error) = v.pointer("/error/message").and_then(Value::as_str) {
+                        failure = Some(error.to_string());
+                        break;
+                    }
+                    match id.as_i64() {
+                        Some(1) => {
+                            let mut stdin = me.codex_input.lock().unwrap();
+                            let Some(stdin) = stdin.as_mut() else { break };
+                            let _ = codex_rpc(stdin, &serde_json::json!({ "jsonrpc": "2.0", "method": "initialized" }));
+                            let acts = matches!(mode, AiMode::AcceptEdits | AiMode::Auto);
+                            let roots = if acts { codex_roots(&me.root, &me.env) } else { Vec::new() };
+                            let config = if roots.is_empty() { Value::Null } else { serde_json::json!({ "sandbox_workspace_write": { "writable_roots": roots } }) };
+                            let mut instructions = me.tuning.prompt.clone().unwrap_or_default();
+                            if me.tools {
+                                let catalog = codex_skill_catalog(&bundled_skills());
+                                if !catalog.is_empty() { if !instructions.is_empty() { instructions.push_str("\n\n"); } instructions.push_str(&catalog); }
+                            }
+                            let resume_id = me.resume.lock().unwrap().clone();
+                            let mut params = serde_json::json!({
+                                "cwd": me.root,
+                                "model": me.model, "sandbox": if acts { "workspace-write" } else { "read-only" },
+                                "approvalPolicy": "never", "developerInstructions": if instructions.is_empty() { None } else { Some(instructions) },
+                                "config": config,
+                            });
+                            let method = if let Some(id) = resume_id { params["threadId"] = Value::String(id); "thread/resume" } else { "thread/start" };
+                            let _ = codex_rpc(stdin, &serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }));
+                        }
+                        Some(2) => {
+                            let Some(thread_id) = v.pointer("/result/thread/id").and_then(Value::as_str) else { failure = Some("Codex did not return a thread ID".into()); break };
+                            if purpose == Run::Chat { me.watch.rec.lock().unwrap().session(thread_id); }
+                            *me.resume.lock().unwrap() = Some(thread_id.to_string());
+                            let Some(model) = v.pointer("/result/model").and_then(Value::as_str).or(me.model.as_deref()) else {
+                                failure = Some("Codex did not return its model".into());
+                                break;
+                            };
+                            let mut items: Vec<Value> = pictures.iter().map(|p| serde_json::json!({ "type": "localImage", "path": p })).collect();
+                            items.push(serde_json::json!({ "type": "text", "text": prompt }));
+                            let mut params = serde_json::json!({ "threadId": thread_id, "input": items, "model": me.model, "effort": me.tuning.effort });
+                            if mode == AiMode::Plan {
+                                params["collaborationMode"] = serde_json::json!({ "mode": "plan", "settings": { "model": model, "reasoning_effort": me.tuning.effort } });
+                            }
+                            if let Some(stdin) = me.codex_input.lock().unwrap().as_mut() {
+                                let _ = codex_rpc(stdin, &serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "turn/start", "params": params }));
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                let method = v.get("method").and_then(Value::as_str).unwrap_or("");
+                if method == "serverRequest/resolved" {
+                    let request = format!("codex-{}", v["params"]["requestId"]);
+                    if me.codex_questions.lock().unwrap().remove(&request).is_some() {
+                        let _ = send(AiEvent::AskResolved { request });
+                    }
+                    continue;
+                }
+                if method == "thread/tokenUsage/updated" {
+                    shot.context = v.pointer("/params/tokenUsage/last/totalTokens").and_then(Value::as_u64);
+                    context_window = v.pointer("/params/tokenUsage/modelContextWindow").and_then(Value::as_u64);
+                }
+                let mut events = codex_app_event(&mut shot, method, &v["params"]);
+                if purpose == Run::Compact {
+                    events.retain(|e| match e {
+                        AiEvent::Text(t) => { summary.push_str(t); false },
+                        e => !matches!(e, AiEvent::TurnDone { .. }),
+                    });
+                }
+                if !events.into_iter().all(&send) { return }
+                if method == "turn/completed" { break }
+            }
+            me.codex_input.lock().unwrap().take();
+            me.codex_questions.lock().unwrap().clear();
+            let code = me.child.lock().unwrap().take().and_then(|mut c| { let _ = c.kill(); c.wait().ok() }).and_then(|s| s.code());
+            let tail = errors.join().unwrap_or_default();
+            if purpose == Run::Compact {
+                let summary = summary.trim();
+                let error = (summary.is_empty() || failure.is_some()).then(|| failure.unwrap_or_else(|| format!("Codex gave no summary: {tail}")));
+                if error.is_none() {
+                    *me.resume.lock().unwrap() = None;
+                    *me.rollout.lock().unwrap() = None;
+                    *me.carry.lock().unwrap() = Some(summary.to_string());
+                    let _ = send(AiEvent::Compacted { before: shot.context, after: None });
+                }
+                let _ = send(AiEvent::TurnDone { error });
+                return;
+            }
+            let usage = me.usage(&shot).or_else(|| (shot.context.is_some() || context_window.is_some()).then(|| AiUsage { context_tokens: shot.context, context_window, ..Default::default() }));
+            if let Some(error) = failure { let _ = send(AiEvent::TurnDone { error: Some(error) }); }
+            else { for event in shot.exited(AiAgent::Codex, code, tail) { let _ = send(event); } }
+            if let Some(usage) = usage { let _ = send(AiEvent::Usage(usage)); }
+            let letters = std::mem::take(&mut *me.mail.lock().unwrap());
+            if !letters.is_empty() { me.watch.busy.store(true, Ordering::Relaxed); me.send(&letters.join("\n\n"), &[]); }
+        });
+    }
+
+    fn answer_codex(&self, request: &str, allow: bool, answers: &[String]) {
+        let Some((id, questions)) = self.codex_questions.lock().unwrap().remove(request) else { return };
+        if let Some(stdin) = self.codex_input.lock().unwrap().as_mut() {
+            let _ = codex_rpc(stdin, &serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": codex_answers(questions, allow, answers) }));
         }
     }
 }
@@ -2557,6 +2744,12 @@ pub fn compact(sessions: &Shared, id: AiId, focus: Option<&str>) {
 /// no, with what to do instead.
 pub fn answer(sessions: &Shared, id: AiId, request: &str, allow: bool, message: Option<&str>, answers: &[String]) {
     let mut s = sessions.lock().unwrap();
+    if let Some(Session::PerTurn(p)) = s.map.get(&id) {
+        if p.agent == AiAgent::Codex {
+            p.answer_codex(request, allow, answers);
+        }
+        return;
+    }
     let Some(Session::Stream { stdin, asks, .. }) = s.map.get_mut(&id) else { return };
     let Some(input) = asks.lock().unwrap().remove(request) else { return };
     let response = if allow {
@@ -2908,9 +3101,9 @@ mod tests {
             ("NIBDIR", "/s/nibdir".into()),
             ("NIB_MAILBOX", "/s/mailbox".into()),
         ];
-        let args = codex_writable(Path::new("/nonexistent-nib-root"), &env);
-        assert_eq!(args, ["-c", r#"sandbox_workspace_write.writable_roots=["/s/mailbox","/s/nibdir","/s/scratch"]"#]);
-        assert!(codex_writable(Path::new("/nonexistent-nib-root"), &[]).is_empty());
+        let roots = codex_roots(Path::new("/nonexistent-nib-root"), &env);
+        assert_eq!(roots, ["/s/mailbox", "/s/nibdir", "/s/scratch"]);
+        assert!(codex_roots(Path::new("/nonexistent-nib-root"), &[]).is_empty());
     }
 
     #[test]
@@ -2923,8 +3116,6 @@ mod tests {
         assert!(catalog.contains("nib-control: Drive nib (/skills/nib-control/SKILL.md)"));
         assert!(!catalog.contains("nib-upstream"));
         assert!(codex_skill_catalog(&skills[1..]).is_empty());
-        let tuning = Tuning { effort: Some("high".into()), prompt: Some("Be terse.".into()) };
-        assert_eq!(tuning.codex_args(false), ["-c", "model_reasoning_effort=\"high\"", "-c", "developer_instructions=\"Be terse.\""]);
     }
 
 
@@ -3070,15 +3261,12 @@ mod tests {
 
     #[test]
     fn the_mode_decides_what_a_run_may_do() {
-        let sandbox = |m| one_shot_args(AiAgent::Codex, None, None, m, &[], "hi")[4].clone();
-        assert_eq!([sandbox(AiMode::Manual), sandbox(AiMode::Plan), sandbox(AiMode::AcceptEdits), sandbox(AiMode::Auto)], ["read-only", "read-only", "workspace-write", "workspace-write"]);
         assert_eq!(opencode_permissions(AiMode::Plan), read_only_permissions());
         assert_eq!(opencode_permissions(AiMode::AcceptEdits)["bash"], "deny");
         assert_eq!((&opencode_permissions(AiMode::Auto)["edit"], &opencode_permissions(AiMode::Auto)["bash"]), (&Value::from("allow"), &Value::from("allow")));
         assert_eq!(opencode_permissions(AiMode::Auto)["external_directory"], "deny");
-        // Pictures: files for Codex and OpenCode, a mention for Grok.
+        // Pictures: files for OpenCode, a mention for Grok.
         let img = [PathBuf::from("/t/1.png")];
-        assert_eq!(&one_shot_args(AiAgent::Codex, None, None, AiMode::Plan, &img, "hi")[5..], ["--image", "/t/1.png", "--", "hi"]);
         assert_eq!(&one_shot_args(AiAgent::OpenCode, None, None, AiMode::Plan, &img, "hi")[3..], ["--file", "/t/1.png", "--", "hi"]);
         assert!(one_shot_args(AiAgent::Grok, None, None, AiMode::Plan, &img, "hi").last().unwrap().ends_with("(image: /t/1.png)"));
     }
@@ -3243,6 +3431,112 @@ mod tests {
     }
 
     #[test]
+    fn codex_app_server_questions_and_steps_become_nib_events() {
+        let request = serde_json::json!({ "jsonrpc":"2.0", "id":91, "method":"item/tool/requestUserInput", "params": {
+            "itemId":"q1", "questions":[{ "id":"target", "header":"Target", "question":"Which file?", "options":[
+                {"label":"A", "description":"First"}, {"label":"B", "description":"Second"}
+            ]}]
+        }});
+        let (ask, ids) = codex_question(&request).unwrap();
+        assert_eq!(ask.request, "codex-91");
+        assert_eq!(ask.questions[0].options[1].label, "B");
+        assert_eq!(ids, [("target".into(), vec!["A".into(), "B".into()])]);
+        assert_eq!(codex_answers(ids.clone(), true, &["B".into()]), serde_json::json!({ "answers": { "target": { "answers": ["B"] } } }));
+        assert_eq!(codex_answers(ids.clone(), true, &["another file".into()]), serde_json::json!({ "answers": { "target": { "answers": ["user_note: another file"] } } }));
+        assert_eq!(codex_answers(ids, false, &[]), serde_json::json!({ "answers": {} }));
+        let mut shot = OneShot::default();
+        let started = serde_json::json!({ "item": { "id":"c1", "type":"commandExecution", "command":"pwd", "status":"inProgress" } });
+        let finished = serde_json::json!({ "item": { "id":"c1", "type":"commandExecution", "command":"pwd", "status":"completed", "exitCode":0, "aggregatedOutput":"/p\n" } });
+        assert!(matches!(&codex_app_event(&mut shot, "item/started", &started)[..], [AiEvent::Step(_)]));
+        assert!(matches!(&codex_app_event(&mut shot, "item/completed", &finished)[..], [AiEvent::StepDone(d)] if d.ok && d.output == "/p\n"));
+        assert_eq!(codex_app_event(&mut shot, "turn/completed", &serde_json::json!({ "turn": { "status":"completed" } })), [AiEvent::TurnDone { error: None }]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_app_server_question_round_trip() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("nibd-codex-question-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("codex");
+        std::fs::write(&fake, r#"#!/usr/bin/env python3
+import json, sys
+def recv(): return json.loads(sys.stdin.readline())
+def send(v): print(json.dumps(v), flush=True)
+assert recv()['method'] == 'initialize'
+send({'jsonrpc':'2.0','id':1,'result':{}})
+assert recv()['method'] == 'initialized'
+thread = recv()
+assert thread['method'] in ('thread/start', 'thread/resume')
+if thread['method'] == 'thread/resume': assert thread['params']['threadId'] == 'fake-thread'
+assert thread['params']['sandbox'] == ('read-only' if thread['method'] == 'thread/resume' else 'workspace-write')
+if thread['method'] == 'thread/start': assert thread['params']['config']['sandbox_workspace_write']['writable_roots']
+send({'jsonrpc':'2.0','id':2,'result':{'thread':{'id':'fake-thread'},'model':'gpt-6-sol'}})
+turn = recv()
+assert turn['method'] == 'turn/start'
+assert turn['params']['input'][-1]['text'] == 'Which file?'
+if thread['method'] == 'thread/resume': assert turn['params']['collaborationMode']['mode'] == 'plan'
+send({'jsonrpc':'2.0','id':91,'method':'item/tool/requestUserInput','params':{'threadId':'fake-thread','turnId':'t1','itemId':'q1','questions':[{'id':'target','header':'Target','question':'Which file?','options':[{'label':'A','description':'First'},{'label':'B','description':'Second'}]}]}})
+reply = recv()
+if reply.get('id') != 91 or reply.get('result') != {'answers': {'target': {'answers': ['B']}}}:
+    send({'method':'turn/completed','params':{'turn':{'status':'failed','error':{'message':'wrong answer'}}}})
+else:
+    send({'method':'item/completed','params':{'item':{'id':'m1','type':'agentMessage','text':'You chose B.'}}})
+    send({'method':'turn/completed','params':{'turn':{'status':'completed'}}})
+"#).unwrap();
+        let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake, permissions).unwrap();
+        let shared: Shared = Default::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watch = Watch { sessions: Arc::downgrade(&shared), busy: Arc::new(AtomicBool::new(true)), rec: Arc::new(Mutex::new(history::Recorder::new(&dir, AiAgent::Codex, None))) };
+        let p = Arc::new(PerTurn {
+            agent: AiAgent::Codex, env: vec![("NIB_SCRATCH", dir.as_os_str().to_os_string())], watch,
+            mail: Mutex::new(Vec::new()), tools: true, mode: Mutex::new(AiMode::Auto), exe: fake,
+            model: None, tuning: Tuning { effort: None, prompt: None }, prompt_file: None,
+            root: dir.clone(), tx, id: 1, resume: Mutex::new(None), child: Mutex::new(None),
+            codex_input: Mutex::new(None), codex_questions: Mutex::new(HashMap::new()),
+            local: false, cost: Mutex::new(0.0), rollout: Mutex::new(None), carry: Mutex::new(None),
+        });
+        shared.lock().unwrap().map.insert(1, Session::PerTurn(Arc::clone(&p)));
+        p.send("Which file?", &[]);
+        let ask = loop {
+            let msg = rx.recv_timeout(Duration::from_secs(5)).expect("Codex question");
+            if let ServerMsg::Notify(ServerNotify::AiEvent { event: AiEvent::Ask(ask), .. }) = msg { break ask }
+        };
+        assert_eq!(ask.questions[0].question, "Which file?");
+        answer(&shared, 1, &ask.request, true, None, &["B".into()]);
+        let mut text = String::new();
+        let done = loop {
+            let msg = rx.recv_timeout(Duration::from_secs(5)).expect("Codex reply");
+            if let ServerMsg::Notify(ServerNotify::AiEvent { event, .. }) = msg {
+                match event {
+                    AiEvent::Text(t) => text.push_str(&t),
+                    AiEvent::TurnDone { error } => break error,
+                    _ => {}
+                }
+            }
+        };
+        assert_eq!(done, None);
+        assert_eq!(text, "You chose B.");
+        *p.mode.lock().unwrap() = AiMode::Plan;
+        p.send("Which file?", &[]);
+        let ask = loop {
+            let msg = rx.recv_timeout(Duration::from_secs(5)).expect("resumed Codex question");
+            if let ServerMsg::Notify(ServerNotify::AiEvent { event: AiEvent::Ask(ask), .. }) = msg { break ask }
+        };
+        answer(&shared, 1, &ask.request, true, None, &["B".into()]);
+        let done = loop {
+            let msg = rx.recv_timeout(Duration::from_secs(5)).expect("resumed Codex reply");
+            if let ServerMsg::Notify(ServerNotify::AiEvent { event: AiEvent::TurnDone { error }, .. }) = msg { break error }
+        };
+        assert_eq!(done, None);
+        close(&shared, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn grok_streaming_json_to_events() {
         let (s, events) = shot(
             AiAgent::Grok,
@@ -3327,10 +3621,6 @@ mod tests {
 
     #[test]
     fn follow_up_messages_resume_the_session() {
-        let first = one_shot_args(AiAgent::Codex, None, None, AiMode::Plan, &[], "hi");
-        assert_eq!(first, ["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--", "hi"]);
-        let next = one_shot_args(AiAgent::Codex, None, Some("t1"), AiMode::Plan, &[], "-v?");
-        assert_eq!(&next[5..], ["resume", "t1", "--", "-v?"]);
         let grok = one_shot_args(AiAgent::Grok, None, Some("s1"), AiMode::Plan, &[], "-x");
         assert_eq!(&grok[4..], ["--resume", "s1", "-p", " -x"]);
         assert_eq!(one_shot_args(AiAgent::OpenCode, None, None, AiMode::Plan, &[], "hi"), ["run", "--format", "json", "--", "hi"]);
@@ -3339,8 +3629,6 @@ mod tests {
 
     #[test]
     fn the_chosen_model_goes_on_every_run() {
-        let codex = one_shot_args(AiAgent::Codex, Some("gpt-6-sol"), Some("t1"), AiMode::Plan, &[], "hi");
-        assert_eq!(&codex[5..], ["--model", "gpt-6-sol", "resume", "t1", "--", "hi"]);
         let oc = one_shot_args(AiAgent::OpenCode, Some("ollama/qwen3:8b"), None, AiMode::Plan, &[], "hi");
         assert_eq!(&oc[3..], ["--model", "ollama/qwen3:8b", "--", "hi"]);
     }

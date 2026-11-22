@@ -932,6 +932,8 @@ pub enum AiEvent {
     /// The agent wants to do something its mode doesn't let it do unasked; it waits for
     /// `AiAnswer`.
     Ask(AiAsk),
+    /// A pending question was resolved by the agent before the user answered it.
+    AskResolved { request: String },
     /// The mode the agent works in now.
     Mode(AiMode),
     /// What the other agents call this one in the mailbox: made from its task once it has

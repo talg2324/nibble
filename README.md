@@ -115,7 +115,8 @@ Open the agents tab with ⌘⇧I. Pick an assistant and model, type a task, and 
 | assistant | in nibble today |
 |---|---|
 | Claude Code | full agent: reads, edits and runs commands; steps stream live; steering mid-turn |
-| Codex, OpenCode | full agent, one run per message; steps show as each one ends |
+| Codex | full agent, one run per message; can pause for questions; steps show as each one ends |
+| OpenCode | full agent, one run per message; steps show as each one ends |
 | Grok | read-only for now |
 | local models (Ollama) | through OpenCode; download, delete, warm and cool models from the picker |
 
@@ -125,7 +126,7 @@ Open the agents tab with ⌘⇧I. Pick an assistant and model, type a task, and 
 - **Steps, not prose.** Each agent is a list of steps: reads, edits with inline diffs, writes, skills loaded, searches, and commands. Shell commands that really read or write files (`cat`, `sed -n`, `sed -i`, heredocs, `tee`, …) are shown as the file operations they are, not as raw shell.
 - **A read-only terminal per agent** shows each command the agent ran and what came back. Sleeps and timeouts get a live countdown.
 - **The agent list** on the left shows every agent's state with a two-line live preview ("editing stats.py", a question, the tail of its terminal).
-- **Modes**: auto by default, or manual, accept-edits and plan. Claude Code asks through a permission card in manual mode. Codex's headless CLI does not offer per-action permission cards in nibble: manual and plan run read-only, while auto and accept-edits use its workspace-write sandbox.
+- **Modes**: auto by default, or manual, accept-edits and plan. Claude Code asks through a permission card in manual mode. Codex can pause for questions through its app-server; its per-action permission cards are not yet wired into nibble. For Codex, manual and plan run read-only, while auto and accept-edits use its workspace-write sandbox.
 - **Thinking and system prompt**: the **thinking** dropdown in the header offers the levels the assistant has (Claude Code: low to max; Codex: the selected model's supported levels from its catalog) or its own default. The **system** pane, beside terminal and skills, holds text added to the assistant's system prompt. Both are taken when the agent's session starts; each agent keeps its own, and new agents (in this nib or the next) start with the last ones set, kept in `[ai] effort` / `prompt` in config.toml.
 - **Panic** (`ctrl+.`): every agent freezes at once (its process tree is suspended, not killed). A dialog lists them; release, and the ones you marked stop while the rest carry on where they were.
 - **Done means done.** When an agent finishes a clear job, it says so with a short summary (what was asked, what it found, what it did). Its row turns green; ⌘↵ accepts and closes it.

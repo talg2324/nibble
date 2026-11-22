@@ -2092,6 +2092,11 @@ impl App {
                 }
                 ai.ask = Some(a);
             }
+            AiEvent::AskResolved { request } => {
+                if ai.ask.as_ref().is_some_and(|ask| ask.request == request) {
+                    ai.ask = None;
+                }
+            }
             AiEvent::Finished(f) => {
                 ai.turns.push(Turn { who: Who::Done, text: f.text(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
                 ai.finished = Some(f);
@@ -2482,6 +2487,7 @@ impl App {
         let place = self.ai_place();
         match self.ai.agent {
             Some(AiAgent::Claude) => format!("Claude Code, working on {place} with your own sign-in. It reads, edits and runs commands in this project in its auto mode: what it does shows here step by step, and what it runs in its terminal beside this. / for skills and commands, @ for files."),
+            Some(AiAgent::Codex) => format!("Codex, working on {place} with your own sign-in. It answers one message per run, and can pause to ask you a question. In auto mode it edits and runs commands in this project; in plan or manual it only reads. / for skills and commands, @ for files."),
             Some(a) => format!("{}, working on {place} with your own sign-in. It answers one message per run: in auto mode it edits and runs commands in this project, in plan or manual it only reads, and it can't be asked or steered mid-run. / for skills and commands, @ for files.", a.name()),
             None => format!("Looking for coding assistants on {place}…"),
         }
@@ -3361,6 +3367,11 @@ mod tests {
         event(&mut a, 7, ask("Bash", false));
         event(&mut a, 7, AiEvent::TurnDone { error: None });
         assert!(a.ai.ask.is_none(), "a turn that ended asks nothing");
+        event(&mut a, 7, ask("AskUserQuestion", true));
+        event(&mut a, 7, AiEvent::AskResolved { request: "other".into() });
+        assert!(a.ai.ask.is_some(), "an unrelated resolution leaves this question open");
+        event(&mut a, 7, AiEvent::AskResolved { request: "r1".into() });
+        assert!(a.ai.ask.is_none(), "an agent-resolved question closes its card");
     }
 
     #[test]
