@@ -307,6 +307,7 @@ fn main() -> Result<()> {
     let result = iced::application(
         move || {
             let (init, syn_rx, ctl_rx) = init.lock().unwrap().take().expect("boot runs once");
+            name_the_app();
             let (app, t) = app::App::boot(init);
             let probe = app::App::window_probe(window.fullscreen);
             let control = Task::run(ctl_rx, |m| m);
@@ -328,11 +329,12 @@ fn main() -> Result<()> {
             titlebar_transparent: true,
             fullsize_content_view: true,
         },
-        // Linux: the Wayland app_id / X11 WM_CLASS. Desktops (and WSLg) match it to nib.desktop
-        // for the taskbar icon; without one WSLg shows its penguin.
+        // Linux: the Wayland app_id / X11 WM_CLASS, which names the app where the desktop shows
+        // one. Desktops (and WSLg) match it to nibble.desktop for the name and the taskbar icon;
+        // without one WSLg shows its penguin.
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
-            application_id: "nib".into(),
+            application_id: "nibble".into(),
             ..Default::default()
         },
         // WSL: no frame from winit; the app draws its own (app/titlebar.rs says why).
@@ -397,5 +399,44 @@ fn detach_own_console() {
 
 #[cfg(not(windows))]
 fn detach_own_console() {}
+
+/// macOS: the window is a bare binary, not an app bundle, so the system names it after the file,
+/// "nib", in the menu bar, the Dock and Cmd-Tab. The app is called nibble. (Windows takes the name
+/// from nib.rc, Linux from the window's app id.)
+///
+/// The process name gives the app menu its items (About / Hide / Quit nibble). The name the system
+/// shows comes from LaunchServices, which has no public call for an unbundled app: this is the one
+/// the JDK uses for `-Xdock:name`. It needs the app checked in with LaunchServices, so call this
+/// once the application has started; looked up at run time, it is skipped if a macOS lacks it.
+#[cfg(target_os = "macos")]
+fn name_the_app() {
+    use std::ffi::c_void;
+    let name = objc2_foundation::NSString::from_str("nibble");
+    objc2_foundation::NSProcessInfo::processInfo().setProcessName(&name);
+    type GetAsn = unsafe extern "C" fn() -> *const c_void;
+    type SetItem = unsafe extern "C" fn(i32, *const c_void, *const c_void, *const c_void, *mut c_void) -> i32;
+    // kLSDefaultSessionID
+    const SESSION: i32 = -2;
+    // SAFETY: symbols looked up by name and used with the signatures LaunchServices has had since
+    // 10.x; the key is a CFStringRef global; NSString is toll-free bridged to CFStringRef.
+    unsafe {
+        let sym = |n: &std::ffi::CStr| libc::dlsym(libc::RTLD_DEFAULT, n.as_ptr());
+        let (get, set, key) = (sym(c"_LSGetCurrentApplicationASN"), sym(c"_LSSetApplicationInformationItem"), sym(c"_kLSDisplayNameKey"));
+        if get.is_null() || set.is_null() || key.is_null() {
+            return;
+        }
+        let get: GetAsn = std::mem::transmute(get);
+        let set: SetItem = std::mem::transmute(set);
+        let key = *(key as *const *const c_void);
+        let asn = get();
+        if asn.is_null() || key.is_null() {
+            return;
+        }
+        set(SESSION, asn, key, &*name as *const objc2_foundation::NSString as *const c_void, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn name_the_app() {}
 
 use iced::Task;

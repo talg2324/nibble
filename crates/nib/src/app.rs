@@ -588,7 +588,7 @@ impl App {
             .and_then(|d| d.path.as_ref())
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "nib".into());
+            .unwrap_or_else(|| "nibble".into());
         let dirty = if self.doc().is_some_and(|d| d.is_modified()) { "● " } else { "" };
         let remote = if self.label != "local" { format!("  ·  {}", self.label) } else { String::new() };
         format!("{dirty}{name}{remote}")
