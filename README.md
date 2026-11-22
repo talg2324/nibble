@@ -155,6 +155,7 @@ nibble ships its own [agent skills](.skills) as plain, editable `SKILL.md` files
 | [`nib-control`](.skills/nib-control/SKILL.md) | see and drive nibble with `nib ctl` instead of asking for screen control |
 | [`nib-agent-mailbox`](.skills/nib-agent-mailbox/SKILL.md) | coordinate with the other agents in the project |
 | [`nib-finished`](.skills/nib-finished/SKILL.md) | tell you a clear job is done, with a short summary |
+| [`nib-subagents`](.skills/nib-subagents/SKILL.md) | tell its own hidden helpers from an agent in your agents tab, and start the one you meant |
 | [`nib-artifacts`](.skills/nib-artifacts/SKILL.md) | put scratch files, plots and logs in scratch or NIBDIR, not in your repo |
 | [`nib-ai`](.skills/nib-ai/SKILL.md) | run local models and sub-agents with `nib ai` instead of hand-written glue |
 | [`nib-upstream`](.skills/nib-upstream/SKILL.md) | turn a nibble bug into a draft PR or an issue you approve (opt-in) |
