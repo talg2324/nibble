@@ -5,7 +5,7 @@
 <h1 align="center">nibble</h1>
 
 <p align="center">
-  <b>A small, fast, remote-first code editor where you watch your coding agents work.</b>
+  <b>A small, fast, remote-first code editor to watch your agents work.</b>
 </p>
 
 nibble (`nib`) is a native editor built for human-agent interaction with no bs attached.
@@ -20,6 +20,14 @@ Agents get API access to the editor with no MCP needed.
 </table>
 
 > **Status: v0.2.** Early, used daily, moving fast. Expect rough edges and breaking changes. macOS, Linux and Windows (local projects and SSH remotes; or run nibble inside WSL). You build it yourself (see [Roadmap](#roadmap)).
+
+## Why nibble
+
+- Switch providers and models mid-chat
+- Comment and iterate on plans and code diffs within the chat session
+- See what the agents are doing
+- Give frontend access via headless browser without real internet control
+- Watch agents communicate and intervene when needed
 
 ## Ideology
 
