@@ -125,8 +125,8 @@ Open the agents tab with ⌘⇧I. Pick an assistant and model, type a task, and 
 - **Steps, not prose.** Each agent is a list of steps: reads, edits with inline diffs, writes, skills loaded, searches, and commands. Shell commands that really read or write files (`cat`, `sed -n`, `sed -i`, heredocs, `tee`, …) are shown as the file operations they are, not as raw shell.
 - **A read-only terminal per agent** shows each command the agent ran and what came back. Sleeps and timeouts get a live countdown.
 - **The agent list** on the left shows every agent's state with a two-line live preview ("editing stats.py", a question, the tail of its terminal).
-- **Modes**: auto by default, or manual, accept-edits and plan. In manual mode a permission card asks before each action.
-- **Thinking and system prompt**: the **thinking** dropdown in the header offers the levels the assistant has (Claude Code: low to max; Codex: minimal to xhigh) or its own default. The **system** pane, beside terminal and skills, holds text added to the assistant's system prompt. Both are taken when the agent's session starts; each agent keeps its own, and new agents (in this nib or the next) start with the last ones set, kept in `[ai] effort` / `prompt` in config.toml.
+- **Modes**: auto by default, or manual, accept-edits and plan. Claude Code asks through a permission card in manual mode. Codex's headless CLI does not offer per-action permission cards in nibble: manual and plan run read-only, while auto and accept-edits use its workspace-write sandbox.
+- **Thinking and system prompt**: the **thinking** dropdown in the header offers the levels the assistant has (Claude Code: low to max; Codex: the selected model's supported levels from its catalog) or its own default. The **system** pane, beside terminal and skills, holds text added to the assistant's system prompt. Both are taken when the agent's session starts; each agent keeps its own, and new agents (in this nib or the next) start with the last ones set, kept in `[ai] effort` / `prompt` in config.toml.
 - **Panic** (`ctrl+.`): every agent freezes at once (its process tree is suspended, not killed). A dialog lists them; release, and the ones you marked stop while the rest carry on where they were.
 - **Done means done.** When an agent finishes a clear job, it says so with a short summary (what was asked, what it found, what it did). Its row turns green; ⌘↵ accepts and closes it.
 - **History**: every conversation is kept per project (⌘⇧H). Search it, reopen one and continue, or replay it in Follow mode.
@@ -159,7 +159,7 @@ nibble ships its own [agent skills](.skills) as plain, editable `SKILL.md` files
 | [`nib-ai`](.skills/nib-ai/SKILL.md) | run local models and sub-agents with `nib ai` instead of hand-written glue |
 | [`nib-upstream`](.skills/nib-upstream/SKILL.md) | turn a nibble bug into a draft PR or an issue you approve (opt-in) |
 
-Agents started from the agents tab get the skills automatically (`nib-upstream` excepted). For agents you run elsewhere, copy or link the folders into the skills folder your agent reads (`~/.claude/skills` or `~/.agents/skills`).
+Agents started from the agents tab get the skills automatically (`nib-upstream` excepted). Claude Code gets a session plugin; Codex gets the skill names, descriptions, and file paths so it can read each one when needed. For agents you run elsewhere, copy or link the folders into the skills folder your agent reads (`~/.claude/skills` or `~/.agents/skills`).
 
 `nib-upstream` is off unless you install it yourself. It sends nothing on its own: the only thing it ever produces is an issue or PR to this repo, from your account, which you read and approve word for word. No telemetry, logs or IDs go anywhere.
 

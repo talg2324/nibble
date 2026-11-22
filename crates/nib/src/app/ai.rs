@@ -1232,14 +1232,19 @@ impl App {
     }
 
     /// The thinking levels the shown agent's assistant takes (none: no dropdown).
-    pub(super) fn ai_efforts(&self) -> &'static [&'static str] {
-        self.ai.agent.map_or(&[], AiAgent::efforts)
+    pub(super) fn ai_efforts(&self) -> Vec<String> {
+        let Some(agent) = self.ai.agent else { return Vec::new() };
+        if let Some(levels) = self.ai.chosen.as_ref().and_then(|id| self.ai_models(agent).iter().find(|m| &m.id == id)).map(|m| &m.efforts).filter(|e| !e.is_empty()) {
+            return levels.clone();
+        }
+        agent.efforts().iter().map(|s| (*s).to_string()).collect()
     }
 
     /// The thinking level and system prompt the shown agent's next session gets with `agent`.
     /// A level this assistant doesn't have (one picked for another) is left to it.
     fn ai_tuning(&self, agent: AiAgent) -> (Option<String>, Option<String>) {
-        let effort = self.ai.effort.clone().filter(|e| agent.efforts().contains(&e.as_str()));
+        let levels = if self.ai.agent == Some(agent) { self.ai_efforts() } else { agent.efforts().iter().map(|s| (*s).to_string()).collect() };
+        let effort = self.ai.effort.clone().filter(|e| levels.contains(e));
         let prompt = Some(self.ai.prompt.text().trim().to_string()).filter(|p| !p.is_empty());
         (effort, prompt)
     }
@@ -3530,7 +3535,7 @@ mod tests {
         let mut a = app();
         let _ = a.update(Message::Control(Command::ToggleAi));
         let mut codex = info(AiAgent::Codex, true, Some(true));
-        codex.models = vec![AiModel { id: "gpt-6-sol".into(), name: "GPT-6-Sol".into(), local: false, warm: None }];
+        codex.models = vec![AiModel { id: "gpt-6-sol".into(), name: "GPT-6-Sol".into(), efforts: Vec::new(), local: false, warm: None }];
         agents(&mut a, vec![info(AiAgent::Claude, false, None), codex]);
         assert_eq!((a.ai.agent, a.ai.chosen.as_deref()), (Some(AiAgent::Codex), None), "the one it's set up with");
         assert_eq!(a.ai_model_label(), "default model");
@@ -3553,7 +3558,7 @@ mod tests {
     fn the_dropdown_works_from_the_keyboard() {
         let mut a = app();
         let _ = a.update(Message::Control(Command::ToggleAi));
-        let m = |id: &str| AiModel { id: id.into(), name: id.into(), local: false, warm: None };
+        let m = |id: &str| AiModel { id: id.into(), name: id.into(), efforts: Vec::new(), local: false, warm: None };
         let mut claude = info(AiAgent::Claude, true, Some(true));
         claude.models = vec![m("opus"), m("sonnet")];
         let mut codex = info(AiAgent::Codex, true, Some(true));
@@ -3648,7 +3653,20 @@ mod tests {
         let _ = a.update(Message::Ai(Msg::Effort(Effort::Level("low".into()))));
         assert!(opening(&a).is_none() && matches!(a.ai.session, Session::Ready(8)));
         // Another assistant doesn't get a level it hasn't got.
-        a.ai.effort = Some("max".into());
+        a.ai.effort = Some("minimal".into());
+        assert_eq!(a.ai_tuning(AiAgent::Codex).0, None);
+    }
+
+    #[test]
+    fn codex_thinking_levels_follow_the_selected_model() {
+        let mut a = app();
+        let _ = a.update(Message::Control(Command::ToggleAi));
+        let mut codex = info(AiAgent::Codex, true, Some(true));
+        codex.models = vec![AiModel { id: "gpt-6-luna".into(), name: "Luna".into(), efforts: ["low", "medium", "high", "xhigh", "max"].map(str::to_string).to_vec(), local: false, warm: None }];
+        agents(&mut a, vec![codex]);
+        a.ai.chosen = Some("gpt-6-luna".into());
+        assert!(!a.ai_efforts().contains(&"ultra".into()));
+        a.ai.effort = Some("ultra".into());
         assert_eq!(a.ai_tuning(AiAgent::Codex).0, None);
     }
 
@@ -3661,7 +3679,7 @@ mod tests {
 
     #[test]
     fn opencode_lists_downloaded_models_unless_cloud_ones_are_asked_for() {
-        let m = |id: &str, local| AiModel { id: id.into(), name: id.into(), local, warm: None };
+        let m = |id: &str, local| AiModel { id: id.into(), name: id.into(), efforts: Vec::new(), local, warm: None };
         let mut oc = info(AiAgent::OpenCode, true, None);
         oc.models = vec![m("opencode/big-pickle", false), m("ollama/qwen3.8:27b-mlx", true)];
         let ids = |v: Vec<&AiModel>| v.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
@@ -3677,7 +3695,7 @@ mod tests {
         let mut a = app();
         let _ = a.update(Message::Control(Command::ToggleAi));
         let mut oc = info(AiAgent::OpenCode, true, None);
-        oc.models = vec![AiModel { id: "ollama/qwen3:8b".into(), name: "ollama/qwen3:8b".into(), local: true, warm: Some(false) }];
+        oc.models = vec![AiModel { id: "ollama/qwen3:8b".into(), name: "ollama/qwen3:8b".into(), efforts: Vec::new(), local: true, warm: Some(false) }];
         agents(&mut a, vec![oc]);
         let _ = a.update(Message::Ai(Msg::Warm("ollama/qwen3:8b".into(), true)));
         let req = a.pending.iter().find_map(|(id, p)| matches!(p, Pending::AiWarm { warm: true, .. }).then_some(*id)).expect("asked to warm it");
@@ -3694,7 +3712,7 @@ mod tests {
         let mut a = app();
         let _ = a.update(Message::Control(Command::ToggleAi));
         let mut oc = info(AiAgent::OpenCode, true, None);
-        oc.models = vec![AiModel { id: "ollama/qwen3:8b".into(), name: "ollama/qwen3:8b".into(), local: true, warm: Some(false) }];
+        oc.models = vec![AiModel { id: "ollama/qwen3:8b".into(), name: "ollama/qwen3:8b".into(), efforts: Vec::new(), local: true, warm: Some(false) }];
         agents(&mut a, vec![oc]);
         let _ = a.update(Message::Ai(Msg::Switch));
         let _ = a.update(Message::Ai(Msg::PullFocus));

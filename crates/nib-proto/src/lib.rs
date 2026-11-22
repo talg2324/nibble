@@ -537,7 +537,7 @@ impl AiAgent {
             // `claude --effort`.
             AiAgent::Claude => &["low", "medium", "high", "xhigh", "max"],
             // Codex's `model_reasoning_effort`.
-            AiAgent::Codex => &["minimal", "low", "medium", "high", "xhigh"],
+            AiAgent::Codex => &["low", "medium", "high", "xhigh", "max", "ultra"],
             AiAgent::Grok | AiAgent::OpenCode => &[],
         }
     }
@@ -605,6 +605,9 @@ pub struct AiModel {
     pub id: String,
     /// What to show.
     pub name: String,
+    /// Reasoning levels supported by this model, when its catalog supplies them.
+    #[serde(default)]
+    pub efforts: Vec<String>,
     /// Its weights are on that machine (an Ollama model that's been pulled); not a cloud one.
     #[serde(default)]
     pub local: bool,

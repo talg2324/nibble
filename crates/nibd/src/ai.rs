@@ -223,7 +223,7 @@ fn signed_in(agent: AiAgent) -> Option<bool> {
             if other || configured { None } else { Some(false) }
         }
         AiAgent::Codex => {
-            if env_set("CODEX_API_KEY") {
+            if env_set("OPENAI_API_KEY") {
                 return Some(true);
             }
             let dir = dir("CODEX_HOME", ".codex")?;
@@ -261,7 +261,7 @@ const CLAUDE_MODELS: [(&str, &str); 4] = [("fable", "Fable"), ("opus", "Opus"), 
 /// `models_cache.json`;
 /// OpenCode lists what its providers have (local ones included). Grok: none, it runs its own.
 fn models(agent: AiAgent, exe: &Path, root: Option<&Path>) -> Vec<AiModel> {
-    let model = |id: &str, name: &str| AiModel { id: id.to_string(), name: name.to_string(), local: false, warm: None };
+    let model = |id: &str, name: &str| AiModel { id: id.to_string(), name: name.to_string(), efforts: Vec::new(), local: false, warm: None };
     match agent {
         AiAgent::Claude => {
             let listed = claude_catalog().map(|text| claude_models(&text)).unwrap_or_default();
@@ -337,7 +337,7 @@ fn claude_models(text: &str) -> Vec<AiModel> {
         .filter_map(|m| {
             let id = m.get("id").and_then(Value::as_str)?;
             let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
-            Some(AiModel { id: id.to_string(), name: name.to_string(), local: false, warm: None })
+            Some(AiModel { id: id.to_string(), name: name.to_string(), efforts: Vec::new(), local: false, warm: None })
         })
         .collect()
 }
@@ -353,7 +353,9 @@ fn codex_models(text: &str) -> Vec<AiModel> {
             let id = m.get("slug").and_then(Value::as_str)?;
             let name = m.get("display_name").and_then(Value::as_str).unwrap_or(id);
             let priority = m.get("priority").and_then(Value::as_i64).unwrap_or(i64::MAX);
-            Some((priority, AiModel { id: id.to_string(), name: name.to_string(), local: false, warm: None }))
+            let efforts = m.get("supported_reasoning_levels").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|level| level.get("effort").and_then(Value::as_str).map(str::to_string)).collect();
+            Some((priority, AiModel { id: id.to_string(), name: name.to_string(), efforts, local: false, warm: None }))
         })
         .collect();
     listed.sort_by_key(|(p, _)| *p);
@@ -1194,16 +1196,38 @@ impl Tuning {
 
     /// Codex's config overrides for it (`-c key=value`, the value read as TOML: a JSON string
     /// is a TOML basic string).
-    fn codex_args(&self) -> Vec<String> {
+    fn codex_args(&self, tools: bool) -> Vec<String> {
         let mut a = Vec::new();
         if let Some(e) = &self.effort {
             a.extend(["-c".to_string(), format!("model_reasoning_effort={}", Value::from(e.as_str()))]);
         }
-        if let Some(p) = &self.prompt {
-            a.extend(["-c".to_string(), format!("developer_instructions={}", Value::from(p.as_str()))]);
+        let mut instructions = self.prompt.clone().unwrap_or_default();
+        if tools {
+            let catalog = codex_skill_catalog(&bundled_skills());
+            if !catalog.is_empty() {
+                if !instructions.is_empty() {
+                    instructions.push_str("\n\n");
+                }
+                instructions.push_str(&catalog);
+            }
+        }
+        if !instructions.is_empty() {
+            a.extend(["-c".to_string(), format!("developer_instructions={}", Value::from(instructions))]);
         }
         a
     }
+}
+
+/// Codex has no `--plugin-dir` equivalent. Give it the bundled skills' metadata and paths so it
+/// can read the relevant SKILL.md on demand, without copying skills into the user's home/repo.
+fn codex_skill_catalog(skills: &[AiSkill]) -> String {
+    let listed: Vec<String> = skills.iter().filter(|s| s.name != "nib-upstream").map(|s| {
+        format!("- {}: {} ({})", s.name, s.description, s.path)
+    }).collect();
+    if listed.is_empty() {
+        return String::new();
+    }
+    format!("Nibble skills available in this session. When a task calls for one, read its SKILL.md at the listed path before using it. User instructions take precedence over skill guidance.\n{}", listed.join("\n"))
 }
 
 /// Check that `agent` is there and signed in and start a chat at `root` with `model` (`None`:
@@ -1317,14 +1341,14 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
     Ok(id)
 }
 
-/// Codex's sandbox lets a run write in the folder it is started in and nowhere else. An agent
-/// also writes to the mailbox (`nib-mail`, `nib-work`), to its own work tree, and, when it
-/// commits or makes that work tree, to the repository's git folder: `-c` overrides adding those.
+/// Codex's sandbox lets a run write in the folder it is started in and nowhere else. Nib's
+/// scratch, persistent data, mailbox, work trees, and git metadata may all live outside it.
 fn codex_writable(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
     let var = |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| PathBuf::from(v));
     let mut roots: Vec<PathBuf> = Vec::new();
+    roots.extend(var("NIB_SCRATCH"));
+    roots.extend(var("NIBDIR"));
     roots.extend(var("NIB_MAILBOX"));
-    roots.extend(work_trees(env));
     let git = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).stdin(Stdio::null()).output();
     if let Ok(out) = git {
         let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1336,6 +1360,8 @@ fn codex_writable(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> 
         return Vec::new();
     }
     // A JSON list of strings is a TOML one.
+    roots.sort();
+    roots.dedup();
     let list = Value::from(roots.iter().map(|r| r.to_string_lossy().into_owned()).collect::<Vec<_>>());
     vec!["-c".to_string(), format!("sandbox_workspace_write.writable_roots={list}")]
 }
@@ -1641,10 +1667,14 @@ fn claude_questions(input: &Value) -> Vec<AiQuestion> {
 /// nib's own skills as a Claude Code plugin for one session: a folder under nib's cache with a
 /// link to each skill that ships next to this binary (in a checkout: the nearest `.skills`
 /// above it). `None` when there are none here (a daemon deployed without them).
+fn bundled_skills() -> Vec<AiSkill> {
+    let Some(exe) = std::env::current_exe().ok() else { return Vec::new() };
+    let Some(src) = exe.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir()) else { return Vec::new() };
+    nib_proto::skills::list(&src, SkillGroup::Nib)
+}
+
 fn skills_plugin() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let src = exe.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir())?;
-    let skills = nib_proto::skills::list(&src, SkillGroup::Nib);
+    let skills = bundled_skills();
     link_plugin(&crate::places::xdg("XDG_CACHE_HOME", &[".cache"]).join("plugin").join("nib"), &skills)
 }
 
@@ -2138,7 +2168,7 @@ impl PerTurn {
         let mut args = one_shot_args(self.agent, self.model.as_deref(), resume.as_deref(), mode, images, text);
         if self.agent == AiAgent::Codex {
             // Right after `exec`: before `resume`, whose own options these aren't.
-            let mut more = self.tuning.codex_args();
+            let mut more = self.tuning.codex_args(self.tools);
             if matches!(mode, AiMode::AcceptEdits | AiMode::Auto) {
                 more.extend(codex_writable(&self.root, &self.env));
             }
@@ -2668,10 +2698,28 @@ mod tests {
 
     #[test]
     fn codex_may_write_where_an_agent_must() {
-        let env: Vec<(&'static str, OsString)> = vec![("NIB_MAILBOX", "/s/mailbox".into())];
+        let env: Vec<(&'static str, OsString)> = vec![
+            ("NIB_SCRATCH", "/s/scratch".into()),
+            ("NIBDIR", "/s/nibdir".into()),
+            ("NIB_MAILBOX", "/s/mailbox".into()),
+        ];
         let args = codex_writable(Path::new("/nonexistent-nib-root"), &env);
-        assert_eq!(args, ["-c", r#"sandbox_workspace_write.writable_roots=["/s/mailbox"]"#]);
+        assert_eq!(args, ["-c", r#"sandbox_workspace_write.writable_roots=["/s/mailbox","/s/nibdir","/s/scratch"]"#]);
         assert!(codex_writable(Path::new("/nonexistent-nib-root"), &[]).is_empty());
+    }
+
+    #[test]
+    fn codex_gets_bundled_skills_without_the_opt_in_skill() {
+        let skills = vec![
+            AiSkill { name: "nib-control".into(), description: "Drive nib".into(), path: "/skills/nib-control/SKILL.md".into(), group: SkillGroup::Nib },
+            AiSkill { name: "nib-upstream".into(), description: "Send upstream".into(), path: "/skills/nib-upstream/SKILL.md".into(), group: SkillGroup::Nib },
+        ];
+        let catalog = codex_skill_catalog(&skills);
+        assert!(catalog.contains("nib-control: Drive nib (/skills/nib-control/SKILL.md)"));
+        assert!(!catalog.contains("nib-upstream"));
+        assert!(codex_skill_catalog(&skills[1..]).is_empty());
+        let tuning = Tuning { effort: Some("high".into()), prompt: Some("Be terse.".into()) };
+        assert_eq!(tuning.codex_args(false), ["-c", "model_reasoning_effort=\"high\"", "-c", "developer_instructions=\"Be terse.\""]);
     }
 
 
@@ -3087,9 +3135,9 @@ mod tests {
         let cache = r#"{"models":[
             {"slug":"b","display_name":"B","visibility":"list","priority":2},
             {"slug":"hidden","display_name":"H","visibility":"hide","priority":0},
-            {"slug":"a","display_name":"A","visibility":"list","priority":1}]}"#;
-        let ids: Vec<_> = codex_models(cache).into_iter().map(|m| (m.id, m.name)).collect();
-        assert_eq!(ids, [("a".to_string(), "A".to_string()), ("b".into(), "B".into())]);
+            {"slug":"a","display_name":"A","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"low"},{"effort":"max"}]}]}"#;
+        let ids: Vec<_> = codex_models(cache).into_iter().map(|m| (m.id, m.name, m.efforts)).collect();
+        assert_eq!(ids, [("a".to_string(), "A".to_string(), vec!["low".into(), "max".into()]), ("b".into(), "B".into(), vec![])]);
         assert!(codex_models("not json").is_empty());
     }
 
