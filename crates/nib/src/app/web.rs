@@ -356,12 +356,10 @@ impl App {
         }
         // The clipboard is the system's, which only nib can reach: the page's own copy and
         // paste keys would use the unseen browser's.
-        // Zoom keys zoom the page, as in a browser (Cmd/Ctrl 0: back to 100%).
-        match command {
-            Some(Command::FontBigger) => return Some(self.web_zoom_by(1)),
-            Some(Command::FontSmaller) => return Some(self.web_zoom_by(-1)),
-            None if (chord.ctrl || chord.logo) && !chord.alt && chord.key == Key::Char('0') => return Some(self.web_zoom_by(0)),
-            _ => {}
+        // Cmd/Ctrl 0: the page back to 100%, as in a browser (+ and - are app-wide commands:
+        // `run_command` zooms the page with them when a web tab is in front).
+        if command.is_none() && (chord.ctrl || chord.logo) && !chord.alt && chord.key == Key::Char('0') {
+            return Some(self.web_zoom_by(0));
         }
         match command {
             Some(Command::Copy) => {
@@ -543,6 +541,38 @@ mod tests {
         // An agent on another machine has its files there, the browser is here.
         assert!(agent_refused(&json!({ "cmd": "web.upload", "ref": "1", "files": ["/a"] }), false, "@gpu").unwrap().contains("@gpu"));
         assert_eq!(agent_refused(&json!({ "cmd": "web.read" }), false, "@gpu"), None);
+    }
+
+    #[test]
+    fn over_a_web_tab_the_zoom_keys_and_wheel_zoom_the_page() {
+        use crate::zoom::Zone;
+        let mut a = app();
+        let mut doc = Document::new_plain(Default::default(), None);
+        doc.read_only = true;
+        a.put_doc(doc, true);
+        let active = a.active;
+        a.tabs[active].web = Some(7);
+        a.web.pages.push(TabInfo {
+            id: 7, name: "app".into(), address: "localhost:5173".into(), url: "http://127.0.0.1:5173/".into(), loading: false, blocked: None,
+            dialog: None, choice: None, cursor: String::new(), saved: Vec::new(), zoom: 1.0,
+        });
+        a.focus = Focus::Main;
+        let size = a.face.size;
+        let flash = |a: &App| a.flash.as_ref().map(|f| f.0.clone());
+        let press = |a: &mut App, s: &str| {
+            let _ = a.update(Message::Key { chord: KeyChord::parse(s).unwrap(), text: None, repeat: false });
+            let _ = a.update(Message::KeyUp(KeyChord::parse(s).unwrap().key));
+        };
+        press(&mut a, "mod+-");
+        assert_eq!((a.face.size, flash(&a)), (size, Some("page 90%".into())));
+        let _ = a.update(Message::WheelZoom(Some(Zone::Web), 2));
+        assert_eq!((a.face.size, flash(&a)), (size, Some("page 125%".into())));
+        press(&mut a, "mod+0");
+        assert_eq!(flash(&a), Some("page 100%".into()));
+        // Not over the page (a terminal has the keys): the code font, as before.
+        a.focus = Focus::Terminal(1);
+        let _ = a.update(Message::Control(Command::FontBigger));
+        assert_eq!(a.face.size, size + 1.0);
     }
 
     #[test]

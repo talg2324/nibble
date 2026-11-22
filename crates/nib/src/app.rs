@@ -1679,6 +1679,10 @@ impl App {
             FontBigger | FontSmaller if self.preview_shown() && self.focus == Focus::Main => {
                 return self.zoom_preview(if c == FontBigger { 1 } else { -1 });
             }
+            // Over a web tab they zoom the page, as in a browser.
+            FontBigger | FontSmaller if self.web_front().is_some() && self.focus == Focus::Main => {
+                return self.web_zoom_by(if c == FontBigger { 1 } else { -1 });
+            }
             FontBigger | FontSmaller => return self.zoom_font(if c == FontBigger { 1 } else { -1 }),
             c if tab_number(c).is_some() => {
                 let i = tab_number(c).unwrap();
