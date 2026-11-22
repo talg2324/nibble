@@ -30,7 +30,7 @@ use crate::transport::Conn;
 use crate::zoom;
 use iced::keyboard::{self, key::Named, Key as IKey};
 use iced::widget::{button, column, container, mouse_area, progress_bar, row, space, svg, text, tooltip};
-use iced::{Border, Color, Element, Font, Length, Subscription, Task};
+use iced::{Border, Color, Element, Length, Subscription, Task};
 use nib_editor::keymap::{Key, KeyChord};
 use nib_editor::config::ThemeConfig;
 use nib_editor::{Command, Document, Keymap};
@@ -1935,7 +1935,7 @@ impl App {
         let th = &self.theme;
         let h = 28.0;
         let logo = svg(self.icons.logo.clone()).width(h * crate::icons::LOGO_ASPECT).height(h);
-        let name = text("nibble").size(18).font(Font::MONOSPACE).color(th.dim);
+        let name = text("nibble").size(18).font(crate::fonts::mono()).color(th.dim);
         let mut col = column![logo, name].spacing(10).align_x(iced::Alignment::Center);
 
         if self.connected {
@@ -2004,7 +2004,7 @@ impl App {
             let underline = if active { th.accent } else { Color::TRANSPARENT };
             let held = (active && in_bar).then_some(iced::Background::Color(th.browser_sel_bg));
             let label = row![
-                text(name).size(12).color(fg).font(Font::MONOSPACE),
+                text(name).size(12).color(fg).font(crate::fonts::mono()),
                 button(text(dot).size(11).color(th.dim)).on_press(Message::CloseTabAt(i)).padding([0, 4]).style(|_, _| button::Style::default()),
             ]
             .spacing(6)
@@ -2025,7 +2025,7 @@ impl App {
             let fg = if active { th.foreground } else { th.dim };
             let underline = if active { th.accent } else { Color::TRANSPARENT };
             let label = row![
-                text(self.ai_tab_title()).size(12).color(fg).font(Font::MONOSPACE),
+                text(self.ai_tab_title()).size(12).color(fg).font(crate::fonts::mono()),
                 button(text("×").size(11).color(th.dim)).on_press(Message::Ai(ai::Msg::Close)).padding([0, 4]).style(|_, _| button::Style::default()),
             ]
             .spacing(6)
@@ -2043,7 +2043,7 @@ impl App {
             let fg = if active { th.foreground } else { th.dim };
             let underline = if active { th.accent } else { Color::TRANSPARENT };
             let label = row![
-                text("✦ history").size(12).color(fg).font(Font::MONOSPACE),
+                text("✦ history").size(12).color(fg).font(crate::fonts::mono()),
                 button(text("×").size(11).color(th.dim)).on_press(Message::Ai(ai::Msg::HistoryClose)).padding([0, 4]).style(|_, _| button::Style::default()),
             ]
             .spacing(6)
@@ -2065,7 +2065,7 @@ impl App {
     fn hint<'a>(&self, key: &str, what: &'a str) -> Element<'a, Message> {
         let th = &self.theme;
         let dim = th.dim;
-        let cap = container(text(key.to_string()).size(11).font(Font::MONOSPACE).color(th.foreground))
+        let cap = container(text(key.to_string()).size(11).font(crate::fonts::mono()).color(th.foreground))
             .padding([1, 6])
             .style(move |_| container::Style {
                 border: Border { color: dim, width: 1.0, radius: 3.0.into() },

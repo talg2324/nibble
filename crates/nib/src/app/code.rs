@@ -700,7 +700,7 @@ impl App {
             let sel = i == p.selected;
             let bg = if sel { th.selection } else { Color::TRANSPARENT };
             let line = row![
-                text(format!("{rel}:{}", l.start.line + 1)).size(12).font(Font::MONOSPACE).color(th.dim),
+                text(format!("{rel}:{}", l.start.line + 1)).size(12).font(crate::fonts::mono()).color(th.dim),
                 text(code).size(self.face.size.min(13.0)).font(self.face.font).color(th.foreground),
             ]
             .spacing(14)

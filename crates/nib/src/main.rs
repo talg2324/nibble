@@ -9,6 +9,7 @@ mod color_picker;
 mod control;
 mod diff_view;
 mod editor_view;
+mod fonts;
 mod gif;
 mod gpu_log;
 mod gpu_pick;
@@ -290,6 +291,9 @@ fn main() -> Result<()> {
         }
     }
 
+    // Before any text is laid out: fonts named for installed ones (fonts.rs says why).
+    fonts::pin();
+
     let result = iced::application(
         move || {
             let (init, syn_rx, ctl_rx) = init.lock().unwrap().take().expect("boot runs once");
@@ -326,7 +330,7 @@ fn main() -> Result<()> {
         ..Default::default()
     })
     .theme(|_: &app::App| iced::Theme::Dark)
-    .default_font(iced::Font::MONOSPACE)
+    .default_font(crate::fonts::mono())
     .antialiasing(false)
     .run()
     .map_err(|e| anyhow::anyhow!("{title}: {e}"));

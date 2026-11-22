@@ -146,7 +146,7 @@ const SYSTEM_MONO: &str = "System monospace";
 /// `Font::with_name` needs `&'static str`; leak each distinct family name once.
 pub fn font_for(name: Option<&str>) -> Font {
     static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-    let Some(name) = name else { return Font::MONOSPACE };
+    let Some(name) = name else { return crate::fonts::mono() };
     let mut names = NAMES.lock().unwrap();
     let s = match names.iter().find(|s| **s == name) {
         Some(s) => *s,
@@ -477,7 +477,7 @@ impl App {
                 self.settings.edit = None;
                 self.font_name = None;
                 self.face = Typeface {
-                    font: Font::MONOSPACE,
+                    font: crate::fonts::mono(),
                     size: nib_editor::config::default_font_size(),
                     line_height: nib_editor::config::default_line_height(),
                 };

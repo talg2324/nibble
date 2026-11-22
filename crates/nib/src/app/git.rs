@@ -444,7 +444,7 @@ impl App {
         let th = &self.theme;
         let (accent, dim, fg, sel_bg, divider) = (th.accent, th.dim, th.foreground, th.selection, th.divider);
         let focused = self.focus == Focus::Git;
-        let mono = Font::MONOSPACE;
+        let mono = crate::fonts::mono();
 
         let actions = row(ACTIONS.iter().enumerate().map(|(i, a)| {
             let selected = i == ui.selected;

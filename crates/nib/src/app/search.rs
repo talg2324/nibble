@@ -479,7 +479,7 @@ impl App {
                     let rel = l.path.strip_prefix(root).map_or(l.path.as_str(), |r| r.trim_start_matches('/'));
                     let code: String = l.line_text.trim().chars().take(140).collect();
                     row![
-                        text(format!("{rel}:{}", l.start.line + 1)).size(12).font(Font::MONOSPACE).color(th.dim),
+                        text(format!("{rel}:{}", l.start.line + 1)).size(12).font(crate::fonts::mono()).color(th.dim),
                         text(code).size(self.face.size.min(13.0)).font(self.face.font).color(th.foreground),
                     ]
                 }
