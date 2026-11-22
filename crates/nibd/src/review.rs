@@ -1,11 +1,13 @@
-//! The user's review of an agent's work (D-067, after Crit): comments on lines of its diff,
-//! sent to it in rounds; it answers each one (`nib-review reply`) and the user resolves them.
+//! The user's review of an agent's work (D-067, after Crit): comments on lines of its diff and
+//! of its plan (D-070), sent to it in rounds; it answers each one (`nib-review reply`) and the
+//! user resolves them.
 //!
 //! Kept beside the agent's branch record, in the session's mailbox folder
 //! (`work/<agent>.review.json`). Like `nib-mail` and `nib-work`, `nib-review` is this binary
 //! run by the agent as a plain command.
 
 use crate::mail::{self, Report};
+use crate::work;
 use nib_proto::{Review, ReviewComment, ReviewOp, ReviewReply};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -61,11 +63,19 @@ pub fn since(mailbox: &Path, agent: &str) -> Option<String> {
 
 /// The review, with every comment on the file as it is now put where its lines are: `dir` is
 /// where the agent works. A comment whose lines moved follows them; one whose lines are gone
-/// is marked `drifted`.
+/// is marked `drifted`. The same for comments on the plan, in the plan as it is recorded now.
 pub fn load(mailbox: &Path, agent: &str, dir: &Path) -> Review {
     let mut k = kept(mailbox, agent);
     let before = k.review.clone();
+    let plan = work::plan(mailbox, agent);
     for c in &mut k.review.comments {
+        if c.plan {
+            match &plan {
+                Some(text) => anchor(c, text),
+                None => c.drifted = true,
+            }
+            continue;
+        }
         let Some(path) = c.path.as_deref().filter(|_| !c.old && c.start_line > 0) else { continue };
         match fs::read_to_string(dir.join(path)) {
             Ok(text) => anchor(c, &text),
@@ -126,6 +136,12 @@ pub fn edit(mailbox: &Path, agent: &str, op: ReviewOp) -> Result<(), String> {
             if c.body.trim().is_empty() {
                 return Err("the comment is empty".to_string());
             }
+            if c.plan {
+                let lines = work::plan(mailbox, agent).ok_or("this agent has recorded no plan")?.lines().count() as u32;
+                if c.path.is_some() || c.start_line == 0 || c.end_line < c.start_line || c.start_line > lines {
+                    return Err(format!("a comment on the plan is on its lines: 1 to {lines}"));
+                }
+            }
             k.next += 1;
             k.review.comments.push(ReviewComment { id: format!("c{}", k.next), author: USER.to_string(), round: 0, resolved: false, drifted: false, replies: Vec::new(), body: c.body.trim().to_string(), ..c });
         }
@@ -153,7 +169,7 @@ fn reply(k: &mut Kept, to: &str, body: &str, author: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Where a comment is, as said to the agent: `src/a.rs:40-44`.
+/// Where a comment is, as said to the agent: `src/a.rs:40-44`, `your plan:6-7`.
 fn place(c: &ReviewComment) -> String {
     let lines = match (c.start_line, c.end_line) {
         (0, _) => String::new(),
@@ -164,6 +180,7 @@ fn place(c: &ReviewComment) -> String {
     let moved = if c.drifted { " (these lines changed since; the numbers are approximate)" } else { "" };
     match &c.path {
         Some(p) => format!("{p}{lines}{old}{moved}"),
+        None if c.plan => format!("your plan{lines}{moved}"),
         None => "the work as a whole".to_string(),
     }
 }
@@ -202,6 +219,12 @@ pub fn send(mailbox: &Path, agent: &str, snapshot: Option<String>) -> Result<Str
          Do not leave one unanswered. When all are answered and you have checked your work again, run `nib-mail done` again. `nib-review comments` lists them again. nib-work skill, \"A review\".)\n",
         if n == 1 { "" } else { "s" }
     );
+    if open.iter().any(|c| c.plan) {
+        text.push_str(
+            "(A comment on \"your plan\" is about the plan you recorded, and quotes its lines: if it changes what you will do, revise the plan and record it again with `nib-work plan FILE`, \
+             change the work to match, then answer the comment.)\n",
+        );
+    }
     for c in open {
         text.push('\n');
         text.push_str(&said(c));
@@ -321,6 +344,43 @@ mod tests {
         assert!(edit(&mailbox, me, ReviewOp::Resolve { comment: "c9".into(), resolved: true }).is_err());
         forget(&mailbox, me);
         assert!(stamp(&mailbox, me).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn comments_on_the_plan_quote_it_and_follow_it() {
+        let dir = std::env::temp_dir().join(format!("nibd-review-plan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (mailbox, tree) = (dir.join("mailbox"), dir.join("tree"));
+        fs::create_dir_all(mailbox.join("outbox")).unwrap();
+        fs::create_dir_all(&tree).unwrap();
+        let me = "claude-1";
+        let go = |args: &[&str]| run(&mailbox, me, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        let on_plan = |start: u32, end: u32, anchor: &str, body: &str| ReviewOp::Comment(ReviewComment { plan: true, start_line: start, end_line: end, anchor: anchor.into(), body: body.into(), ..Default::default() });
+
+        // No plan, no lines, lines past its end: refused.
+        assert!(edit(&mailbox, me, on_plan(1, 1, "", "why?")).is_err());
+        work::set_plan(&mailbox, me, "# Add sum\n\n1. write it\n2. test it\n").unwrap();
+        assert!(edit(&mailbox, me, on_plan(0, 0, "", "why?")).is_err() && edit(&mailbox, me, on_plan(9, 9, "", "why?")).is_err());
+        // Written with its lines' text (the plan pane), and without (`nib ctl diff comment --on plan:4`).
+        edit(&mailbox, me, on_plan(3, 4, "1. write it\n2. test it", "Test first.")).unwrap();
+        edit(&mailbox, me, on_plan(4, 4, "", "With what?")).unwrap();
+        let r = load(&mailbox, me, &tree);
+        assert!(r.comments.iter().all(|c| c.plan && c.path.is_none() && !c.drifted) && r.comments[1].anchor == "2. test it", "{r:?}");
+
+        let text = send(&mailbox, me, None).unwrap();
+        assert!(text.contains("`nib-work plan FILE`") && text.contains("[c1] your plan:3-4\n  > 1. write it\n  > 2. test it\nuser: Test first.") && text.contains("[c2] your plan:4\n"), "{text}");
+        assert!(go(&["comments"]).0.contains("[c2] your plan:4\n  > 2. test it\nuser: With what?"));
+        assert_eq!(go(&["reply", "c2", "cargo", "test"]), ("answered c2; 1 still to answer".to_string(), 0));
+
+        // The plan is recorded again: a comment follows its lines; one whose lines are gone
+        // stays, marked, still quoting what it was about.
+        work::set_plan(&mailbox, me, "# Add sum\n\nWhy: asked.\n\n1. test it\n2. test it\n3. write it\n").unwrap();
+        let r = load(&mailbox, me, &tree);
+        let (c1, c2) = (&r.comments[0], &r.comments[1]);
+        assert!(c1.drifted && c1.anchor == "1. write it\n2. test it" && c1.end_line <= 7, "{c1:?}");
+        assert_eq!((c2.start_line, c2.end_line, c2.drifted, c2.replies[0].body.as_str()), (6, 6, false, "cargo test"));
+        assert!(go(&["comments"]).0.contains("[c1] your plan:3-4 (these lines changed since; the numbers are approximate)"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

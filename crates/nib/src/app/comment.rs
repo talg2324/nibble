@@ -215,6 +215,15 @@ impl Comments {
         self.list.retain(|c| c.id != id);
     }
 
+    /// These are the filed ones now (they are kept elsewhere: nibdiff's review). The one being
+    /// written stays.
+    pub fn set(&mut self, list: Vec<Comment>) {
+        self.list.clear();
+        for c in list {
+            self.insert_sorted(c);
+        }
+    }
+
     /// In the order of their lines, so they read top to bottom.
     fn insert_sorted(&mut self, c: Comment) {
         let at = self.list.iter().position(|o| (o.start_line, o.end_line) > (c.start_line, c.end_line)).unwrap_or(self.list.len());

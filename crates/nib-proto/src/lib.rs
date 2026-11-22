@@ -975,8 +975,8 @@ pub struct Review {
     pub comments: Vec<ReviewComment>,
 }
 
-/// One comment: on lines of a file, on a file (`start_line` 0), or on the work as a whole (no
-/// `path`).
+/// One comment: on lines of a file, on a file (`start_line` 0), on lines of the agent's plan
+/// (`plan`), or on the work as a whole (no `path`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ReviewComment {
     /// `c1`, `c2`, …
@@ -986,6 +986,9 @@ pub struct ReviewComment {
     /// On the file as it was (a removed line), not as it is now.
     #[serde(default)]
     pub old: bool,
+    /// On lines of the plan the agent recorded (`nib-work plan`), not of a file: no `path`.
+    #[serde(default)]
+    pub plan: bool,
     /// 1-based, both included; 0 and 0: about the whole file.
     pub start_line: u32,
     pub end_line: u32,

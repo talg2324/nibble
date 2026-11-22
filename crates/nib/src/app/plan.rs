@@ -7,7 +7,7 @@
 //! the exact text it wrote.
 
 use super::code::MarkdownViewer;
-use super::comment::{self, Comments};
+use super::comment::{self, Comment, Comments};
 use super::Message;
 use iced::widget::{column, container, markdown, mouse_area, row, text};
 use iced::{Border, Color, Element, Length, Padding};
@@ -186,17 +186,49 @@ impl Plan {
     pub fn enter(&mut self) -> bool {
         let Some((a, b)) = self.sel else { return false };
         let Some((s, e)) = self.span(a, b) else { return false };
-        let one = self.comments.list().iter().find(|c| a == b && c.start_line <= s && e <= c.end_line).map(|c| c.id.clone());
-        match one {
-            Some(id) => {
-                let text = &self.text;
-                self.comments.edit(&id, |s, e| lines_of(text, s, e));
-            }
-            None => self.comments.open(s, e),
-        }
+        let Some(id) = self.comments.list().iter().find(|c| a == b && c.start_line <= s && e <= c.end_line).map(|c| c.id.clone()) else { return self.write() };
+        let text = &self.text;
+        self.comments.edit(&id, |s, e| lines_of(text, s, e));
         self.back = Some(b);
         self.sel = None;
         true
+    }
+
+    /// Open a new comment on the rows picked, whatever is on them already (nibdiff, where a
+    /// filed comment is answered, not changed). `false`: nothing is picked.
+    pub fn write(&mut self) -> bool {
+        let Some((a, b)) = self.sel else { return false };
+        let Some((s, e)) = self.span(a, b) else { return false };
+        self.comments.open(s, e);
+        self.back = Some(b);
+        self.sel = None;
+        true
+    }
+
+    /// The lines of the rows picked.
+    pub fn picked(&self) -> Option<(u32, u32)> {
+        self.sel.and_then(|(a, b)| self.span(a, b))
+    }
+
+    /// Take the comment being written, to file it elsewhere (nibdiff: in the agent's review):
+    /// its lines, their text, its words. `None`: it had no words (it is dropped), or there was
+    /// none.
+    pub fn take(&mut self) -> Option<(u32, u32, String, String)> {
+        self.comments.draft.as_ref()?;
+        self.settle();
+        let d = self.comments.draft.take().filter(|d| !d.blank())?;
+        Some((d.start_line, d.end_line, lines_of(&self.text, d.start_line, d.end_line), d.body.trim().to_string()))
+    }
+
+    /// Show `list` as the filed comments (nibdiff: those of the agent's review that are on the
+    /// plan), each on whole rows, so that it has a row to show under whatever lines it names.
+    pub fn show(&mut self, mut list: Vec<Comment>) {
+        let row = |line: u32| self.rows.iter().rev().find(|r| r.start_line <= line).or(self.rows.first());
+        for c in &mut list {
+            c.start_line = row(c.start_line).map_or(c.start_line, |r| r.start_line);
+            c.end_line = row(c.end_line).map_or(c.end_line, |r| r.end_line);
+        }
+        self.comments.set(list);
     }
 
     /// Something would go back to the agent besides a yes: comments, or a draft with words.
@@ -241,7 +273,7 @@ impl Plan {
         v["title"] = json!(self.title());
         v["outcome"] = json!(self.outcome.map(Outcome::word));
         v["rows"] = json!(self.rows.iter().map(|r| json!([r.start_line, r.end_line])).collect::<Vec<_>>());
-        v["selected"] = json!(self.sel.and_then(|(a, b)| self.span(a, b)));
+        v["selected"] = json!(self.picked());
         v
     }
 }
@@ -465,5 +497,30 @@ mod tests {
         assert_eq!(p.sel, Some((4, 4)));
         p.update(PlanMsg::Row(4));
         assert!(p.comments.draft.is_some());
+    }
+
+    #[test]
+    fn comments_kept_elsewhere_are_taken_out_and_shown_on_whole_rows() {
+        let mut p = Plan::new(PLAN);
+        assert_eq!(p.take(), None);
+        p.update(PlanMsg::Row(1));
+        assert_eq!(p.picked(), Some((3, 4)));
+        assert!(p.write());
+        assert_eq!(p.take(), None, "no words: dropped");
+        p.step(0, false);
+        assert_eq!(p.sel, Some((1, 1)), "the row it was on is picked again");
+        p.write();
+        p.comments.draft.as_mut().unwrap().insert(" how slow? ");
+        assert_eq!(p.take(), Some((3, 4, "Why: it is slow.\nVery slow.".to_string(), "how slow?".to_string())));
+        assert!(p.comments.is_empty() && p.comments.draft.is_none(), "filed by whoever took it");
+        // Line 3 alone, and a line between two rows: each shows under a whole row.
+        let c = |id: &str, a: u32, b: u32| Comment { id: id.into(), start_line: a, end_line: b, anchor: String::new(), body: "x".into(), author: "user".into(), resolved: false, drifted: false, replies: vec![] };
+        p.show(vec![c("c2", 10, 10), c("c1", 3, 3)]);
+        let shown: Vec<(&str, u32, u32)> = p.comments.list().iter().map(|c| (c.id.as_str(), c.start_line, c.end_line)).collect();
+        assert_eq!(shown, [("c1", 3, 4), ("c2", 9, 9)]);
+        // On a commented row a new comment is written: the one there is not opened.
+        p.update(PlanMsg::Row(1));
+        p.write();
+        assert_eq!((p.comments.len(), p.comments.draft.as_ref().map(|d| d.body.as_str())), (2, Some("")));
     }
 }

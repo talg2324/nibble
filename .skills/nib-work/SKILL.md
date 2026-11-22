@@ -95,9 +95,10 @@ What comes back:
 
 ## A review
 
-The user can comment on your changes line by line and send the comments to you: a message
-that starts `(nib: the user reviewed your work: round N …)` and lists each open comment with
-its id, the file and lines, and the lines' text as they were when it was written.
+The user can comment on your changes line by line, and on your plan, and send the comments to
+you: a message that starts `(nib: the user reviewed your work: round N …)` and lists each open
+comment with its id, the file and lines (or `your plan` and its lines), and the lines' text as
+they were when it was written.
 
 ```sh
 nib-review comments            # the open comments again (--all: the resolved ones too)
@@ -109,6 +110,10 @@ nib-review reply ID "…"        # answer one
   changed (and where), or your reason. One or two sentences; the user reads it under their
   comment, next to the code.
 - A comment "on the work as a whole" is about no line in particular.
+- A comment on `your plan:LINES` is about the plan you recorded, and quotes the lines it is
+  about. If it changes what you will do: revise the plan, record it again (`nib-work plan`),
+  change the work to match, then answer the comment like any other. If it is a question about
+  the plan, the answer is your reply.
 - Line numbers are from when the comment was written; if you have changed the file since, find
   the lines by their quoted text.
 - You cannot resolve a comment: the user does, when your answer satisfies them. A comment that

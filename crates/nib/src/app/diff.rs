@@ -3,12 +3,16 @@
 //! the daemon's `git diff` again every second while the tab is open, so it follows whoever is
 //! editing (you, an agent, a `git pull`). Keys: ↑↓ / j k rows, n p hunks, ] [ files, ←→ fold,
 //! s scope, Space stages or unstages the file, m commits, Enter opens the line in the editor.
+//!
+//! An agent's work is reviewed here: comments on lines of its changes and on blocks of its plan
+//! (the pane beside them; Tab gives it the keys), all in one review that nibd keeps (D-070).
 
-use super::comment::Draft;
+use super::comment::{Comment, Draft, Reply};
 use super::plan::{self, Plan, PlanMsg};
 use super::{async_sleep, App, Focus, Message, Pending};
 use crate::diff_view::{blend, status_word, DiffEvent, DiffView, Paint, Row, Talk};
 use helix_core::Rope;
+use iced::advanced::widget::{operate, operation, Id as WidgetId};
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Task};
 use nib_editor::keymap::{Key, KeyChord};
@@ -24,6 +28,7 @@ const POLL: Duration = Duration::from_secs(1);
 /// An unanswered ask older than this is given up on (the connection was replaced).
 const ASK_TIMEOUT: Duration = Duration::from_secs(15);
 const LIST_WIDTH: f32 = 280.0;
+const PLAN_ID: &str = "diff-plan";
 /// Syntax colours are kept until this many diffs in a row have not used them: a walk through
 /// the scopes and back finds them still there.
 const PAINT_KEPT: u64 = 12;
@@ -51,6 +56,31 @@ fn agent_of(s: DiffScope) -> Option<AiId> {
         DiffScope::Agent(id) | DiffScope::Since(id) => Some(id),
         _ => None,
     }
+}
+
+/// A comment that says `body` on `target`, as `nib ctl diff comment --on` names it: `PATH`,
+/// `PATH:LINE` or `PATH:START-END` (lines of the file as it is now), `plan:LINE` or
+/// `plan:START-END` (lines of the agent's plan; a file called `plan` is `./plan`); none: on the
+/// work as a whole. The daemon takes the lines' text as the anchor.
+fn comment_on(target: Option<&str>, body: String) -> Result<ReviewComment, String> {
+    let mut c = ReviewComment { body, ..Default::default() };
+    let Some(t) = target else { return Ok(c) };
+    let (path, lines) = match t.rsplit_once(':') {
+        Some((p, l)) if !l.is_empty() && l.chars().all(|ch| ch.is_ascii_digit() || ch == '-') => (p, Some(l)),
+        _ => (t, None),
+    };
+    c.path = Some(path.to_string());
+    if let Some(l) = lines {
+        let (a, b) = l.split_once('-').unwrap_or((l, l));
+        (c.start_line, c.end_line) = (a.parse().map_err(|_| "bad line")?, b.parse().map_err(|_| "bad line")?);
+        if c.start_line == 0 || c.end_line < c.start_line {
+            return Err("lines are 1-based, START-END".to_string());
+        }
+        if path == "plan" {
+            (c.path, c.plan) = (None, true);
+        }
+    }
+    Ok(c)
 }
 
 /// What a comment being written is on.
@@ -106,7 +136,11 @@ struct Planned {
     id: AiId,
     /// `AiWork::plan` when it was read.
     stamp: u64,
+    /// Its rows, what is picked and the comment being written. The filed comments it shows are
+    /// the review's (`View::plan_sync`): nibd keeps them, so they outlive this.
     plan: Plan,
+    /// The comment of the review that the one being written answers.
+    answering: Option<String>,
 }
 
 #[derive(Default)]
@@ -272,26 +306,7 @@ impl App {
             "resolve" => ReviewOp::Resolve { comment: id()?, resolved: true },
             "reopen" => ReviewOp::Resolve { comment: id()?, resolved: false },
             "remove" => ReviewOp::Remove { comment: id()? },
-            "comment" => {
-                // `PATH`, `PATH:LINE` or `PATH:START-END` (lines of the file as it is now); none:
-                // on the work as a whole. The daemon takes the lines' text as the anchor.
-                let mut c = ReviewComment { body: body()?, ..Default::default() };
-                if let Some(t) = target {
-                    let (path, lines) = match t.rsplit_once(':') {
-                        Some((p, l)) if !l.is_empty() && l.chars().all(|ch| ch.is_ascii_digit() || ch == '-') => (p, Some(l)),
-                        _ => (t, None),
-                    };
-                    c.path = Some(path.to_string());
-                    if let Some(l) = lines {
-                        let (a, b) = l.split_once('-').unwrap_or((l, l));
-                        (c.start_line, c.end_line) = (a.parse().map_err(|_| "bad line")?, b.parse().map_err(|_| "bad line")?);
-                        if c.start_line == 0 || c.end_line < c.start_line {
-                            return Err("lines are 1-based, START-END".to_string());
-                        }
-                    }
-                }
-                ReviewOp::Comment(c)
-            }
+            "comment" => ReviewOp::Comment(comment_on(target, body()?)?),
             other => return Err(format!("unknown review command {other:?}")),
         };
         Ok(self.diff_review_edit(op))
@@ -348,6 +363,7 @@ impl App {
         let ui = &mut self.diff;
         let at = ui.place();
         ui.review = review;
+        ui.plan_sync();
         ui.rebuild();
         ui.restore(at);
         let Some(message) = message else { return Task::none() };
@@ -513,12 +529,149 @@ impl App {
         if self.diff.plan_asked == Some((id, stamp)) {
             self.diff.plan_asked = None;
         }
-        if agent_of(self.diff.scope) == Some(id) {
-            if let Ok(Response::WorkPlan(Some(md))) = result {
-                self.diff.plan = Some(Planned { id, stamp, plan: Plan::new(&md) });
-            }
+        if agent_of(self.diff.scope) != Some(id) {
+            return Task::none();
+        }
+        let Ok(Response::WorkPlan(Some(md))) = result else { return Task::none() };
+        let ui = &mut self.diff;
+        match &mut ui.plan {
+            // Recorded again as it was: what is picked and being written there stays.
+            Some(p) if p.id == id && p.plan.text == md => p.stamp = stamp,
+            _ => ui.plan = Some(Planned { id, stamp, plan: Plan::new(&md), answering: None }),
+        }
+        ui.plan_sync();
+        let at = ui.place();
+        ui.rebuild();
+        ui.restore(at);
+        // Another plan: the comments on it are where their lines went (nibd finds them).
+        if self.diff.review.comments.iter().any(|c| c.plan) {
+            return self.diff_review_ask();
         }
         Task::none()
+    }
+
+    /// From the plan pane: a click on a row, on a draft's buttons, on a comment's ✕.
+    fn diff_plan_msg(&mut self, m: PlanMsg) -> Task<Message> {
+        // A comment being typed in the changes has the keys.
+        if self.diff.writing.is_some() {
+            return Task::none();
+        }
+        let Some(p) = &mut self.diff.plan else { return Task::none() };
+        match m {
+            PlanMsg::Save => return self.diff_plan_save(),
+            PlanMsg::Cancel => self.diff.plan_cancel(),
+            // A click picks a row; on the row picked, it opens a comment. One being written is
+            // filed first.
+            PlanMsg::Row(i) => {
+                self.focus = Focus::Main;
+                let again = p.plan.comments.draft.is_none() && p.plan.sel == Some((i, i));
+                let filed = self.diff_plan_save();
+                if let Some(p) = &mut self.diff.plan {
+                    if !again || !p.plan.write() {
+                        p.plan.sel = None;
+                        p.plan.update(PlanMsg::Row(i));
+                    }
+                }
+                return filed;
+            }
+            PlanMsg::Remove(comment) => {
+                // Sent, it is part of what the agent was told: resolve it instead.
+                if self.diff.review.comments.iter().any(|c| c.id == comment && c.round > 0) {
+                    return self.flash_info("already sent: resolve it (x) instead of taking it back");
+                }
+                return self.diff_review_edit(ReviewOp::Remove { comment });
+            }
+            PlanMsg::Fold => {}
+        }
+        Task::none()
+    }
+
+    /// File the comment being written in the plan pane: into the agent's review, with the lines
+    /// of the plan it is on (or as the answer it is). One with no words is dropped.
+    fn diff_plan_save(&mut self) -> Task<Message> {
+        let Some(p) = self.diff.plan.as_mut().filter(|p| p.plan.comments.draft.is_some()) else { return Task::none() };
+        let (answering, taken) = (p.answering.take(), p.plan.take());
+        // The keys stay in the pane, on the row it was on.
+        p.plan.step(0, false);
+        let Some((start_line, end_line, anchor, body)) = taken else { return Task::none() };
+        self.diff_review_edit(match answering {
+            Some(to) => ReviewOp::Reply { to, body },
+            None => ReviewOp::Comment(ReviewComment { plan: true, start_line, end_line, anchor, body, ..Default::default() }),
+        })
+    }
+
+    /// A key for the plan pane, which has the keys while one of its rows is picked or a comment
+    /// is being written in it. Tab picks a row, or lets go; then, as where a plan is approved
+    /// (D-068): ↑ / ↓ move, ⇧ takes in more rows, ↵ (or c) writes a comment on them; and as on
+    /// a comment in the changes: r answers the one under the rows picked, x resolves it or
+    /// opens it again, ⌫ takes back one not sent yet. `None`: the key isn't the pane's.
+    fn diff_plan_key(&mut self, chord: KeyChord, text: Option<&str>) -> Option<Task<Message>> {
+        let held = chord.ctrl || chord.logo;
+        let ui = &mut self.diff;
+        if agent_of(ui.scope).is_none() || !ui.plan_shown() {
+            return None;
+        }
+        let p = ui.plan.as_mut()?;
+        let by = match chord.key {
+            Key::Up => Some(-1),
+            Key::Down => Some(1),
+            _ => None,
+        };
+        // A comment being typed takes every key.
+        if let Some(d) = p.plan.comments.draft.as_mut() {
+            match chord.key {
+                Key::Esc => ui.plan_cancel(),
+                Key::Enter if chord.shift => d.insert("\n"),
+                Key::Enter => return Some(self.diff_plan_save()),
+                Key::Backspace if held => d.backspace_line(),
+                Key::Backspace if chord.alt => d.backspace_word(),
+                Key::Backspace => d.backspace(),
+                _ if by.is_some() && chord.shift && !held && !chord.alt && p.answering.is_none() => p.plan.step(by.unwrap(), true),
+                _ if !held => d.insert(&text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect::<String>()),
+                _ => {}
+            }
+            return Some(self.diff_plan_reveal());
+        }
+        if held || chord.alt {
+            return None;
+        }
+        if chord.key == Key::Tab {
+            if p.plan.sel.take().is_none() {
+                p.plan.step(0, false);
+            }
+            return Some(self.diff_plan_reveal());
+        }
+        let (start, end) = p.plan.picked()?;
+        // The comment under the rows picked: the last one still open, or the last.
+        let under = || p.plan.comments.list().iter().rev().filter(|c| start <= c.end_line && c.end_line <= end);
+        let here = under().find(|c| !c.resolved).or(under().next()).map(|c| (c.id.clone(), c.start_line, c.end_line, c.resolved));
+        match (chord.key, here) {
+            (Key::Up | Key::Char('k'), _) => p.plan.step(-1, chord.shift),
+            (Key::Down | Key::Char('j'), _) => p.plan.step(1, chord.shift),
+            (Key::Esc, _) => p.plan.sel = None,
+            (Key::Enter | Key::Char('c'), _) if !chord.shift => {
+                p.plan.write();
+            }
+            (Key::Char('r'), Some((id, start, end, _))) => {
+                p.plan.comments.open(start, end);
+                (p.answering, p.plan.sel) = (Some(id), None);
+            }
+            (Key::Char('x'), Some((comment, _, _, resolved))) => return Some(self.diff_review_edit(ReviewOp::Resolve { comment, resolved: !resolved })),
+            (Key::Backspace, Some((comment, ..))) => return Some(self.diff_plan_msg(PlanMsg::Remove(comment))),
+            _ => return None,
+        }
+        Some(self.diff_plan_reveal())
+    }
+
+    /// Scroll the plan pane to about where the rows picked (or the comment being written) are:
+    /// their share of the plan's lines decides how far down (rows are drawn at different
+    /// heights, so it's a guess).
+    fn diff_plan_reveal(&self) -> Task<Message> {
+        let Some(p) = &self.diff.plan else { return Task::none() };
+        let line = p.plan.comments.draft.as_ref().map(|d| d.end_line).or(p.plan.picked().map(|(_, end)| end));
+        let (Some(line), Some(first), Some(last)) = (line, p.plan.rows.first().map(|r| r.start_line), p.plan.rows.last().map(|r| r.end_line)) else { return Task::none() };
+        let y = if last > first { (line.saturating_sub(first) as f32 / (last - first) as f32).clamp(0.0, 1.0) } else { 0.0 };
+        operate(operation::scrollable::snap_to(WidgetId::from(PLAN_ID), operation::scrollable::RelativeOffset { x: None, y: Some(y) }))
     }
 
     fn diff_ask(&mut self) -> Task<Message> {
@@ -574,14 +727,11 @@ impl App {
                     *f = Some(!open);
                 }
             }
-            Msg::Plan(m) => {
-                if let Some(p) = &mut self.diff.plan {
-                    p.plan.update(m);
-                }
-            }
+            Msg::Plan(m) => return self.diff_plan_msg(m),
             Msg::File(i) => {
                 self.focus = Focus::Main;
                 let ui = &mut self.diff;
+                ui.plan_let_go();
                 if let Some(r) = ui.rows.iter().position(|r| matches!(r, Row::File { file, .. } if *file == i)) {
                     ui.cursor = r;
                     ui.top = r.min(ui.max_top());
@@ -604,6 +754,7 @@ impl App {
             }
             Msg::Event(DiffEvent::Click { row }) => {
                 self.focus = Focus::Main;
+                self.diff.plan_let_go();
                 self.diff.cursor = row.min(self.diff.rows.len().saturating_sub(1));
                 if matches!(self.diff.rows.get(row), Some(Row::File { .. })) {
                     self.diff.fold(None);
@@ -645,6 +796,9 @@ impl App {
         // A comment being typed takes every key.
         if self.diff.writing.is_some() {
             return Some(self.diff_writing_key(chord, text));
+        }
+        if let Some(t) = self.diff_plan_key(chord, text.as_deref()) {
+            return Some(t);
         }
         let held = if cfg!(target_os = "macos") { chord.logo } else { chord.ctrl || chord.logo };
         if held && chord.key == Key::Enter && agent_of(self.diff.scope).is_some() {
@@ -692,7 +846,13 @@ impl App {
             Key::Char('j') => ui.step(1),
             Key::Char('k') => ui.step(-1),
             Key::Char('n') => ui.jump(false, |r| matches!(r, Row::Hunk { .. })),
-            Key::Char('p') if chord.shift => ui.plan_hidden = !ui.plan_hidden,
+            Key::Char('p') if chord.shift => {
+                // Put away, the comments on the plan show above the files instead.
+                ui.plan_hidden = !ui.plan_hidden;
+                let at = ui.place();
+                ui.rebuild();
+                ui.restore(at);
+            }
             Key::Char('p') => ui.jump(true, |r| matches!(r, Row::Hunk { .. })),
             Key::Char(']') => ui.jump(false, |r| matches!(r, Row::File { .. })),
             Key::Char('[') => ui.jump(true, |r| matches!(r, Row::File { .. })),
@@ -822,7 +982,7 @@ impl App {
                 "round": ui.review.round,
                 "since": ui.review.since,
                 "comments": ui.review.comments.iter().map(|c| json!({
-                    "id": c.id, "path": c.path, "old": c.old, "start_line": c.start_line, "end_line": c.end_line, "anchor": c.anchor,
+                    "id": c.id, "path": c.path, "old": c.old, "plan": c.plan, "start_line": c.start_line, "end_line": c.end_line, "anchor": c.anchor,
                     "body": c.body, "author": c.author, "round": c.round, "resolved": c.resolved, "drifted": c.drifted,
                     "replies": c.replies.iter().map(|r| json!({ "id": r.id, "body": r.body, "author": r.author })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
@@ -831,7 +991,12 @@ impl App {
             "mark": ui.mark,
             "landing": ui.landing,
             "groups": { "yours": self.diff_group_open(0), "agents": self.diff_group_open(1) },
-            "plan": ui.plan.as_ref().map(|p| json!({ "title": p.plan.title(), "text": p.plan.text, "shown": !ui.plan_hidden })),
+            // Its `comments` are the review's that are on the plan, on the rows they show under.
+            "plan": ui.plan.as_ref().map(|p| {
+                let mut v = p.plan.json();
+                (v["text"], v["shown"], v["answering"]) = (json!(p.plan.text), json!(!ui.plan_hidden), json!(p.answering));
+                v
+            }),
             "loaded": ui.loaded,
             "repo": ui.repo,
             "adds": ui.files.iter().map(|f| f.adds).sum::<u32>(),
@@ -928,7 +1093,15 @@ impl App {
         let mut acts = row![].spacing(12);
         if let Some(id) = agent_of(ui.scope) {
             let open = ui.review.comments.iter().filter(|c| !c.resolved).count();
-            acts = acts.push(self.hint("c", "comment on this line")).push(self.hint("⇧↑↓", "take in more lines")).push(self.hint("⇧C", "comment on it all"));
+            // The plan pane has the keys: what they do there.
+            if ui.plan_shown() && ui.plan.as_ref().is_some_and(|p| p.plan.sel.is_some() || p.plan.comments.draft.is_some()) {
+                acts = acts.push(self.hint("↵", "comment on this part of the plan")).push(self.hint("⇧↑↓", "take in more")).push(self.hint("tab", "back to the changes"));
+            } else {
+                acts = acts.push(self.hint("c", "comment on this line")).push(self.hint("⇧↑↓", "take in more lines")).push(self.hint("⇧C", "comment on it all"));
+                if ui.plan_shown() {
+                    acts = acts.push(self.hint("tab", "comment on the plan"));
+                }
+            }
             if !ui.review.comments.is_empty() {
                 acts = acts.push(self.hint("r", "reply")).push(self.hint("x", "resolve"));
             }
@@ -992,12 +1165,27 @@ impl App {
         .padding(Padding { left: 12.0, right: 12.0, top: 6.0, bottom: 6.0 });
 
         let message = |s: String, c: Color| -> Element<'_, Message> { container(text(s).size(12).color(c)).center(Length::Fill).into() };
+        // The plan beside the work, like a pull request's description.
+        let plan_pane = || -> Option<Element<'_, Message>> {
+            let p = ui.plan.as_ref().filter(|_| !ui.plan_hidden)?;
+            let look = plan::Look::of(th, self.face.font, self.face.size.min(14.0));
+            // An agent's plan is commented on like its changes; the comments are the review's.
+            let live = agent_of(ui.scope).is_some();
+            let pane = column![
+                container(text("PLAN").size(10).color(dim)).padding(Padding { left: 14.0, top: 8.0, bottom: 2.0, right: 0.0 }),
+                scrollable(container(plan::view(&p.plan, &look, live, |m| Message::Diff(Msg::Plan(m)))).padding(Padding { left: 14.0, right: 16.0, top: 6.0, bottom: 12.0 }))
+                    .id(WidgetId::from(PLAN_ID))
+                    .style(crate::theme::scrollbar)
+                    .height(Length::Fill),
+            ];
+            Some(container(pane).width(Length::FillPortion(2)).into())
+        };
         let body: Element<'_, Message> = if !ui.loaded {
             message("Asking git…".into(), dim)
         } else if !ui.repo {
             message("This folder is not a git repository.".into(), dim)
         } else if ui.files.is_empty() {
-            message(
+            let nothing = message(
                 match ui.scope {
                     DiffScope::Head => "Nothing changed since the last commit.",
                     DiffScope::Unstaged => "Nothing left to stage.",
@@ -1008,7 +1196,12 @@ impl App {
                 }
                 .into(),
                 dim,
-            )
+            );
+            // An agent that has planned but not started: its plan is all there is to read.
+            match plan_pane() {
+                Some(pane) => row![pane, self.vrule(), container(nothing).width(Length::FillPortion(3))].into(),
+                None => nothing,
+            }
         } else {
             let here = ui.rows.get(ui.cursor).and_then(Row::file);
             let list = column(ui.files.iter().enumerate().map(|(i, f)| {
@@ -1064,16 +1257,8 @@ impl App {
             let list = scrollable(list).style(crate::theme::scrollbar).width(LIST_WIDTH).height(Length::Fill);
             let view = DiffView::new(&ui.files, &ui.rows, &ui.paint, th, ui.top, ui.cursor, focused, self.face, |e| Message::Diff(Msg::Event(e))).mark(ui.mark);
             let mut body = row![list, self.vrule()];
-            if let Some(p) = ui.plan.as_ref().filter(|_| !ui.plan_hidden) {
-                // The plan beside the work, like a pull request's description.
-                let look = plan::Look::of(th, self.face.font, self.face.size.min(14.0));
-                let pane = column![
-                    container(text("PLAN").size(10).color(dim)).padding(Padding { left: 14.0, top: 8.0, bottom: 2.0, right: 0.0 }),
-                    scrollable(container(plan::view(&p.plan, &look, false, |m| Message::Diff(Msg::Plan(m)))).padding(Padding { left: 14.0, right: 16.0, top: 6.0, bottom: 12.0 }))
-                        .style(crate::theme::scrollbar)
-                        .height(Length::Fill),
-                ];
-                body = body.push(container(pane).width(Length::FillPortion(2))).push(self.vrule());
+            if let Some(pane) = plan_pane() {
+                body = body.push(pane).push(self.vrule());
             }
             body.push(container(Element::from(view)).width(Length::FillPortion(3))).into()
         };
@@ -1088,6 +1273,44 @@ impl View {
         // Agents and their branches belong to the old daemon too.
         let scope = if agent_of(self.scope).is_some() || self.scope == DiffScope::Everyone { DiffScope::Head } else { self.scope };
         *self = View { scope, poll, polling: self.polling, height: self.height, plan_hidden: self.plan_hidden, ..Default::default() };
+    }
+
+    /// The plan pane shows.
+    fn plan_shown(&self) -> bool {
+        self.plan.is_some() && !self.plan_hidden
+    }
+
+    /// The plan pane shows the review's comments that are on the plan. Called when either
+    /// changed.
+    fn plan_sync(&mut self) {
+        let Some(p) = &mut self.plan else { return };
+        let on_plan = self.review.comments.iter().filter(|c| c.plan && c.start_line > 0).map(|c| Comment {
+            id: c.id.clone(),
+            start_line: c.start_line,
+            end_line: c.end_line,
+            anchor: c.anchor.clone(),
+            body: c.body.clone(),
+            author: c.author.clone(),
+            resolved: c.resolved,
+            drifted: c.drifted,
+            replies: c.replies.iter().map(|r| Reply { id: r.id.clone(), body: r.body.clone(), author: r.author.clone() }).collect(),
+        });
+        p.plan.show(on_plan.collect());
+    }
+
+    /// Drop the comment being written in the plan pane; the row it was on is picked again.
+    fn plan_cancel(&mut self) {
+        let Some(p) = &mut self.plan else { return };
+        p.answering = None;
+        p.plan.cancel();
+        p.plan.step(0, false);
+    }
+
+    /// The keys go back to the changes (a comment being written in the plan pane keeps them).
+    fn plan_let_go(&mut self) {
+        if let Some(p) = &mut self.plan {
+            p.plan.sel = None;
+        }
     }
 
     fn max_top(&self) -> usize {
@@ -1260,6 +1483,7 @@ impl View {
             (Some(p), false, 0) => format!(" · {p}"),
             (Some(p), false, _) if c.start_line == c.end_line => format!(" · {p}:{}", c.start_line),
             (Some(p), false, _) => format!(" · {p}:{}–{}", c.start_line, c.end_line),
+            (None, ..) if c.plan => format!(" · on the plan, {}", super::comment::lines_label(c.start_line, c.end_line)),
             (None, ..) => " · on the work as a whole".to_string(),
         };
         let lines = if placed && c.start_line > 0 && c.start_line != c.end_line { format!(" · lines {}–{}", c.start_line, c.end_line) } else { String::new() };
@@ -1317,8 +1541,10 @@ impl View {
         self.paint.clear();
         let files = std::mem::take(&mut self.files);
         let comments = std::mem::take(&mut self.review.comments);
-        // Above the files: comments on the work as a whole, and on files not in this diff.
-        for c in comments.iter().filter(|c| c.path.as_deref().is_none_or(|p| !files.iter().any(|f| f.path == p))) {
+        // Above the files: comments on the work as a whole, on files not in this diff, and
+        // (while its pane, where they show otherwise, is put away) on the plan.
+        let pane = self.plan_shown();
+        for c in comments.iter().filter(|c| !(c.plan && pane) && c.path.as_deref().is_none_or(|p| !files.iter().any(|f| f.path == p))) {
             self.talk(None, c, false);
             self.draft_rows(None, |w| matches!(&w.on, On::Reply { to } if *to == c.id));
         }
@@ -1660,6 +1886,110 @@ mod tests {
         assert!(a.diff.review.comments.is_empty());
         key(&mut a, "c");
         assert!(a.diff.writing.is_none());
+    }
+
+    #[test]
+    fn the_plan_is_commented_on_in_the_same_review() {
+        let reviews = |a: &App| a.pending.values().filter(|p| matches!(p, Pending::DiffReview { id: 3 })).count();
+        let typed = |a: &mut App, s: &str| {
+            for c in s.chars() {
+                let _ = a.update(Message::Key { chord: KeyChord::new(Key::Char(c)), text: Some(c.to_string()), repeat: false });
+            }
+        };
+        const PLAN: &str = "# Add sum\n\nWhy: asked.\n\n1. write it\n2. test it\n";
+        let mut a = app();
+        let _ = a.update(Message::Control(Command::ToggleDiff));
+        let _ = a.diff_scope(DiffScope::Agent(3));
+        a.diff.cols = 100;
+        let _ = a.diff_work(3, AiWork { plan: Some(7), ..Default::default() });
+        let _ = a.on_diff_plan(3, 7, Ok(Response::WorkPlan(Some(PLAN.into()))));
+        answer(&mut a, two_files(), 1);
+        let rows = a.diff.rows.len();
+
+        // Tab gives the pane the keys: ↓ and ⇧↓ pick its rows (the cursor in the changes stays),
+        // ↵ writes on them, every key goes to the comment, ↵ files it in the agent's review.
+        for k in ["tab", "down", "down", "shift+down", "enter"] {
+            key(&mut a, k);
+        }
+        assert_eq!(a.diff.cursor, 0);
+        assert_eq!(a.diff_json()["plan"]["draft"]["start_line"], 5);
+        typed(&mut a, "why j");
+        assert_eq!(a.diff_json()["plan"]["draft"], json!({ "start_line": 5, "end_line": 6, "body": "why j", "editing": null }));
+        // The plan is read again as it was (the agent recorded it twice): nothing is lost.
+        let _ = a.on_diff_plan(3, 8, Ok(Response::WorkPlan(Some(PLAN.into()))));
+        assert_eq!(a.diff.plan.as_ref().map(|p| (p.stamp, p.plan.comments.draft.is_some())), Some((8, true)));
+        key(&mut a, "enter");
+        let p = &a.diff.plan.as_ref().unwrap().plan;
+        assert!(p.comments.draft.is_none() && p.sel == Some((3, 3)) && reviews(&a) == 1, "filed with nibd; the keys stay in the pane");
+
+        // nibd's answer: the comment shows in the pane, under its rows, not among the changes.
+        let c1 = ReviewComment { id: "c1".into(), plan: true, start_line: 5, end_line: 6, anchor: "1. write it\n2. test it".into(), body: "why j".into(), author: "user".into(), ..Default::default() };
+        let whole = ReviewComment { id: "c2".into(), body: "and tests".into(), author: "user".into(), ..Default::default() };
+        let _ = a.on_diff_review(3, Ok(Response::Review(Review { round: 0, since: false, comments: vec![c1.clone(), whole.clone()] })));
+        let j = a.diff_json();
+        assert_eq!((j["plan"]["comments"].as_array().map(Vec::len), j["plan"]["comments"][0]["id"].as_str(), j["review"]["comments"][0]["plan"].as_bool()), (Some(1), Some("c1"), Some(true)));
+        assert_eq!(a.diff.rows.len(), rows + 3, "c2 above the files: head, body, a gap");
+        // On its row: r answers it, x resolves it, ⌫ takes it back (not sent yet).
+        key(&mut a, "r");
+        typed(&mut a, "ok");
+        assert_eq!(a.diff_json()["plan"]["answering"], "c1");
+        key(&mut a, "enter");
+        key(&mut a, "x");
+        key(&mut a, "backspace");
+        assert_eq!(reviews(&a), 4);
+        // Sent, with the agent's answer: it shows under it, and is no longer taken back.
+        let sent = ReviewComment { round: 1, replies: vec![nib_proto::ReviewReply { id: "r3".into(), body: "tests first now".into(), author: "claude-1".into() }], ..c1 };
+        let _ = a.on_diff_review(3, Ok(Response::Review(Review { round: 1, since: false, comments: vec![sent.clone()] })));
+        assert_eq!(a.diff_json()["plan"]["comments"][0]["replies"][0]["body"], "tests first now");
+        let _ = a.update(Message::Diff(Msg::Plan(PlanMsg::Remove("c1".into()))));
+        assert_eq!(reviews(&a), 4);
+        // Tab lets go: the keys are the changes' again.
+        key(&mut a, "tab");
+        key(&mut a, "down");
+        assert_eq!((a.diff.plan.as_ref().unwrap().plan.sel, a.diff.cursor), (None, 1));
+
+        // The pane put away: the comment shows above the files instead, and back.
+        key(&mut a, "shift+p");
+        assert!(a.diff.rows.iter().any(|r| matches!(r, Row::Talk { text, .. } if text == "c1 · user · on the plan, lines 5–6")), "{:?}", a.diff.rows);
+        key(&mut a, "tab");
+        assert_eq!(a.diff.plan.as_ref().unwrap().plan.sel, None, "hidden, it takes no keys");
+        key(&mut a, "shift+p");
+        assert_eq!(a.diff.rows.len(), rows);
+        // A click picks a row, a second one writes on it.
+        let _ = a.update(Message::Diff(Msg::Plan(PlanMsg::Row(1))));
+        let _ = a.update(Message::Diff(Msg::Plan(PlanMsg::Row(1))));
+        assert_eq!(a.diff_json()["plan"]["draft"]["start_line"], 3);
+        key(&mut a, "esc");
+
+        // Another plan: it is shown, and the review is read again (nibd finds where the lines
+        // of each comment went); one whose lines are gone shows under a row all the same.
+        a.connected = true;
+        let _ = a.diff_work(3, AiWork { plan: Some(9), ..Default::default() });
+        let _ = a.on_diff_plan(3, 9, Ok(Response::WorkPlan(Some("# Add sum\n\n1. test it\n".into()))));
+        assert_eq!(reviews(&a), 5);
+        let _ = a.on_diff_review(3, Ok(Response::Review(Review { round: 1, since: false, comments: vec![ReviewComment { drifted: true, start_line: 3, end_line: 3, ..sent }] })));
+        let c = &a.diff_json()["plan"]["comments"][0];
+        assert_eq!((c["start_line"].as_u64(), c["drifted"].as_bool(), c["anchor"].as_str()), (Some(3), Some(true), Some("1. write it\n2. test it")));
+    }
+
+    #[test]
+    fn the_socket_comments_on_the_plan() {
+        assert_eq!(comment_on(Some("plan:3-4"), "x".into()), Ok(ReviewComment { plan: true, start_line: 3, end_line: 4, body: "x".into(), ..Default::default() }));
+        assert_eq!(comment_on(Some("./plan:3"), "x".into()).map(|c| (c.plan, c.path)), Ok((false, Some("./plan".to_string()))));
+        assert_eq!(comment_on(Some("plan"), "x".into()).map(|c| (c.plan, c.path)), Ok((false, Some("plan".to_string()))), "no lines: a file");
+        assert!(comment_on(Some("plan:4-3"), "x".into()).is_err());
+        let ask = |a: &mut App, target: &str| {
+            let (call, rx) = crate::control::Call::test(json!({ "cmd": "diff.review", "what": "comment", "target": target, "body": "why?" }));
+            let _ = a.update(Message::Ctl(call));
+            rx.try_recv().unwrap()
+        };
+        let mut a = app();
+        let _ = a.update(Message::Control(Command::ToggleDiff));
+        assert_eq!(ask(&mut a, "plan:3")["ok"], false, "not an agent's work");
+        let _ = a.diff_scope(DiffScope::Agent(3));
+        assert_eq!(ask(&mut a, "plan:3")["ok"], true);
+        assert_eq!(ask(&mut a, "plan:0")["ok"], false);
+        assert_eq!(a.pending.values().filter(|p| matches!(p, Pending::DiffReview { id: 3 })).count(), 1);
     }
 
     #[test]

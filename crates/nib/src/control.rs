@@ -393,9 +393,10 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
   diff open [SCOPE]    show the diff tab (state.diff): head, unstaged, staged, everyone, agent:N or an
                        agent's name (state.diff.scopes lists them), since:N (what agent N changed
                        since its work was last reviewed)
-  diff comment [--on PATH[:LINE[-END]]] TEXT
+  diff comment [--on PATH[:LINE[-END]] | --on plan:LINE[-END]] TEXT
                        review the agent's work the diff tab shows: a comment on lines of a file as
-                       it is now, on a file, or (no --on) on the work as a whole
+                       it is now, on a file, on lines of the agent's plan (state.diff.plan.text;
+                       a file called plan is ./plan), or (no --on) on the work as a whole
   diff reply ID TEXT   answer comment ID; diff resolve|reopen|remove ID
   diff send            send the open comments to the agent (the next round; state.diff.review)
   ai accept|keep       the shown agent said its job is done (state.ai.chats[].finished): accept it
