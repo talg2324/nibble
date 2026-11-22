@@ -24,6 +24,7 @@ mod pty;
 mod review;
 mod search;
 mod serve;
+mod tokens;
 mod tree;
 mod watch;
 mod web;
@@ -58,8 +59,8 @@ fn main() -> anyhow::Result<()> {
         Some("work") => std::process::exit(work::cli(&args[1..])),
         // And their answers to the user's review of their work (see `review`).
         Some("review") => std::process::exit(review::cli(&args[1..])),
-        // And the project's servers (see `serve`).
-        Some("serve") => std::process::exit(serve::cli(&args[1..])),
+        // And the project's apps (see `serve`).
+        Some("app") => std::process::exit(serve::cli(&args[1..])),
         // And the page of the project's app in the window's web tab (see `web`).
         Some("web") => std::process::exit(web::cli(&args[1..])),
         None | Some("--stdio") => {}
@@ -567,8 +568,8 @@ impl State {
                 let id = self.ptys.lock().unwrap().open(&root, Some(cmd), cols, rows, &env, self.tx.clone())?;
                 Ok(Response::PtyOpened { id })
             }
-            Request::Serve { op } => match &self.serve {
-                Some(serve) => serve.lock().unwrap().request(op).map(Response::Servers),
+            Request::App { op, user } => match &self.serve {
+                Some(serve) => serve.lock().unwrap().request(op, user).map(Response::Apps),
                 None => Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")),
             },
             Request::Shutdown => Ok(Response::Ok),

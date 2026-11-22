@@ -77,11 +77,15 @@ impl Relay {
         let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
         files.sort();
         for file in &files {
-            let req: Option<Value> = fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            let mut req: Option<Value> = fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok());
             let _ = fs::remove_file(file);
             let Some(name) = file.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+            // Only an agent nib started asks (its token says so), and the window never sees it.
+            let token = req.as_mut().and_then(Value::as_object_mut).and_then(|o| o.remove("token"));
+            let agent = token.as_ref().and_then(Value::as_str).and_then(crate::tokens::who);
             // Whatever wrote the file: only what an agent may ask goes to the window.
             let refused = match &req {
+                _ if agent.is_none() && req.is_some() => Some("refused: the request does not come from an agent nib started (no valid $NIB_TOKEN)".to_string()),
                 Some(r) => nib_proto::web::agent_may(r["cmd"].as_str().unwrap_or("")).err(),
                 None => Some("not a request".to_string()),
             };
@@ -189,13 +193,15 @@ fn next_shot() -> PathBuf {
     (1..).map(|n| dir.join(format!("web-{n:03}.png"))).find(|p| !p.exists()).unwrap_or_else(|| dir.join("web.png"))
 }
 
-/// Leave `req` for the daemon and wait for the window's answer.
-fn ask(dir: &Path, req: &Value) -> Value {
+/// Leave `req` for the daemon, with this agent's token, and wait for the window's answer.
+fn ask(dir: &Path, token: &str, req: &Value) -> Value {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let name = format!("{nanos:032}-{}-{}.json", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let tmp = dir.join("req").join(format!(".{name}.tmp"));
-    let sent = fs::write(&tmp, req.to_string()).and_then(|_| fs::rename(&tmp, dir.join("req").join(&name)));
+    let mut sent_req = req.clone();
+    sent_req["token"] = json!(token);
+    let sent = fs::write(&tmp, sent_req.to_string()).and_then(|_| fs::rename(&tmp, dir.join("req").join(&name)));
     if let Err(e) = sent {
         return json!({ "ok": false, "error": format!("nib-web: {e}") });
     }
@@ -260,7 +266,8 @@ pub fn cli(args: &[String]) -> i32 {
     };
     let reply = match prepare(&words) {
         Ok((req, shot)) => {
-            let reply = ask(&dir, &req);
+            crate::tokens::private(&dir);
+            let reply = ask(&dir, &std::env::var(crate::tokens::VAR).unwrap_or_default(), &req);
             match shot {
                 Some(path) if reply["ok"] == true => save_shot(reply, &path),
                 _ => reply,
@@ -334,21 +341,25 @@ mod tests {
             }
         });
         let dir = d.join("web");
+        let token = crate::tokens::issue("claude-web-relay-test");
         let (req, _) = prepare(&["click", "4"]).unwrap();
-        assert_eq!(ask(&dir, &req), json!({ "ok": true, "echo": { "cmd": "web.click", "ref": "4" } }));
+        assert_eq!(ask(&dir, &token, &req), json!({ "ok": true, "echo": { "cmd": "web.click", "ref": "4" } }));
         // Several at once each get their own answer.
-        let asked: Vec<_> = (0..8).map(|n| (n, dir.clone())).map(|(n, dir)| thread::spawn(move || ask(&dir, &json!({ "cmd": "web.fill", "ref": n }))["echo"]["ref"].clone())).collect();
+        let asked: Vec<_> = (0..8).map(|n| (n, dir.clone())).map(|(n, dir)| (n, dir, token.clone())).map(|(n, dir, token)| thread::spawn(move || ask(&dir, &token, &json!({ "cmd": "web.fill", "ref": n }))["echo"]["ref"].clone())).collect();
         assert_eq!(asked.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>(), (0..8).map(|n| json!(n)).collect::<Vec<_>>());
-        // A file that is not what `nib-web` writes never reaches the window.
-        for (n, bad) in ["{ \"cmd\": \"web.eval\", \"js\": \"1\" }", "{ \"cmd\": \"run\", \"command\": \"quit\" }", "[]", "junk"].iter().enumerate() {
+        // A file that is not what `nib-web` writes never reaches the window: what an agent may
+        // not ask, even with its token; anything without an agent's token; not a request at all.
+        let with = |cmd: &str| json!({ "cmd": cmd, "js": "1", "token": token }).to_string();
+        let bad = [with("web.eval"), with("run"), json!({ "cmd": "web.click", "ref": "4" }).to_string(), json!({ "cmd": "web.click", "ref": "4", "token": "0".repeat(32) }).to_string(), "[]".into(), "junk".into()];
+        for (n, bad) in bad.iter().enumerate() {
             fs::write(dir.join("req").join(format!("bad{n}.json")), bad).unwrap();
         }
         let t = Instant::now();
-        while !(0..4).all(|n| dir.join("res").join(format!("bad{n}.json")).is_file()) {
+        while !(0..bad.len()).all(|n| dir.join("res").join(format!("bad{n}.json")).is_file()) {
             assert!(t.elapsed() < Duration::from_secs(10), "refusals never written");
             thread::sleep(Duration::from_millis(10));
         }
-        for n in 0..4 {
+        for n in 0..bad.len() {
             let v: Value = serde_json::from_slice(&fs::read(dir.join("res").join(format!("bad{n}.json"))).unwrap()).unwrap();
             assert_eq!(v["ok"], false, "{v}");
             assert!(v.get("echo").is_none());

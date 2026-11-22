@@ -251,31 +251,113 @@ pub enum Request {
     /// that contain it (smart case: case-insensitive unless it has a capital). Folders whose name
     /// starts with `.`, gitignored files and binary files are skipped. At most `max` lines.
     Search { query: String, max: u32 },
-    /// The project's servers (`$NIBDIR/serve.json` on the daemon's machine): read, define,
-    /// start, stop -> `Servers`, every server as it is after `op`. Starting and stopping are
-    /// begun, not waited for: `ServerNotify::Server` says how each goes on.
-    Serve { op: ServeOp },
+    /// The project's apps (`$NIBDIR/apps.json` on the daemon's machine): read, define, start,
+    /// stop, approve -> `Apps`, every app as it is after `op`. Starting and stopping are begun,
+    /// not waited for: `ServerNotify::App` says how each goes on. `user`: the person at the
+    /// window asked (a click, a key they pressed); false for `nib ctl` and whatever else the
+    /// window passes on. Only the user approves an app, and the user's requests start only
+    /// approved ones (see `AppOp::Approve`).
+    App { op: AppOp, user: bool },
     Shutdown,
 }
 
-/// What to do with the project's servers (`Request::Serve`).
+/// What to do with the project's apps (`Request::App`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ServeOp {
+pub enum AppOp {
     List,
-    /// Add or replace one definition. A running server keeps the one it was started with
-    /// until it is restarted.
-    Set { name: String, def: ServerDef },
-    /// Stop one and forget its definition.
+    /// Add or replace one app, whole. Running servers keep the definition they were started
+    /// with until restarted. Not from the user: the app waits for the user's approval.
+    Set { name: String, def: AppDef },
+    /// Stop its servers and forget it.
     Remove { name: String },
-    /// Start these (none named: all), each after the servers it comes `after`.
+    /// Start these apps (none named: every approved one), each server after those it comes
+    /// `after`.
     Up { names: Vec<String> },
-    /// Stop these (none named: all).
+    /// Stop these apps (none named: all).
     Down { names: Vec<String> },
-    /// Stop one, wait for its port to be free, start it.
-    Restart { name: String },
+    /// Stop the app's servers (or just `server`), wait for their ports to be free, start them.
+    Restart { name: String, server: Option<String> },
+    /// The user saw the app's commands (`AppInfo::hash` names that definition) and lets them
+    /// run. Only with `user`; refused if the app changed since (another hash).
+    Approve { name: String, hash: String },
 }
 
-/// One server of the project, as `serve.json` defines it.
+/// One app of the project, as `apps.json` defines it: the processes it runs, and the page to
+/// show once they answer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppDef {
+    /// What the user calls it (absent: its name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The page to show once its server's port answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<AppPage>,
+    /// Its processes, by name.
+    #[serde(default)]
+    pub servers: std::collections::BTreeMap<String, ServerDef>,
+}
+
+/// An app's page: `http://127.0.0.1:PORT<path>`, the port being `server`'s.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppPage {
+    pub server: String,
+    pub path: String,
+}
+
+/// Who last defined an app, and when.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppOrigin {
+    /// `user`, `agent:NAME`, or `nib ctl`.
+    pub by: String,
+    /// Seconds since 1970.
+    pub at: u64,
+}
+
+/// An app and how it is doing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppInfo {
+    pub name: String,
+    pub def: AppDef,
+    /// Its servers, in the order of their names.
+    pub servers: Vec<ServerInfo>,
+    #[serde(default)]
+    pub origin: Option<AppOrigin>,
+    /// What `AppOp::Approve` gives to approve this definition.
+    #[serde(default)]
+    pub hash: String,
+    /// The user approved this definition, as it is now.
+    #[serde(default)]
+    pub approved: bool,
+    /// Its definition was removed: forget it.
+    #[serde(default)]
+    pub removed: bool,
+}
+
+impl AppInfo {
+    /// What the user calls it.
+    pub fn title(&self) -> &str {
+        self.def.title.as_deref().filter(|t| !t.trim().is_empty()).unwrap_or(&self.name)
+    }
+
+    /// How it is, said once: the most telling of its servers' states (a failure, then one on
+    /// its way, then ready; stopped only when all are).
+    pub fn state(&self) -> ServerState {
+        let rank = |s: &ServerState| match s {
+            ServerState::Exited(_) | ServerState::PortTaken => 3,
+            ServerState::Waiting | ServerState::Starting => 2,
+            ServerState::Ready => 1,
+            ServerState::Stopped => 0,
+        };
+        self.servers.iter().map(|s| s.state).max_by_key(rank).unwrap_or_default()
+    }
+
+    /// Any of its servers runs or is on its way.
+    pub fn running(&self) -> bool {
+        self.servers.iter().any(|s| s.state == ServerState::Ready || s.state.coming())
+    }
+}
+
+/// One process of an app.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ServerDef {
     /// Run by the user's shell.
@@ -283,20 +365,14 @@ pub struct ServerDef {
     /// Where it listens (on 127.0.0.1): how nib tells that it is ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Servers whose ports must answer before this one is started.
+    /// Servers of the same app whose ports must answer before this one is started.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<String>,
-    /// A path (`/`): once the port answers, the window shows `http://127.0.0.1:PORT<view>`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<String>,
     /// Where it runs, relative to the project root (absent: the root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
-    /// A name for its page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,7 +392,7 @@ pub enum ServerState {
 }
 
 impl ServerState {
-    /// As `nib ctl serve list` and `nib-serve` say it.
+    /// As `nib ctl app list` and `nib-app` say it.
     pub fn name(self) -> String {
         match self {
             ServerState::Stopped => "stopped".into(),
@@ -335,9 +411,10 @@ impl ServerState {
     }
 }
 
-/// A server and how it is doing.
+/// A server of an app and how it is doing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ServerInfo {
+    /// Its name in its app.
     pub name: String,
     pub def: ServerDef,
     pub state: ServerState,
@@ -345,9 +422,6 @@ pub struct ServerInfo {
     /// `PtyClose` stops the server).
     #[serde(default)]
     pub pty: Option<PtyId>,
-    /// Its definition was removed: forget it.
-    #[serde(default)]
-    pub removed: bool,
 }
 
 /// The directories the file tree can show. Paths in `Tree` / `Fs` are relative to it.
@@ -870,7 +944,7 @@ pub enum Response {
     ReviewSent { review: Review, message: String },
     Search(SearchResults),
     /// In the order of their names.
-    Servers(Vec<ServerInfo>),
+    Apps(Vec<AppInfo>),
     Ok,
 }
 
@@ -1004,9 +1078,9 @@ pub enum ServerNotify {
         path: String,
         mtime_ns: Option<u128>,
     },
-    /// One of the project's servers (`Request::Serve`) changed: its state, its terminal, its
-    /// definition. Sent before any `PtyOutput` of a terminal it names.
-    Server(ServerInfo),
+    /// One of the project's apps (`Request::App`) changed: a server's state or terminal, its
+    /// definition, its approval. Sent before any `PtyOutput` of a terminal it names.
+    App(AppInfo),
     /// An agent's `nib-web …`: a request for the window's web tab, as the JSON object its
     /// control socket takes (`{"cmd": "web.read", …}`; `web::agent_may` says which). The
     /// window answers with `ClientNotify::WebReply` carrying the same `id`.

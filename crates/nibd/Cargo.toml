@@ -17,6 +17,8 @@ nucleo = "0.5"
 # A server's log read as its terminal shows it (ConPTY repaints the screen on a resize); the
 # version the window's terminals use, so it builds once.
 vt100 = "0.18"
+# What names an app definition the user approved (serve.rs); the version already in the tree.
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 # Process liveness (places.rs) and hiding child consoles. Already in the tree via other crates.

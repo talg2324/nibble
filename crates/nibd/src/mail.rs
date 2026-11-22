@@ -104,6 +104,8 @@ pub fn dir(scratch: Option<&Path>) -> Option<PathBuf> {
     for sub in ["outbox", "inbox", "waiting", "bin"] {
         fs::create_dir_all(dir.join(sub)).ok()?;
     }
+    // Requests for the apps and the web tab are left here: nobody else's to write in.
+    crate::tokens::private(&dir);
     // `nib-mail`: the command agents run (its folder goes on their PATH). One fixed name, so a
     // harness can be told once that it is allowed. It runs this very exe, wherever it was built
     // or installed. A `sh` script for Unix and for Git Bash (which is how Claude Code runs
@@ -119,10 +121,14 @@ fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
     let exe = exe.display().to_string();
     // `C:/…` is the form Git Bash and every MSYS tool take; on Unix there are no `\` to change.
     let sh_exe = if cfg!(windows) { exe.replace('\\', "/") } else { exe.clone() };
-    // `nib-work` (see `work`) is the same binary's other command for agents; `nib-serve` (see
-    // `serve`) starts and stops the project's servers; `nib-web` (see `web`) reads and operates
+    // `nib-work` (see `work`) is the same binary's other command for agents; `nib-app` (see
+    // `serve`) registers, starts and stops the project's apps; `nib-web` (see `web`) reads and operates
     // a page of them in the window's web tab.
-    for (name, sub) in [("nib-mail", "mail"), ("nib-work", "work"), ("nib-review", "review"), ("nib-serve", "serve"), ("nib-web", "web")] {
+    // `nib-serve` was `nib-app` before apps (v0.3): gone, not left to fail.
+    for old in ["nib-serve", "nib-serve.cmd"] {
+        let _ = fs::remove_file(bin.join(old));
+    }
+    for (name, sub) in [("nib-mail", "mail"), ("nib-work", "work"), ("nib-review", "review"), ("nib-app", "app"), ("nib-web", "web")] {
         let script = bin.join(name);
         fs::write(&script, format!("#!/bin/sh\nexec '{}' {sub} \"$@\"\n", sh_exe.replace('\'', "'\\''")))?;
         #[cfg(unix)]
