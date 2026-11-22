@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 /// What an agent may ask for through `nib-web`: reading and operating a page as a person at
 /// it would. Not `eval` (the page's own scripting world), not `pointer` (the user's mouse in
 /// the window), not `quit` (the user's browser), and nothing that is not listed here.
-pub const AGENT: &[&str] = &["open", "list", "read", "click", "fill", "select", "type", "key", "scroll", "wait", "shot", "dialog", "upload", "back", "reload", "close"];
+pub const AGENT: &[&str] = &["open", "list", "read", "click", "fill", "select", "type", "key", "scroll", "zoom", "wait", "shot", "dialog", "upload", "back", "reload", "close"];
 
 /// Whether an agent may make request `cmd` (`web.read`); if not, why.
 pub fn agent_may(cmd: &str) -> Result<(), String> {
@@ -125,6 +125,22 @@ pub fn request(a: &[&str]) -> Result<Value, String> {
             }
             "scroll"
         }
+        ["zoom"] => "zoom",
+        ["zoom", how] => {
+            match *how {
+                "in" | "+" => set("steps", json!(1)),
+                "out" | "-" => set("steps", json!(-1)),
+                "reset" | "100" | "100%" => set("steps", json!(0)),
+                p => {
+                    let p = number("zoom: in, out, reset or a percent (25 to 300)", p.trim_end_matches('%'))?;
+                    if !(25.0..=300.0).contains(&p) {
+                        return Err("web zoom: a percent from 25 to 300".into());
+                    }
+                    set("percent", json!(p));
+                }
+            }
+            "zoom"
+        }
         ["pointer", x, y, rest @ ..] => {
             set("x", json!(number("pointer: X Y in the page's pixels", x)?));
             set("y", json!(number("pointer: X Y in the page's pixels", y)?));
@@ -201,6 +217,11 @@ mod tests {
         assert_eq!(r(&["pointer", "10", "20", "wheel", "-40"]), json!({ "cmd": "web.pointer", "x": 10.0, "y": 20.0, "do": "wheel", "dy": -40.0 }));
         assert_eq!(r(&["eval", "document.title", "+", "1"]), json!({ "cmd": "web.eval", "js": "document.title + 1" }));
         assert_eq!(r(&["close"]), json!({ "cmd": "web.close" }));
+        assert_eq!(r(&["zoom"]), json!({ "cmd": "web.zoom" }));
+        assert_eq!(r(&["zoom", "75%", "--tab", "5173"]), json!({ "cmd": "web.zoom", "percent": 75.0, "tab": "5173" }));
+        assert_eq!(r(&["zoom", "out"]), json!({ "cmd": "web.zoom", "steps": -1 }));
+        assert_eq!(r(&["zoom", "reset"]), json!({ "cmd": "web.zoom", "steps": 0 }));
+        assert!(request(&["zoom", "10"]).is_err() && request(&["zoom", "big"]).is_err());
         // Files are named from where the command was typed.
         let here = std::env::current_dir().unwrap();
         assert_eq!(r(&["shot", "a.png"])["path"], json!(here.join("a.png")));

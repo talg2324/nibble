@@ -30,6 +30,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::net::{SocketAddr, TcpStream};
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, Weak};
@@ -40,8 +41,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TICK: Duration = Duration::from_millis(200);
 /// A restarted server waits this long for its old port to be free.
 const FREE_PORT: Duration = Duration::from_secs(10);
-/// How much of a server's output is kept for `nib-serve log`.
-const LOG_KEEP: usize = 256 * 1024;
+/// How many lines of a server's output are kept for `nib-serve log`.
+const LOG_LINES: usize = 5000;
 
 pub type Defs = BTreeMap<String, ServerDef>;
 pub type Shared = Arc<Mutex<Servers>>;
@@ -57,7 +58,79 @@ struct Run {
     /// Restarting: not before its port is free, or this time has come.
     free_by: Option<Instant>,
     /// The end of what it printed.
-    log: Arc<Mutex<Vec<u8>>>,
+    log: Arc<Mutex<Printed>>,
+}
+
+/// What a server printed, kept as its terminal shows it rather than as the bytes that came:
+/// a terminal program moves the cursor and draws over what is there, and Windows' ConPTY
+/// repaints the whole screen when the window resizes the terminal, so plain bytes with their
+/// escape sequences taken out would say some things twice and run lines together.
+pub(crate) struct Printed {
+    term: vt100::Parser,
+}
+
+impl Default for Printed {
+    fn default() -> Self {
+        Self { term: vt100::Parser::new(NonZeroU16::new(24).unwrap(), NonZeroU16::new(80).unwrap(), LOG_LINES) }
+    }
+}
+
+impl Printed {
+    /// Output that came from a terminal of `size` (columns, rows) when known.
+    fn feed(&mut self, data: &[u8], size: Option<(u16, u16)>) {
+        if let Some((cols, rows)) = size.and_then(|(c, r)| Some((NonZeroU16::new(c)?, NonZeroU16::new(r)?))) {
+            if self.term.screen().size() != (rows, cols) {
+                self.term.set_size(rows, cols);
+            }
+        }
+        self.term.process(data);
+    }
+
+    /// A line of nib's own, on a line of its own.
+    fn note(&mut self, line: &str) {
+        let at_start = self.term.screen().cursor_position().1 == 0;
+        self.term.process(format!("{}{line}\r\n", if at_start { "" } else { "\r\n" }).as_bytes());
+    }
+
+    /// Every line kept, oldest first: what scrolled away, then the screen; a line the terminal
+    /// wrapped is one line, and blank lines at the end are left out.
+    fn lines(&mut self) -> Vec<String> {
+        let s = self.term.screen_mut();
+        let (rows, cols) = s.size();
+        let rows = rows.get() as usize;
+        s.set_scrollback(usize::MAX);
+        let back = s.scrollback();
+        let (mut out, mut wrapped, mut next, mut offset) = (Vec::<String>::new(), false, 0usize, back);
+        // A screenful at a time, from the oldest down: row `r` at offset `k` is line `back - k + r`.
+        loop {
+            s.set_scrollback(offset);
+            let texts: Vec<String> = s.rows(0, cols.get()).collect();
+            for (r, text) in texts.into_iter().enumerate() {
+                let i = back - offset + r;
+                if i < next {
+                    continue;
+                }
+                next = i + 1;
+                match out.last_mut() {
+                    Some(last) if wrapped => last.push_str(&text),
+                    _ => out.push(text),
+                }
+                wrapped = s.row_wrapped(r as u16);
+            }
+            if offset == 0 {
+                break;
+            }
+            offset = offset.saturating_sub(rows);
+        }
+        s.set_scrollback(0);
+        for l in &mut out {
+            l.truncate(l.trim_end().len());
+        }
+        while out.last().is_some_and(String::is_empty) {
+            out.pop();
+        }
+        out
+    }
 }
 
 pub struct Servers {
@@ -422,7 +495,7 @@ impl Servers {
     /// `name` will not be started, and why: in its log, and said to the window.
     fn give_up(&mut self, name: &str, why: &str) {
         if let Some(r) = self.runs.get(name) {
-            r.log.lock().unwrap().extend_from_slice(format!("nib: {why}\n").as_bytes());
+            r.log.lock().unwrap().note(&format!("nib: {why}"));
         }
         let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Log { level: LogLevel::Warn, msg: format!("server {name}: {why}") }));
         self.set_state(name, ServerState::Exited(None));
@@ -460,17 +533,14 @@ impl Servers {
         }
         // The window hears of the terminal before anything it prints.
         self.set_state(name, if def.port.is_some() { ServerState::Starting } else { ServerState::Ready });
-        let (tx, me) = (self.tx.clone(), self.me.clone());
+        let (tx, me, ptys) = (self.tx.clone(), self.me.clone(), self.ptys.clone());
         thread::spawn(move || {
             for msg in frx {
                 match &msg {
                     ServerMsg::Notify(ServerNotify::PtyOutput { data, .. }) => {
-                        let mut log = log.lock().unwrap();
-                        log.extend_from_slice(data);
-                        if log.len() > 2 * LOG_KEEP {
-                            let cut = log.len() - LOG_KEEP;
-                            log.drain(..cut);
-                        }
+                        // At the size the window has made the terminal (it repaints after a resize).
+                        let size = ptys.lock().unwrap().size(id);
+                        log.lock().unwrap().feed(data, size);
                     }
                     ServerMsg::Notify(ServerNotify::PtyExit { code, .. }) => {
                         if let Some(s) = me.upgrade() {
@@ -488,9 +558,7 @@ impl Servers {
 
     /// The last `lines` lines `name` printed, as plain text.
     fn log(&self, name: &str, lines: usize) -> Option<String> {
-        let raw = self.runs.get(name)?.log.lock().unwrap().clone();
-        let text = plain(&raw);
-        let all: Vec<&str> = text.lines().collect();
+        let all = self.runs.get(name)?.log.lock().unwrap().lines();
         Some(all[all.len().saturating_sub(lines)..].join("\n"))
     }
 
@@ -533,10 +601,21 @@ impl Servers {
                     None => (format!("nib-serve: {name} has not run in this session"), 1),
                 };
             }
-            // `cli` asks until the servers it started are no longer on their way.
+            // `cli` asks until the servers it started are no longer on their way: 3 and those
+            // still coming, else 0 and those that did not get to `ready`.
             ["settled", n @ ..] => {
-                let coming = self.runs.iter().any(|(name, r)| r.state.coming() && (n.is_empty() || n.contains(&name.as_str())));
-                return (String::new(), if coming { 3 } else { 0 });
+                let mine = |name: &str| n.is_empty() || n.contains(&name);
+                let coming: Vec<&str> = self.runs.iter().filter(|(name, r)| r.state.coming() && mine(name)).map(|(name, _)| name.as_str()).collect();
+                if !coming.is_empty() {
+                    return (coming.join(" "), 3);
+                }
+                let failed: Vec<String> = self
+                    .runs
+                    .iter()
+                    .filter(|(name, r)| mine(name) && matches!(r.state, ServerState::Exited(_) | ServerState::PortTaken))
+                    .map(|(name, r)| format!("{name} ({})", r.state.name()))
+                    .collect();
+                return (failed.join(", "), 0);
             }
             _ => return (USAGE.to_string(), 2),
         };
@@ -601,39 +680,6 @@ fn table(list: &[ServerInfo]) -> String {
         .join("\n")
 }
 
-/// Terminal output without its escape sequences and carriage returns.
-fn plain(raw: &[u8]) -> String {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    while i < raw.len() {
-        match raw[i] {
-            0x1b => match raw.get(i + 1) {
-                // CSI: parameters, then one final byte.
-                Some(b'[') => {
-                    i += 2;
-                    while i < raw.len() && !(0x40..=0x7e).contains(&raw[i]) {
-                        i += 1;
-                    }
-                }
-                // OSC: to BEL, or ESC \.
-                Some(b']') => {
-                    i += 2;
-                    while i < raw.len() && raw[i] != 0x07 && !(raw[i] == 0x1b && raw.get(i + 1) == Some(&b'\\')) {
-                        i += 1;
-                    }
-                    if raw.get(i) == Some(&0x1b) {
-                        i += 1;
-                    }
-                }
-                _ => i += 1,
-            },
-            b'\r' => {}
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
 
 const USAGE: &str = "usage:
   nib-serve list                      the project's servers: name, state, port, command
@@ -671,6 +717,50 @@ fn ask(dir: &Path, args: &[String]) -> (String, i32) {
     ("nib-serve: nib did not answer (is its window still open?)".to_string(), 1)
 }
 
+/// What to add to the list after `up` / `restart` waited, given the last `settled` answer:
+/// servers still on their way when the time ran out (exit 3), or that ended or found their
+/// port taken (exit 1). None: all are ready (or no wait was asked for).
+fn after_wait(last: &(String, i32), timeout: u64) -> Option<(String, i32)> {
+    match last {
+        (coming, 3) if timeout > 0 => Some((format!("nib-serve: not ready after {timeout} s: {coming}; `nib-serve list` to see when, `nib-serve log NAME` for what it printed, --timeout SECONDS to wait longer"), 3)),
+        (failed, 0) if !failed.is_empty() => Some((format!("nib-serve: not ready: {failed}; `nib-serve log NAME` says why"), 1)),
+        _ => None,
+    }
+}
+
+/// `--view` as Git Bash left it. Git Bash (MSYS) rewrites an argument that looks like an
+/// absolute path — `/src/pages/x.html` — into a Windows one under its own folder
+/// (`C:/Program Files/Git/src/pages/x.html`) before nib-serve sees it. Undone when the path
+/// starts with that folder (`msys_root`, from `cygpath -m /`); any other drive path is refused
+/// with how to avoid it.
+fn unmangle_view(view: &str, msys_root: impl FnOnce() -> Option<String>) -> Result<String, String> {
+    // `//path`, which Git Bash leaves alone, is `/path`.
+    if let Some(rest) = view.strip_prefix("//") {
+        return Ok(format!("/{}", rest.trim_start_matches('/')));
+    }
+    let drive = view.len() >= 3 && view.as_bytes()[0].is_ascii_alphabetic() && view[1..].starts_with([':']) && view[2..].starts_with(['/', '\\']);
+    if !drive {
+        return Ok(view.to_string());
+    }
+    let norm = view.replace('\\', "/");
+    if let Some(root) = msys_root().map(|r| r.replace('\\', "/").trim_end_matches('/').to_string()).filter(|r| !r.is_empty()) {
+        if let (Some(head), Some(rest)) = (norm.get(..root.len()), norm.get(root.len()..)) {
+            if head.eq_ignore_ascii_case(&root) && rest.starts_with('/') {
+                return Ok(rest.to_string());
+            }
+        }
+    }
+    Err(format!("--view {view:?} is a file path, not a page path: Git Bash rewrites arguments that start with /. Run it as MSYS_NO_PATHCONV=1 nib-serve set …, or write the path as //src/page.html"))
+}
+
+/// Git Bash's folder as Windows names it (what it puts in front of a path it rewrites), when
+/// nib-serve runs under it.
+fn msys_root() -> Option<String> {
+    std::env::var_os("MSYSTEM")?;
+    let out = std::process::Command::new("cygpath").args(["-m", "/"]).output().ok().filter(|o| o.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// `nibd serve …`, run by an agent as `nib-serve`. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
     let dir = std::env::var_os("NIB_MAILBOX").map(PathBuf::from).filter(|d| d.join("outbox").is_dir()).map(|d| d.join("serve"));
@@ -691,6 +781,17 @@ pub fn cli(args: &[String]) -> i32 {
         }
         args.drain(i..i + 2);
     }
+    if args.first().map(String::as_str) == Some("set") {
+        if let Some(i) = args.iter().position(|a| a == "--view").map(|i| i + 1).filter(|i| *i < args.len()) {
+            match unmangle_view(&args[i], msys_root) {
+                Ok(v) => args[i] = v,
+                Err(e) => {
+                    eprintln!("nib-serve set: {e}");
+                    return 2;
+                }
+            }
+        }
+    }
     let (mut out, mut code) = ask(&dir, &args);
     let started = match args.first().map(String::as_str) {
         Some("up") => Some(args[1..].to_vec()),
@@ -700,10 +801,19 @@ pub fn cli(args: &[String]) -> i32 {
     if let (0, Some(names)) = (code, started) {
         let t = Instant::now();
         let settled: Vec<String> = std::iter::once("settled".to_string()).chain(names).collect();
-        while t.elapsed() < Duration::from_secs(timeout) && ask(&dir, &settled).1 == 3 {
+        let mut last = ask(&dir, &settled);
+        while timeout > 0 && t.elapsed() < Duration::from_secs(timeout) && last.1 == 3 {
             thread::sleep(Duration::from_millis(300));
+            last = ask(&dir, &settled);
         }
         (out, code) = ask(&dir, &["list".to_string()]);
+        // Not done waiting is not done: say so, and with an exit code a script can see.
+        if code == 0 {
+            if let Some(note) = after_wait(&last, timeout) {
+                out = format!("{out}\n{}", note.0);
+                code = note.1;
+            }
+        }
     }
     if code == 0 {
         println!("{out}");
@@ -796,8 +906,85 @@ mod tests {
     }
 
     #[test]
-    fn output_without_escape_sequences() {
-        assert_eq!(plain(b"\x1b[1;32mINFO\x1b[0m: ready\r\n\x1b]0;title\x07next\x1b]8;;x\x1b\\."), "INFO: ready\nnext.");
+    fn output_is_kept_as_the_terminal_shows_it() {
+        let lines = |chunks: &[(&[u8], Option<(u16, u16)>)]| {
+            let mut p = Printed::default();
+            chunks.iter().for_each(|(d, s)| p.feed(d, *s));
+            p.lines()
+        };
+        // Colours, titles and links go; lines stay lines.
+        assert_eq!(lines(&[(b"\x1b[1;32mINFO\x1b[0m: ready\r\n\x1b]0;title\x07next\x1b]8;;x\x1b\\.", None)]), ["INFO: ready", "next."]);
+        // ConPTY moves to the next row instead of a newline (Node's error, as captured).
+        assert_eq!(lines(&[(b"Unterminated string constant\x1b[6;1HSyntaxError: Invalid", None)]), ["Unterminated string constant", "", "", "", "", "SyntaxError: Invalid"]);
+        // A repaint after a resize draws over what is there, rather than saying it twice.
+        let first: &[u8] = b"Serving notebooks from local directory: C:\\Users\\me\\src\\explorer_v2\\reports\r\nrunning at http://127.0.0.1:8899/lab\r\n";
+        let repaint: &[u8] = b"\x1b[?25l\x1b[H\x1b[2JServing notebooks from local directory: C:\\Users\\me\\src\\explorer_v2\\reports\x1b[2;1Hrunning at http://127.0.0.1:8899/lab\x1b[3;1H\x1b[?25h";
+        let got = lines(&[(first, Some((60, 24))), (repaint, Some((100, 24)))]);
+        assert_eq!(got, ["Serving notebooks from local directory: C:\\Users\\me\\src\\explorer_v2\\reports", "running at http://127.0.0.1:8899/lab"]);
+        // A line the terminal wrapped is one line again.
+        assert_eq!(lines(&[(b"0123456789abcdef\r\nnext\r\n", Some((10, 5)))]), ["0123456789abcdef", "next"]);
+        // What scrolled off the screen is kept, in order.
+        let many: String = (0..60).map(|i| format!("line {i}\r\n")).collect();
+        let got = lines(&[(many.as_bytes(), Some((80, 24)))]);
+        assert_eq!((got.len(), got[0].as_str(), got[59].as_str()), (60, "line 0", "line 59"));
+        // nib's own word starts a line of its own.
+        let mut p = Printed::default();
+        p.feed(b"half a line", None);
+        p.note("nib: not started");
+        assert_eq!(p.lines(), ["half a line", "nib: not started"]);
+    }
+
+    /// Windows' ConPTY repaints the screen when the window resizes the terminal: the log says
+    /// each line once, whole.
+    #[cfg(windows)]
+    #[test]
+    fn a_resized_terminal_does_not_double_the_log() {
+        let (s, _rx, d) = servers("resize");
+        let line = r"Serving notebooks from local directory: C:\Users\me\src\explorer_v2\reports\notebooks\and\on";
+        let cmd = format!("echo {line} & echo second line & ping -n 8 127.0.0.1 >NUL");
+        s.lock().unwrap().request(ServeOp::Set { name: "p".into(), def: def(&cmd, None, &[]) }).unwrap();
+        s.lock().unwrap().request(ServeOp::Up { names: vec![] }).unwrap();
+        until("its terminal", || s.lock().unwrap().runs.get("p").is_some_and(|r| r.pty.is_some()));
+        let ptys = s.lock().unwrap().ptys.clone();
+        let id = s.lock().unwrap().runs["p"].pty.unwrap();
+        // ConPTY asks where the cursor is before it shows anything; the window's terminal answers.
+        thread::sleep(Duration::from_millis(300));
+        ptys.lock().unwrap().input(id, b"\x1b[1;1R");
+        until("its output", || s.lock().unwrap().log("p", 10).is_some_and(|l| l.contains("second line")));
+        for (cols, rows) in [(50, 20), (120, 30), (70, 24)] {
+            ptys.lock().unwrap().resize(id, cols, rows);
+            thread::sleep(Duration::from_millis(400));
+        }
+        let log = s.lock().unwrap().log("p", 50).unwrap();
+        assert_eq!(log.matches("Serving notebooks").count(), 1, "{log}");
+        assert_eq!(log.matches("second line").count(), 1, "{log}");
+        assert!(log.lines().any(|l| l.trim() == line), "{log}");
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_view_git_bash_rewrote_is_given_back() {
+        let git = || Some("C:/Users/me/AppData/Local/Programs/Git/".to_string());
+        assert_eq!(unmangle_view("C:/Users/me/AppData/Local/Programs/Git/src/pages/x.html", git), Ok("/src/pages/x.html".into()));
+        assert_eq!(unmangle_view("c:\\users\\me\\appdata\\local\\programs\\git\\lab", git), Ok("/lab".into()));
+        assert_eq!(unmangle_view("/src/x.html", || panic!("not asked")), Ok("/src/x.html".into()));
+        assert_eq!(unmangle_view("//src/x.html", || None), Ok("/src/x.html".into()));
+        // A drive path that is not Git Bash's doing, or with no Git Bash to ask: refused, with the way round.
+        assert!(unmangle_view("D:/work/x.html", git).unwrap_err().contains("MSYS_NO_PATHCONV=1"));
+        assert!(unmangle_view("C:/Users/me/AppData/Local/Programs/Git/src", || None).is_err());
+        assert!(unmangle_view("C:/Users/me/AppData/Local/Programs/Gitx/a", git).is_err());
+    }
+
+    #[test]
+    fn up_says_when_it_stopped_waiting_and_why() {
+        assert_eq!(after_wait(&(String::new(), 0), 60), None);
+        let (note, code) = after_wait(&("frontend".into(), 3), 60).unwrap();
+        assert!(note.contains("not ready after 60 s: frontend") && code == 3, "{note}");
+        // Asked not to wait: nothing to say about it.
+        assert_eq!(after_wait(&("frontend".into(), 3), 0), None);
+        let (note, code) = after_wait(&("api (port-taken)".into(), 0), 60).unwrap();
+        assert!(note.contains("api (port-taken)") && code == 1, "{note}");
     }
 
     /// Servers in a throwaway project, and what the window would be told.

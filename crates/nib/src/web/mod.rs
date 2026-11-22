@@ -77,6 +77,26 @@ pub struct TabInfo {
     pub cursor: String,
     /// Files the page saved since last told.
     pub saved: Vec<String>,
+    /// How much bigger the page is drawn than at 100%: laid out at the tab's size / `zoom` CSS
+    /// pixels, so a pixel of the tab is 1 / `zoom` CSS pixels.
+    pub zoom: f32,
+}
+
+/// The zoom levels a step goes between, as browsers have them.
+pub const ZOOMS: &[f32] = &[0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+/// `steps` levels up (in) or down (out) from `zoom`; from a level not in the list, to the next
+/// one in that direction.
+pub fn zoom_step(zoom: f32, steps: i32) -> f32 {
+    let mut z = zoom;
+    for _ in 0..steps.unsigned_abs() {
+        z = if steps > 0 {
+            ZOOMS.iter().copied().find(|l| *l > z + 0.001).unwrap_or(ZOOMS[ZOOMS.len() - 1])
+        } else {
+            ZOOMS.iter().rev().copied().find(|l| *l < z - 0.001).unwrap_or(ZOOMS[0])
+        };
+    }
+    z
 }
 
 #[derive(Clone)]
@@ -118,6 +138,8 @@ pub enum TabJob {
     Seen(u32),
     Copy { page: u32, cut: bool },
     Paste { page: u32, text: String },
+    /// Zoom the page `steps` levels in (or out); 0: back to 100%.
+    Zoom { page: u32, steps: i32 },
 }
 
 pub use page::{key, press};
@@ -216,5 +238,21 @@ pub fn shutdown() {
     let (done, wait) = mpsc::channel();
     if tx.send(Job::Stop(done)).is_ok() {
         let _ = wait.recv_timeout(Duration::from_secs(3));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zoom_steps_go_between_the_levels() {
+        assert_eq!(zoom_step(1.0, -1), 0.9);
+        assert_eq!(zoom_step(1.0, 2), 1.25);
+        assert_eq!(zoom_step(0.7, 1), 0.75);
+        assert_eq!(zoom_step(0.7, -1), 0.67);
+        assert_eq!(zoom_step(0.25, -3), 0.25);
+        assert_eq!(zoom_step(3.0, 9), 3.0);
+        assert_eq!(zoom_step(1.0, 0), 1.0);
     }
 }

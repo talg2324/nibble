@@ -116,6 +116,19 @@ impl App {
         self.web.pages.iter().find(|p| p.id == page)
     }
 
+    fn web_zoom(&self, page: u32) -> f32 {
+        self.web_info(page).map_or(1.0, |p| p.zoom).max(0.1)
+    }
+
+    /// Zoom the page in front `steps` levels (0: back to 100%), as Cmd/Ctrl + wheel, +, - and 0
+    /// do over it. Says the new zoom, as the preview's does.
+    pub(super) fn web_zoom_by(&mut self, steps: i32) -> Task<Message> {
+        let Some(page) = self.web_front() else { return Task::none() };
+        let to = if steps == 0 { 1.0 } else { web::zoom_step(self.web_zoom(page), steps) };
+        web::tab(TabJob::Zoom { page, steps });
+        self.flash_info(format!("page {:.0}%", to * 100.0))
+    }
+
     /// What a web tab is called in the tab bar.
     pub(super) fn web_label(&self, page: u32) -> String {
         self.web_info(page).map_or_else(|| "localhost".to_string(), |p| p.name.clone())
@@ -125,6 +138,7 @@ impl App {
     pub(super) fn web_json(&self) -> serde_json::Value {
         serde_json::json!({
             "showing": self.web_front(), "frames": self.web.frames,
+            "zoom": self.web_front().map(|p| self.web_zoom(p)),
             "size": { "width": self.web.size.width, "height": self.web.size.height, "scale": self.web.scale },
             "choice": self.web_front().and_then(|p| self.web_info(p)).and_then(|p| p.choice.as_ref()).map(|c| serde_json::json!({ "options": c.options, "at": self.web.choice_at })),
         })
@@ -202,7 +216,11 @@ impl App {
             }
             Msg::Size(s) => self.web.size = s,
             Msg::Scale(s) => self.web.scale = s,
-            Msg::Move(p) => web::tab(TabJob::Input { page, input: Input::Move { x: p.x, y: p.y } }),
+            Msg::Move(p) => {
+                // A pixel of the tab is 1 / zoom pixels of the page.
+                let z = self.web_zoom(page);
+                web::tab(TabJob::Input { page, input: Input::Move { x: p.x / z, y: p.y / z } });
+            }
             Msg::Down(button) => {
                 self.focus = Focus::Main;
                 let mods = self.web_mods();
@@ -338,6 +356,13 @@ impl App {
         }
         // The clipboard is the system's, which only nib can reach: the page's own copy and
         // paste keys would use the unseen browser's.
+        // Zoom keys zoom the page, as in a browser (Cmd/Ctrl 0: back to 100%).
+        match command {
+            Some(Command::FontBigger) => return Some(self.web_zoom_by(1)),
+            Some(Command::FontSmaller) => return Some(self.web_zoom_by(-1)),
+            None if (chord.ctrl || chord.logo) && !chord.alt && chord.key == Key::Char('0') => return Some(self.web_zoom_by(0)),
+            _ => {}
+        }
         match command {
             Some(Command::Copy) => {
                 web::tab(TabJob::Copy { page, cut: false });
@@ -449,7 +474,10 @@ impl App {
             .on_right_release(Message::Web(Msg::Up(2)))
             .on_scroll(|d| Message::Web(Msg::Scroll(d)))
             .interaction(shape);
+        let area = crate::zoom::ZoomZone::new(crate::zoom::Zone::Web, area);
         let mut layers = stack![sensor(area).on_show(|s| Message::Web(Msg::Size(s))).on_resize(|s| Message::Web(Msg::Size(s)))];
+        // The page's CSS pixels as the tab's.
+        let z = info.zoom.max(0.1);
         let (panel, edge, fg, sel) = (th.panel, raise(th.panel, 0.2), th.foreground, th.browser_sel_bg);
         let boxed = move |_: &iced::Theme| container::Style { background: Some(panel.into()), border: Border { color: edge, width: 1.0, radius: 5.0.into() }, ..Default::default() };
         if let Some(c) = &info.choice {
@@ -464,10 +492,10 @@ impl App {
                     .style(move |_, st| button::Style { background: (on || matches!(st, button::Status::Hovered)).then(|| sel.into()), ..Default::default() })
                     .into()
             }));
-            let list = container(scrollable(options).style(crate::theme::scrollbar)).width(Length::Fixed(c.width.max(140.0))).max_height(260.0).style(boxed);
-            let below = (c.y + c.height + 2.0).clamp(0.0, (self.web.size.height - 60.0).max(0.0));
+            let list = container(scrollable(options).style(crate::theme::scrollbar)).width(Length::Fixed((c.width * z).max(140.0))).max_height(260.0).style(boxed);
+            let below = ((c.y + c.height) * z + 2.0).clamp(0.0, (self.web.size.height - 60.0).max(0.0));
             layers = layers.push(
-                mouse_area(container(list).padding(Padding { left: c.x.clamp(0.0, (self.web.size.width - 150.0).max(0.0)), top: below, ..Padding::ZERO }).width(Length::Fill).height(Length::Fill))
+                mouse_area(container(list).padding(Padding { left: (c.x * z).clamp(0.0, (self.web.size.width - 150.0).max(0.0)), top: below, ..Padding::ZERO }).width(Length::Fill).height(Length::Fill))
                     .on_press(Message::Web(Msg::Choose(None))),
             );
         }

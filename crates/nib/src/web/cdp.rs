@@ -177,6 +177,13 @@ impl Browser {
                     page.loading = true;
                 }
             }
+            // The page's own frame is done, whether or not its `load` event came (apps that
+            // keep a connection open, marimo's and JupyterLab's, could leave it loading forever).
+            "Page.frameStoppedLoading" => {
+                if let Some(page) = self.top_page(session).filter(|pg| p["frameId"].as_str() == Some(pg.main_frame.as_str())) {
+                    page.loading = false;
+                }
+            }
             "Page.domContentEventFired" => {
                 if let Some(page) = self.top_page(session) {
                     page.dom = true;

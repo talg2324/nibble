@@ -35,8 +35,8 @@ pub(super) enum Pointer {
 pub(super) struct TabState {
     /// The page in front and the size it is shown at; None: no web tab shows.
     view: Option<(u32, View)>,
-    /// What the browser was last told (page, size).
-    applied: Option<(u32, View)>,
+    /// What the browser was last told (page, size, zoom).
+    applied: Option<(u32, View, f32)>,
     last_shot: Instant,
     last_data: String,
     busy_until: Instant,
@@ -135,6 +135,43 @@ impl Engine {
                 self.b_call(&frame, page::INSERT, &[super::engine::Arg::Str(text)])?;
                 self.tab.busy(BUSY_AFTER_INPUT);
             }
+            TabJob::Zoom { page, steps } => {
+                let z = self.page(page)?.zoom;
+                self.set_zoom(page, if steps == 0 { 1.0 } else { super::zoom_step(z, steps) })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The size page `id` is laid out at now, in CSS pixels: its tab's, or (no tab shows it)
+    /// the size an unseen page has, over its zoom.
+    pub(super) fn laid_out(&mut self, id: u32) -> Result<(f64, f64)> {
+        let z = self.page(id)?.zoom as f64;
+        let (w, h) = match self.tab.view {
+            Some((page, view)) if page == id => (view.width, view.height),
+            _ => super::engine::UNSEEN,
+        };
+        Ok(((w as f64 / z).round(), (h as f64 / z).round()))
+    }
+
+    /// Zoom page `id` to `zoom`: laid out at its size / `zoom`, drawn `zoom` times bigger, as a
+    /// browser zooms. A page in front gets its new size with its next picture (now).
+    pub(super) fn set_zoom(&mut self, id: u32, zoom: f32) -> Result<()> {
+        // Steps there and back land on 100% again.
+        let zoom = if (zoom - 1.0).abs() < 0.02 { 1.0 } else { zoom.clamp(super::ZOOMS[0], super::ZOOMS[super::ZOOMS.len() - 1]) };
+        self.page(id)?.zoom = zoom;
+        if self.tab.view.is_some_and(|(page, _)| page == id) {
+            self.tab.applied = None;
+            self.tab.last_shot = Instant::now().checked_sub(STILL_EVERY).unwrap_or(self.tab.last_shot);
+            self.tab.busy(BUSY_AFTER_INPUT);
+            self.tab_picture();
+        } else {
+            let (w, h) = super::engine::UNSEEN;
+            self.b_viewport(id, (w as f32 / zoom).round() as u32, (h as f32 / zoom).round() as u32, zoom)?;
+            // The tab, when it comes to show this page, sets its own size.
+            if self.tab.applied.is_some_and(|(page, ..)| page == id) {
+                self.tab.applied = None;
+            }
         }
         Ok(())
     }
@@ -210,11 +247,13 @@ impl Engine {
             return;
         }
         self.tab.last_shot = Instant::now();
-        if self.tab.applied != Some((page, view)) {
-            if self.b_viewport(page, view.width, view.height, view.scale).is_err() {
+        let zoom = self.browser.as_mut().and_then(|b| b.page(page)).map_or(1.0, |p| p.zoom);
+        if self.tab.applied != Some((page, view, zoom)) {
+            let (w, h) = ((view.width as f32 / zoom).round() as u32, (view.height as f32 / zoom).round() as u32);
+            if self.b_viewport(page, w, h, view.scale * zoom).is_err() {
                 return;
             }
-            self.tab.applied = Some((page, view));
+            self.tab.applied = Some((page, view, zoom));
             self.tab.last_data.clear();
         }
         let Ok(data) = self.b_shot(page, false, None) else { return };

@@ -5,6 +5,45 @@
 use super::local;
 use anyhow::{bail, Context, Result};
 
+/// The start of a function: `seen(e)`, the area of element `e` one can see — what is left of
+/// its box inside the window and inside every box around it that clips what overflows it (a
+/// scrolling panel, an `overflow: hidden` card). 0: nothing of it shows, though it is on the
+/// page. Boxes' clips are kept for the one call (`clips`).
+macro_rules! seen {
+    () => {
+        r#"
+  const clips = new Map();
+  const clipOf = (p) => {
+    if (!clips.has(p)) { const s = getComputedStyle(p); clips.set(p, s.overflowX !== 'visible' || s.overflowY !== 'visible' ? p.getBoundingClientRect() : null); }
+    return clips.get(p);
+  };
+  const up = (e) => e.parentElement || (e.getRootNode && e.getRootNode().host) || null;
+  const seen = (e, r) => {
+    r = r || e.getBoundingClientRect();
+    let l = Math.max(r.left, 0), t = Math.max(r.top, 0), rt = Math.min(r.right, innerWidth), b = Math.min(r.bottom, innerHeight);
+    if (rt <= l || b <= t) return 0;
+    if (getComputedStyle(e).position === 'fixed') return (rt - l) * (b - t);
+    for (let p = up(e); p && p !== document.body && p !== document.documentElement; p = up(p)) {
+      const c = clipOf(p);
+      if (!c) continue;
+      l = Math.max(l, c.left); t = Math.max(t, c.top); rt = Math.min(rt, c.right); b = Math.min(b, c.bottom);
+      if (rt <= l || b <= t) return 0;
+    }
+    return (rt - l) * (b - t);
+  };
+"#
+    };
+}
+
+/// `(n)`: how much of element `n` of the last `READ` one can see now (after `NODE` scrolled it
+/// to the middle): `{seen, w, h}`, CSS pixels² and pixels.
+pub const VISIBLE: &str = concat!("(n) => {", seen!(), r#"
+  const e = (globalThis.nibRefs || [])[n];
+  if (!e || !e.isConnected) throw new Error('gone');
+  const r = e.getBoundingClientRect();
+  return JSON.stringify({ seen: Math.round(seen(e, r)), w: Math.round(r.width), h: Math.round(r.height) });
+}"#);
+
 /// The page as text with the things one can act on marked `[N name]`, and those things listed.
 /// Called with `(max, base)`: how much text to give, and the number of this frame's first
 /// element (frames of one page share one numbering). Goes through open shadow roots. Leaves the
@@ -13,7 +52,7 @@ use anyhow::{bail, Context, Result};
 /// A control's name is the first of: `aria-label`, what `aria-labelledby` points at, its
 /// `<label>`, its own text, placeholder, `title`, a tooltip attribute, its icon's name, `alt`,
 /// the text beside it in the same label, row or small box, its `name` attribute.
-pub const READ: &str = r##"(max, base) => {
+pub const READ: &str = concat!("(max, base) => {", seen!(), r##"
   const ACT = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=switch],[role=menuitem],[role=option],[role=combobox],[role=textbox],[role=slider],[contenteditable=""],[contenteditable=true],[onclick]';
   const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'svg']);
   const BLOCK = new Set(['P', 'DIV', 'LI', 'TR', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'NAV', 'PRE', 'TABLE', 'UL', 'OL', 'BR', 'FORM', 'LABEL']);
@@ -98,7 +137,17 @@ pub const READ: &str = r##"(max, base) => {
         if (c.disabled || c.getAttribute('aria-disabled') === 'true') el.disabled = true;
         if (c.tagName === 'A') el.href = c.getAttribute('href');
         if (c.tagName === 'SELECT') el.options = [...c.options].slice(0, 40).map(o => clean(o.text));
-        if (r.bottom < 0 || r.top > innerHeight) el.offscreen = true;
+        // A slider, spin button or meter drawn by the page (marimo's, Radix's) says its value
+        // in ARIA; a native range input has `min` / `max` of its own.
+        const now = c.getAttribute('aria-valuenow');
+        if (now !== null && !FIELD.has(c.tagName)) el.value = clean(c.getAttribute('aria-valuetext') || now);
+        const lo = now !== null ? c.getAttribute('aria-valuemin') : c.type === 'range' ? c.min : null;
+        const hi = now !== null ? c.getAttribute('aria-valuemax') : c.type === 'range' ? c.max : null;
+        if (lo !== null && lo !== '') el.min = Number(lo);
+        if (hi !== null && hi !== '') el.max = Number(hi);
+        // Not to be seen where it is: outside the window, or squeezed out of a box around it
+        // that clips (a scrolling panel); `scroll N` brings it in where that can be done.
+        if (seen(c, r) <= 0) el.offscreen = true;
         elements.push(el);
         const shown = c.tagName === 'SELECT' ? clean((c.selectedOptions[0] || {}).text) : el.value;
         say('[' + n + ' ' + (el.name || el.role) + (shown && c.type !== 'checkbox' && c.type !== 'radio' ? '=' + shown.slice(0, 40) : '') + (el.checked === true ? ' ✓' : '') + '] ');
@@ -120,7 +169,7 @@ pub const READ: &str = r##"(max, base) => {
     text: out.join('').replace(/[ \t]*\n\s*/g, '\n').trim(), truncated: cut,
     elements, more, count: refs.length,
   });
-}"##;
+}"##);
 
 /// `(n)`: element `n` of this frame's last `READ`, scrolled into view. Throws `gone` when it is
 /// no longer on the page or no longer shown.
@@ -311,6 +360,9 @@ pub fn press(mods: &[char], key: char) -> Vec<Stroke> {
     out
 }
 
+/// The named keys `chord_strokes` takes, for when it is given one it does not know.
+const KEY_NAMES: &str = "enter, tab, escape, backspace, delete, insert, space, plus, left, right, up, down, pageup, pagedown, home, end";
+
 /// `shift+enter`, `mod+s`, `escape`, `a`: a chord as key strokes.
 pub fn chord_strokes(chord: &str) -> Result<Vec<Stroke>> {
     let mut mods = Vec::new();
@@ -327,19 +379,21 @@ pub fn chord_strokes(chord: &str) -> Result<Vec<Stroke>> {
                     bail!("a chord has one key besides its modifiers: {chord:?}");
                 }
                 main = Some(match name {
+                    // The DOM's names (`ArrowRight`, `PageDown`) are taken too.
                     "enter" | "return" => key::ENTER,
                     "tab" => key::TAB,
                     "esc" | "escape" => key::ESCAPE,
                     "backspace" => key::BACKSPACE,
                     "delete" | "del" => key::DELETE,
-                    "insert" => key::INSERT,
-                    "space" => ' ',
-                    "left" => key::LEFT,
-                    "up" => key::UP,
-                    "right" => key::RIGHT,
-                    "down" => key::DOWN,
-                    "pageup" => key::PAGE_UP,
-                    "pagedown" => key::PAGE_DOWN,
+                    "insert" | "ins" => key::INSERT,
+                    "space" | "spacebar" => ' ',
+                    "plus" => '+',
+                    "left" | "arrowleft" => key::LEFT,
+                    "up" | "arrowup" => key::UP,
+                    "right" | "arrowright" => key::RIGHT,
+                    "down" | "arrowdown" => key::DOWN,
+                    "pageup" | "pgup" => key::PAGE_UP,
+                    "pagedown" | "pgdn" => key::PAGE_DOWN,
                     "home" => key::HOME,
                     "end" => key::END,
                     f if f.len() >= 2 && f.starts_with('f') && f[1..].parse::<u32>().is_ok_and(|n| (1..=12).contains(&n)) => {
@@ -349,7 +403,7 @@ pub fn chord_strokes(chord: &str) -> Result<Vec<Stroke>> {
                         let mut it = part.chars();
                         match (it.next(), it.next()) {
                             (Some(c), None) => c,
-                            _ => bail!("unknown key {part:?} in {chord:?}"),
+                            _ => bail!("unknown key {part:?} in {chord:?}; keys: {KEY_NAMES}, f1…f12, or one character; joined to shift, ctrl, alt, cmd or mod with + (shift+enter)"),
                         }
                     }
                 });
@@ -396,6 +450,11 @@ mod tests {
         assert!(chord_strokes("shift").is_err());
         assert!(chord_strokes("shift+nope").is_err());
         assert!(chord_strokes("a+b").is_err());
+        // The DOM's names work as well as nib's, and a wrong one is told what there is.
+        assert_eq!(chord_strokes("ArrowRight").unwrap(), chord_strokes("right").unwrap());
+        assert_eq!(chord_strokes("shift+PageDown").unwrap(), chord_strokes("shift+pgdn").unwrap());
+        assert_eq!(chord_strokes("mod+plus").unwrap()[1], (true, '+'));
+        assert!(chord_strokes("bogus").unwrap_err().to_string().contains("pagedown"));
         assert_eq!(text_strokes("a\n"), vec![(true, 'a'), (false, 'a'), (true, key::ENTER), (false, key::ENTER)]);
     }
 }

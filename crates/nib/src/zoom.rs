@@ -17,6 +17,8 @@ pub enum Zone {
     /// The rendered side of a tab: Markdown / HTML preview, CSV table, SVG picture.
     Preview,
     Pdf,
+    /// A web tab's page: zoomed as a browser zooms (laid out anew).
+    Web,
 }
 
 /// Pixels of a trackpad scroll that make one step (a mouse notch is one step).

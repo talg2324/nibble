@@ -97,6 +97,8 @@ pub(super) struct Page {
     pub cursor: String,
     /// Files this page saved, not yet said to the user.
     pub saved: Vec<String>,
+    /// Its zoom (1: 100%); see `super::TabInfo::zoom`.
+    pub zoom: f32,
 }
 
 /// What an event asks for that needs a full command (events themselves only send, never wait).
@@ -383,6 +385,7 @@ impl Engine {
         let tabs: Vec<super::TabInfo> = self.browser.iter_mut().flat_map(|b| b.pages.iter_mut()).map(|p| super::TabInfo {
             id: p.id, name: page::tab_name(&p.title, &p.url), address: page::short_address(&p.url), url: p.url.clone(), loading: p.loading,
             blocked: p.blocked.clone(), dialog: p.dialog.clone(), choice: p.choice.clone(), cursor: p.cursor.clone(), saved: std::mem::take(&mut p.saved),
+            zoom: p.zoom,
         }).collect();
         let plain: Vec<super::TabInfo> = tabs.iter().cloned().map(|mut t| { t.saved.clear(); t }).collect();
         if plain != self.told || self.shown != self.told_shown || tabs.iter().any(|t| !t.saved.is_empty()) {
@@ -566,7 +569,7 @@ impl Engine {
         f.pages.push(Page {
             id, ctx, target, main_frame, url: String::new(), title: String::new(), loading: false, dom: false,
             console: Vec::new(), failed: Vec::new(), blocked: None, blocks: 0, dialog: None, frames: Vec::new(), downloads: Vec::new(),
-            choice: None, cursor: String::new(), saved: Vec::new(),
+            choice: None, cursor: String::new(), saved: Vec::new(), zoom: 1.0,
         });
         let _ = self.b_viewport(id, UNSEEN.0, UNSEEN.1, 1.0);
         // The tab a browser starts with is never used. In Firefox it keeps the keyboard in its
@@ -599,11 +602,17 @@ impl Engine {
     }
 
     /// Which page a request is about: `tab` (its number in `web list`, its port, or the start
-    /// of its name), else the one used last.
+    /// of its name), else the only page there is. With several pages and no `tab` the request
+    /// is refused: which one is in front is the user's business (they switch tabs, the window
+    /// tells the engine), and a guess sends keys into the wrong app.
     fn target(&mut self, call: &Call) -> Result<u32> {
         let f = self.live()?;
         let found = match call.req.get("tab") {
-            None | Some(Value::Null) => f.current.or(f.pages.last().map(|p| p.id)),
+            None | Some(Value::Null) => match f.pages.as_slice() {
+                [only] => Some(only.id),
+                [] => None,
+                many => bail!("{} web tabs are open; say which with --tab ({})", many.len(), tab_choices(many)),
+            },
             Some(t) => {
                 let want = t.as_str().map(str::to_owned).unwrap_or_else(|| t.to_string());
                 let by_index = want.parse::<usize>().ok().and_then(|i| f.pages.get(i)).map(|p| p.id);
@@ -745,6 +754,9 @@ impl Engine {
             o.insert("tab".into(), json!(tab));
             o.insert("name".into(), json!(page::tab_name(&p.title, &p.url)));
             o.insert("loading".into(), json!(p.loading));
+            if p.zoom != 1.0 {
+                o.insert("zoom".into(), json!(percent(p.zoom)));
+            }
             o.insert("console".into(), Value::Array(std::mem::take(&mut p.console)));
             o.insert("failed".into(), Value::Array(std::mem::take(&mut p.failed)));
             if let Some(b) = &p.blocked {
@@ -965,14 +977,45 @@ impl Engine {
                     "web.scroll" => {
                         if let Some(r) = call.req.get("ref").and_then(as_ref) {
                             self.node(id, r)?;
-                        } else {
-                            let dy = call.req.get("dy").and_then(Value::as_f64).context("web.scroll needs \"ref\" or \"dy\"")?;
-                            let done = self.b_wheel(id, (UNSEEN.0 / 2) as f64, (UNSEEN.1 / 2) as f64, 0.0, dy);
-                            self.unless_dialog(done)?;
+                            // Scrolled to, but a box around it may leave it no room at all.
+                            let (frame, n) = self.place(id, r)?;
+                            let seen = self.b_call(&frame, page::VISIBLE, &[number(n)]).ok().and_then(|v| serde_json::from_str::<Value>(v.value.as_str().unwrap_or("")).ok());
+                            let mut out = self.settle(id, before)?;
+                            if let Some(s) = seen.filter(|s| s["seen"].as_f64() == Some(0.0)) {
+                                out["visible"] = json!(false);
+                                out["note"] = json!(format!(
+                                    "element {r} is scrolled to but cannot be seen: a box around it clips it ({}x{} px); the page may be laid out too small for it (`zoom 75`, then read again)",
+                                    s["w"], s["h"]
+                                ));
+                            }
+                            return Ok(out);
                         }
+                        let dy = call.req.get("dy").and_then(Value::as_f64).context("web.scroll needs \"ref\" or \"dy\"")?;
+                        let (w, h) = self.laid_out(id)?;
+                        let done = self.b_wheel(id, w / 2.0, h / 2.0, 0.0, dy);
+                        self.unless_dialog(done)?;
                         self.settle(id, before)
                     }
                     "web.wait" => self.wait(id, call),
+                    "web.zoom" => {
+                        let z = self.page(id)?.zoom;
+                        let want = match (call.req.get("percent").and_then(Value::as_f64), call.req.get("steps").and_then(Value::as_i64)) {
+                            (Some(p), _) => p as f32 / 100.0,
+                            (None, Some(0)) => 1.0,
+                            (None, Some(s)) => super::zoom_step(z, s as i32),
+                            (None, None) => z,
+                        };
+                        if want != z {
+                            self.set_zoom(id, want)?;
+                            // Laid out anew: give the page a moment, as after any input.
+                            self.pump(Duration::from_millis(150))?;
+                        }
+                        let (width, height) = self.laid_out(id)?;
+                        let mut out = self.settle(id, before)?;
+                        out["zoom"] = json!(percent(self.page(id)?.zoom));
+                        out["laid_out"] = json!({ "width": width, "height": height });
+                        Ok(out)
+                    }
                     "web.back" => {
                         // The page's own history, as its Back button would: both browsers alike.
                         self.page(id)?.frames.clear();
@@ -1088,6 +1131,24 @@ impl Engine {
     pub(super) fn b_viewport(&mut self, id: u32, width: u32, height: u32, scale: f32) -> Result<()> {
         either!(self, bidi_viewport, cdp_viewport(id, width, height, scale))
     }
+}
+
+/// A zoom as a whole percent (0.67: 67).
+fn percent(zoom: f32) -> u32 {
+    (zoom * 100.0).round() as u32
+}
+
+/// The open pages as `--tab` would name them: `5173 (Performance Explorer), 2718 (lvef)`.
+fn tab_choices(pages: &[Page]) -> String {
+    pages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let port = local::app_of(&p.url).and_then(|a| a.rsplit_once(':').map(|(_, port)| port.to_owned()));
+            format!("{} ({})", port.unwrap_or_else(|| i.to_string()), page::tab_name(&p.title, &p.url))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// An element's number, given as a number or as text.

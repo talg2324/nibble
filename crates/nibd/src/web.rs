@@ -149,8 +149,8 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
 
 const USAGE: &str = "usage: nib-web REQUEST   (the project's app in nib's web tab; answers are JSON)
 Only pages of this machine (localhost) are shown; anything else is refused, and never opened.
-Every request takes --tab T: a tab's number in `list`, its port, or the start of its name
-(default: the tab used last).
+Every request takes --tab T: a tab's number in `list`, its port, or the start of its name.
+Without it: the only tab; with several open, say which (the user switches tabs too).
   nib-web open PORT|URL [--background]
                                show an app (http://127.0.0.1:PORT/ for a port); the same app again
                                is the same tab. The port is the one on the machine you run on
@@ -165,8 +165,12 @@ Every request takes --tab T: a tab's number in `list`, its port, or the start of
   nib-web select N OPTION      choose an option of <select> N by its text or value
   nib-web type TEXT | nib-web key CHORD
                                type into, or press a chord in, whatever has the keyboard in the
-                               page (key shift+enter, key escape)
-  nib-web scroll N | +PX | -PX bring element N into view, or scroll down / up
+                               page (key shift+enter, key escape, key right)
+  nib-web scroll N | +PX | -PX bring element N into view, or scroll down / up; `visible: false`
+                               when N is scrolled to but a box around it leaves it no room
+  nib-web zoom [PERCENT|in|out|reset]
+                               lay the page out smaller or bigger, as a browser zooms (25-300):
+                               zoom 75 gives a crowded page room; the user sees it too
   nib-web wait [TEXT | N] [--gone] [--secs S]
                                until the page shows TEXT, or element N (--gone: no longer), or
                                with neither: has loaded. Default 10 s; an error if not

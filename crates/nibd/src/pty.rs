@@ -17,6 +17,8 @@ struct Pty {
     master: Master,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Columns and rows, as last set.
+    size: (u16, u16),
 }
 
 #[derive(Default)]
@@ -114,8 +116,13 @@ impl Ptys {
             closer.lock().unwrap().take();
             let _ = tx.send(ServerMsg::Notify(ServerNotify::PtyExit { id, code }));
         });
-        self.map.insert(id, Pty { master, writer, killer });
+        self.map.insert(id, Pty { master, writer, killer, size: (cols.max(1), rows.max(1)) });
         Ok(id)
+    }
+
+    /// The columns and rows of pty `id`, as last set (what its output was laid out for).
+    pub fn size(&self, id: PtyId) -> Option<(u16, u16)> {
+        self.map.get(&id).map(|p| p.size)
     }
 
     pub fn input(&mut self, id: PtyId, data: &[u8]) {
@@ -125,6 +132,9 @@ impl Ptys {
     }
 
     pub fn resize(&mut self, id: PtyId, cols: u16, rows: u16) {
+        if let Some(p) = self.map.get_mut(&id) {
+            p.size = (cols.max(1), rows.max(1));
+        }
         if let Some(m) = self.map.get(&id).and_then(|p| p.master.lock().ok()) {
             if let Some(m) = m.as_ref() {
                 let _ = m.resize(size(cols, rows));

@@ -569,6 +569,7 @@ impl App {
     pub(super) fn wheel_zoom(&mut self, zone: Option<Zone>, steps: i32) -> Task<Message> {
         match zone {
             Some(Zone::Preview) if self.preview_shown() => self.zoom_preview(steps),
+            Some(Zone::Web) if self.web_front().is_some() => self.web_zoom_by(steps),
             Some(Zone::Pdf) => {
                 let c = if steps > 0 { Command::FontBigger } else { Command::FontSmaller };
                 Task::batch((0..steps.unsigned_abs()).filter_map(|_| self.pdf_command(c)).collect::<Vec<_>>())

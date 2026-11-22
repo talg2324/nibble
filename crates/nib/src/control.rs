@@ -440,8 +440,8 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
 Local apps (a page served by this machine, shown in a web tab; read and operated from here, so no
 browser automation is needed). Runs in the system's browser, unseen (Firefox, Chrome, Edge, Brave
 or Chromium). Only this machine's pages: anything else is refused, and never opened for you.
-Every request takes --tab T: a tab's number in `web list`, its port, or the start of its name
-(default: the tab used last).
+Every request takes --tab T: a tab's number in `web list`, its port, or the start of its name.
+Without it: the only tab; with several open, it is refused (the user switches tabs too).
   web open PORT|URL            show an app (http://127.0.0.1:PORT/ for a port); the same app
                                again is the same tab. Its tab comes forward (--background: not).
                                In a window on another machine (SSH) the port is that machine's:
@@ -450,8 +450,10 @@ Every request takes --tab T: a tab's number in `web list`, its port, or the star
                                (TensorBoard on the GPU machine: web open gpu:6006)
   web list                     the web tabs: name, address, loading
   web read [--full]            the page as text with what can be acted on marked [N name], those
-                               elements (ref, role, name, value, checked, options, disabled,
-                               offscreen, frame), and since the last read: console errors and
+                               elements (ref, role, name, value, min, max, checked, options,
+                               disabled, offscreen: not to be seen where it is, outside the page
+                               or a panel around it; frame), zoom when not 100%, and since the
+                               last read: console errors and
                                warnings, failed requests, downloads; `blocked`: an address
                                outside this machine the page tried to show; `dialog`: one waiting
   web click N                  click element N of the last read
@@ -461,8 +463,13 @@ Every request takes --tab T: a tab's number in `web list`, its port, or the star
   web select N OPTION          choose an option of <select> N by its text or value
   web type TEXT | web key CHORD
                                type into, or press a chord in, whatever has the keyboard in
-                               the page (key shift+enter, key mod+s, key escape)
-  web scroll N | +PX | -PX     bring element N into view, or scroll down / up
+                               the page (key shift+enter, key mod+s, key escape, key right)
+  web scroll N | +PX | -PX     bring element N into view, or scroll down / up; `visible: false`
+                               when N is scrolled to but a box around it leaves it no room
+  web zoom [PERCENT|in|out|reset]
+                               the page laid out smaller or bigger, as a browser zooms (25-300;
+                               the user's Cmd/Ctrl + wheel or +/- over the tab does the same):
+                               zoom 75 gives a crowded layout room. Answers zoom and laid_out
   web wait [TEXT | N] [--gone] [--secs S]
                                until the page shows TEXT, or element N (--gone: no longer),
                                or with neither: has loaded. Default 10 s; an error if not

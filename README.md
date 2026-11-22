@@ -154,10 +154,10 @@ Agents in the same project share one working tree, so they need to talk. Every a
 
 A page your project serves (its frontend, TensorBoard, a notebook) opens in a **web tab** beside the code: `nib ctl web open 8766`, a Cmd/Ctrl-click on `localhost:8766` in a terminal, or a server's `view` (below).
 
-- The page runs in the browser you already have (Firefox, Chrome, Edge, Brave or Chromium, whichever is the system's default), started unseen and owned by the window; nibble draws it in the tab and passes on your mouse, keys and clipboard. No browser is bundled.
+- The page runs in the browser you already have (Firefox, Chrome, Edge, Brave or Chromium, whichever is the system's default), started unseen and owned by the window; nibble draws it in the tab and passes on your mouse, keys and clipboard. No browser is bundled. Cmd/Ctrl + wheel (or Cmd/Ctrl +, -, 0) over the page zooms it as a browser does, laid out anew: a dashboard made for a bigger screen gets room at 75%.
 - **Only this machine's pages** are shown: `localhost`, `*.localhost`, `127.x.x.x`, `[::1]`. A link or redirect to anywhere else is not followed; the tab says what was not opened and offers to open it in your own browser. It is a viewer for your app, not a web browser.
 - **Over SSH** the app runs on the other machine and the browser on yours, so nibble forwards the port first (`ssh -O forward` on the connection it already has): to the same port number when that is free, else the next free one, with a warning. `nib ctl web open gpu:6006` does the same for any saved SSH connection, for TensorBoard on a GPU box while you edit locally. `nib ctl forward list|add|rm` shows and manages them; they go when the tab closes, the server stops, or the window leaves.
-- **Agents** read and operate the same page with `nib-web` (`open`, `read`, `click N`, `fill N TEXT`, `wait TEXT`, `shot`): the page as text with numbered elements, so they need no browser automation or screen control. They get less than you do at the socket: no script evaluation, no mouse, and never a page from outside this machine.
+- **Agents** read and operate the same page with `nib-web` (`open`, `read`, `click N`, `fill N TEXT`, `wait TEXT`, `zoom 75`, `shot`): the page as text with numbered elements, so they need no browser automation or screen control. They get less than you do at the socket: no script evaluation, no mouse, and never a page from outside this machine.
 
 ## Servers
 

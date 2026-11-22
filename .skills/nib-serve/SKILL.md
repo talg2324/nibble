@@ -20,7 +20,7 @@ Run them as ordinary shell commands (`nib-serve` is on your PATH inside an agent
 | | |
 |---|---|
 | `nib-serve list` | every server: name, state, port, what it comes after, its command |
-| `nib-serve up [NAME…]` | start them (none named: all), with the servers they come after. Waits until each is `ready` or has failed (at most 60 s; `--timeout SECONDS`, `0`: don't wait), then prints the list |
+| `nib-serve up [NAME…]` | start them (none named: all), with the servers they come after. Waits until each is `ready` or has failed (at most 60 s; `--timeout SECONDS`, `0`: don't wait), then prints the list. Exit 0: all ready; 1: one ended or found its port taken (named in the last line); 3: still starting when the time ran out (a slow first start: `nib-serve list` again, or a longer `--timeout`) |
 | `nib-serve restart NAME` | stop it, wait for its port to be free, start it, wait until it is ready. The user's web tab of it reloads by itself |
 | `nib-serve down [NAME…]` | stop them (none named: all) |
 | `nib-serve log NAME [--lines N]` | the end of what it printed (default 40 lines): read this when it is not `ready` |
@@ -42,7 +42,8 @@ machine `nib ctl serve …` does the same (the nib-control skill).
 | `port-taken` | **not started**: something else already listens on its port |
 
 `port-taken` is not a failure of the server. Another project's server, or one somebody started
-by hand, has the port. Find it (`lsof -nP -iTCP:PORT -sTCP:LISTEN`) and tell the user what holds
+by hand, has the port. Find it (`lsof -nP -iTCP:PORT -sTCP:LISTEN`; on Windows
+`Get-NetTCPConnection -LocalPort PORT -State Listen` in PowerShell) and tell the user what holds
 it; stop it only if it is yours or the user says so. Or give this project another port
 (`nib-serve set` with the new `--port`, and the same port inside `--cmd`), then `nib-serve up`.
 Do not work around it by pointing at the other process: it may be serving another project.
@@ -59,13 +60,18 @@ nib-serve set frontend --cmd "uv run myapp frontend --port 8766 --api http://127
 nib-serve up
 ```
 
-- `--cmd` runs in the user's login shell, in the project root (`--cwd DIR`: a folder inside it).
-  It must stay in the foreground (no `&`, no `--daemon`), and must not open a browser itself.
+- `--cmd` runs in the user's login shell (on Windows: `cmd.exe /C`), in the project root
+  (`--cwd DIR`: a folder inside it). It must stay in the foreground (no `&`, no `--daemon`), and
+  must not open a browser itself (Vite's `server.open`: add `--open false`).
 - `--port` is how nib knows it is ready, and that the port is free before starting. The command
   must listen on 127.0.0.1 at that same port: say it in the command too.
 - `--after A,B`: started only once those servers' ports answer.
 - `--view /path`: once ready, the window shows `http://127.0.0.1:PORT/path` in a web tab
-  (read and operate it with `nib-web`, the nib-web skill).
+  (read and operate it with `nib-web`, the nib-web skill). A backend that lets only
+  `http://localhost:PORT` call it (CORS) fails every request from that page: `nib-web read`
+  shows them under `failed`; open `localhost:PORT/path` instead. From Git Bash, a `/path` is
+  rewritten into a Windows path before nib-serve sees it; nib-serve undoes that (or write
+  `//path`).
 - Names are `a-z`, `0-9`, `_`, `-`. `set` replaces the whole definition; a running server keeps
   its old one until `nib-serve restart NAME`.
 
