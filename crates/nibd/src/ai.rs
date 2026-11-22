@@ -46,6 +46,10 @@ struct Spec {
     /// Sign-in that works without a browser on this machine (a link or device code to open on
     /// any device).
     login: &'static [&'static str],
+    /// Sign-in through a browser on this machine, used instead of `login` when nibd isn't
+    /// running under SSH. Codex's device code can be turned off by a ChatGPT workspace admin;
+    /// its browser sign-in can't, but it waits on `localhost`, so it only works here.
+    local_login: Option<&'static [&'static str]>,
     /// Where its installer puts it, under `$HOME`, besides `PATH`.
     home_dirs: &'static [&'static str],
 }
@@ -57,6 +61,7 @@ fn spec(agent: AiAgent) -> Spec {
             install_url: Some("https://claude.ai/install.sh"),
             runner: "bash",
             login: &["auth", "login"],
+            local_login: None,
             home_dirs: &[".local/bin", ".claude/local", ".npm-global/bin"],
         },
         AiAgent::Codex => Spec {
@@ -64,6 +69,7 @@ fn spec(agent: AiAgent) -> Spec {
             install_url: Some("https://chatgpt.com/codex/install.sh"),
             runner: "sh",
             login: &["login", "--device-auth"],
+            local_login: Some(&["login"]),
             home_dirs: &[".local/bin", ".codex/bin", ".npm-global/bin"],
         },
         AiAgent::Grok => Spec {
@@ -71,6 +77,7 @@ fn spec(agent: AiAgent) -> Spec {
             install_url: Some("https://x.ai/cli/install.sh"),
             runner: "bash",
             login: &["login", "--device-auth"],
+            local_login: None,
             home_dirs: &[".grok/bin", ".local/bin"],
         },
         AiAgent::OpenCode => Spec {
@@ -78,6 +85,7 @@ fn spec(agent: AiAgent) -> Spec {
             install_url: Some("https://opencode.ai/install"),
             runner: "bash",
             login: &[],
+            local_login: None,
             home_dirs: &[".opencode/bin", ".local/bin", ".npm-global/bin", ".bun/bin"],
         },
     }
@@ -122,6 +130,20 @@ pub fn skills(agent: AiAgent, root: Option<&Path>) -> Vec<AiSkill> {
 
 fn host() -> String {
     crate::fs_ops::hostname()
+}
+
+/// Whether nibd was started over SSH (sshd sets these; nib starts a remote nibd through `ssh`
+/// and a local one directly), so a browser it opens would be on another machine.
+fn over_ssh() -> bool {
+    ["SSH_CONNECTION", "SSH_CLIENT"].iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
+}
+
+/// The sign-in command's arguments, and whether it opens a browser on this machine.
+fn login_args(sp: &Spec, remote: bool) -> (&'static [&'static str], bool) {
+    match sp.local_login {
+        Some(l) if !remote => (l, true),
+        _ => (sp.login, false),
+    }
 }
 
 /// Where the installers put things, besides `PATH` (a GUI app or a non-login SSH shell often has
@@ -404,7 +426,7 @@ pub fn setup_cmd(agent: AiAgent, force_login: bool) -> Result<(Vec<String>, OsSt
     }
     let login = !sp.login.is_empty() && (force_login || find(agent).is_none() || signed_in(agent) != Some(true));
     // Arguments stay arguments: nothing below is pasted into the script.
-    const SCRIPT: &str = r#"name=$1 exe=$2 url=$3 runner=$4 host=$5 login=$6 xname=$7 xexe=$8 xurl=$9 xrunner=${10}; shift 10
+    const SCRIPT: &str = r#"name=$1 exe=$2 url=$3 runner=$4 host=$5 login=$6 xname=$7 xexe=$8 xurl=$9 xrunner=${10} browser=${11}; shift 11
 fail() { printf '\n\033[31m%s\033[0m\nPress Enter to close.\n' "$1"; read -r _; exit 1; }
 install() {
   command -v "$2" >/dev/null 2>&1 && return 0
@@ -419,7 +441,11 @@ install() {
 install "$name" "$exe" "$url" "$runner"
 [ -n "$xname" ] && install "$xname" "$xexe" "$xurl" "$xrunner"
 if [ "$login" = yes ]; then
-  printf '\033[1mSigning %s in on %s.\033[0m Open the link below on any device and follow it.\n\n' "$name" "$host"
+  if [ "$browser" = yes ]; then
+    printf '\033[1mSigning %s in on %s.\033[0m Finish in the browser that opens (or open the link below here).\n\n' "$name" "$host"
+  else
+    printf '\033[1mSigning %s in on %s.\033[0m Open the link below on any device and follow it.\n\n' "$name" "$host"
+  fi
   "$exe" "$@" || fail "Signing in to $name didn't finish."
 fi
 if [ -n "$xname" ]; then printf '\n\033[32m%s and %s are ready on %s.\033[0m\n' "$name" "$xname" "$host"
@@ -433,7 +459,9 @@ sleep 1
     cmd.push(if login { "yes" } else { "no" }.into());
     let extra: [&str; 4] = if agent == AiAgent::OpenCode { ["Ollama", "ollama", OLLAMA_URL, OLLAMA_RUNNER] } else { [""; 4] };
     cmd.extend(extra.map(String::from));
-    cmd.extend(sp.login.iter().map(|s| s.to_string()));
+    let (login_args, browser) = login_args(&sp, over_ssh());
+    cmd.push(if browser { "yes" } else { "no" }.into());
+    cmd.extend(login_args.iter().map(|s| s.to_string()));
     Ok((cmd, setup_path()))
 }
 
@@ -2995,10 +3023,10 @@ mod tests {
     fn opencode_is_installed_with_ollama_and_never_signed_in() {
         assert!(can_install(AiAgent::OpenCode));
         let (cmd, _) = setup_cmd(AiAgent::OpenCode, false).unwrap();
-        // name exe url runner host login, then Ollama's, then no sign-in arguments.
+        // name exe url runner host login, then Ollama's, browser, then no sign-in arguments.
         assert_eq!(cmd[4..8], ["OpenCode", "opencode", "https://opencode.ai/install", "bash"]);
         assert_eq!(cmd[9], "no", "OpenCode has no sign-in");
-        assert_eq!(cmd[10..], ["Ollama", "ollama", OLLAMA_URL, OLLAMA_RUNNER]);
+        assert_eq!(cmd[10..], ["Ollama", "ollama", OLLAMA_URL, OLLAMA_RUNNER, "no"]);
         let (claude, _) = setup_cmd(AiAgent::Claude, false).unwrap();
         assert_eq!(claude[10..14], ["", "", "", ""], "only OpenCode brings Ollama");
     }
@@ -3081,17 +3109,29 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let (mut cmd, _) = setup_cmd(AiAgent::Codex, false).unwrap();
-            // Same script; the stand-in assistant, not installed and not signed in.
-            cmd[5] = "fakeai".into();
-            cmd[9] = "yes".into();
+            let (base, _) = setup_cmd(AiAgent::Codex, false).unwrap();
             let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-            let out = Command::new(&cmd[0]).args(&cmd[1..]).env("PATH", path).stdin(Stdio::null()).output().unwrap();
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            assert!(out.status.success(), "{stdout}");
-            assert!(stdout.contains("Installing Codex"), "{stdout}");
-            assert!(stdout.contains("signed-in login --device-auth"), "{stdout}");
-            assert!(stdout.contains("Codex is ready"), "{stdout}");
+            // Over SSH the device code, here the browser.
+            for (remote, said, signed) in [
+                (true, "on any device", "signed-in login --device-auth\n"),
+                (false, "browser that opens", "signed-in login\n"),
+            ] {
+                // Same script; the stand-in assistant, not installed and not signed in.
+                let (args, browser) = login_args(&spec(AiAgent::Codex), remote);
+                let mut cmd = base[..14].to_vec();
+                cmd[5] = "fakeai".into();
+                cmd[9] = "yes".into();
+                cmd.push(if browser { "yes" } else { "no" }.into());
+                cmd.extend(args.iter().map(|s| s.to_string()));
+                let _ = std::fs::remove_file(&fake);
+                let out = Command::new(&cmd[0]).args(&cmd[1..]).env("PATH", &path).stdin(Stdio::null()).output().unwrap();
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert!(out.status.success(), "{stdout}");
+                assert!(stdout.contains("Installing Codex"), "{stdout}");
+                assert!(stdout.contains(said), "{stdout}");
+                assert!(stdout.contains(signed), "{stdout}");
+                assert!(stdout.contains("Codex is ready"), "{stdout}");
+            }
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
