@@ -607,22 +607,8 @@ impl Engine {
     /// tells the engine), and a guess sends keys into the wrong app.
     fn target(&mut self, call: &Call) -> Result<u32> {
         let f = self.live()?;
-        let found = match call.req.get("tab") {
-            None | Some(Value::Null) => match f.pages.as_slice() {
-                [only] => Some(only.id),
-                [] => None,
-                many => bail!("{} web tabs are open; say which with --tab ({})", many.len(), tab_choices(many)),
-            },
-            Some(t) => {
-                let want = t.as_str().map(str::to_owned).unwrap_or_else(|| t.to_string());
-                let by_index = want.parse::<usize>().ok().and_then(|i| f.pages.get(i)).map(|p| p.id);
-                let by_port = f.pages.iter().find(|p| local::app_of(&p.url).is_some_and(|a| a.ends_with(&format!(":{want}")))).map(|p| p.id);
-                let lower = want.to_lowercase();
-                let by_name = f.pages.iter().find(|p| page::tab_name(&p.title, &p.url).to_lowercase().starts_with(&lower)).map(|p| p.id);
-                Some(by_port.or(by_index).or(by_name).with_context(|| format!("no web tab {want:?} (`web list` shows them)"))?)
-            }
-        };
-        let id = found.context("no page is open (`web open PORT` shows one)")?;
+        let pages: Vec<(u32, &str, &str)> = f.pages.iter().map(|p| (p.id, p.url.as_str(), p.title.as_str())).collect();
+        let id = choose_tab(&pages, call.req.get("tab"))?;
         f.current = Some(id);
         Ok(id)
     }
@@ -1138,14 +1124,35 @@ fn percent(zoom: f32) -> u32 {
     (zoom * 100.0).round() as u32
 }
 
+/// The page (id) among `pages` — `(id, url, title)`, in `web list` order — that `tab` names: its
+/// number, its port, or the start of its name. No `tab`: the only page; with several, an error
+/// that lists them.
+fn choose_tab(pages: &[(u32, &str, &str)], tab: Option<&Value>) -> Result<u32> {
+    match tab {
+        None | Some(Value::Null) => match pages {
+            [only] => Ok(only.0),
+            [] => bail!("no page is open (`web open PORT` shows one)"),
+            many => bail!("{} web tabs are open; say which with --tab ({})", many.len(), tab_choices(many)),
+        },
+        Some(t) => {
+            let want = t.as_str().map(str::to_owned).unwrap_or_else(|| t.to_string());
+            let by_index = want.parse::<usize>().ok().and_then(|i| pages.get(i)).map(|p| p.0);
+            let by_port = pages.iter().find(|p| local::app_of(p.1).is_some_and(|a| a.ends_with(&format!(":{want}")))).map(|p| p.0);
+            let lower = want.to_lowercase();
+            let by_name = pages.iter().find(|p| page::tab_name(p.2, p.1).to_lowercase().starts_with(&lower)).map(|p| p.0);
+            by_port.or(by_index).or(by_name).with_context(|| format!("no web tab {want:?} (`web list` shows them)"))
+        }
+    }
+}
+
 /// The open pages as `--tab` would name them: `5173 (Performance Explorer), 2718 (lvef)`.
-fn tab_choices(pages: &[Page]) -> String {
+fn tab_choices(pages: &[(u32, &str, &str)]) -> String {
     pages
         .iter()
         .enumerate()
-        .map(|(i, p)| {
-            let port = local::app_of(&p.url).and_then(|a| a.rsplit_once(':').map(|(_, port)| port.to_owned()));
-            format!("{} ({})", port.unwrap_or_else(|| i.to_string()), page::tab_name(&p.title, &p.url))
+        .map(|(i, (_, url, title))| {
+            let port = local::app_of(url).and_then(|a| a.rsplit_once(':').map(|(_, port)| port.to_owned()));
+            format!("{} ({})", port.unwrap_or_else(|| i.to_string()), page::tab_name(title, url))
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -1182,6 +1189,21 @@ mod tests {
         // What the browser said could not be read: refused, even a local address.
         assert!(!allowed("http://localhost/x.png", None));
         assert!(!allowed("http://example.com/x.png", None));
+    }
+
+    #[test]
+    fn a_request_names_its_tab_when_there_are_several() {
+        let one = [(1, "http://127.0.0.1:5173/src/pages/performance_explorer.html", "Performance Explorer")];
+        assert_eq!(choose_tab(&one, None).unwrap(), 1);
+        assert!(choose_tab(&[], None).unwrap_err().to_string().contains("no page is open"));
+        let two = [one[0], (2, "http://127.0.0.1:2718/", "lvef")];
+        // Which one is in front is the user's to change: without --tab, no guess.
+        let e = choose_tab(&two, None).unwrap_err().to_string();
+        assert!(e.contains("2 web tabs") && e.contains("5173 (Performance Explorer)") && e.contains("2718 (lvef)"), "{e}");
+        assert_eq!(choose_tab(&two, Some(&json!("2718"))).unwrap(), 2);
+        assert_eq!(choose_tab(&two, Some(&json!(0))).unwrap(), 1);
+        assert_eq!(choose_tab(&two, Some(&json!("perf"))).unwrap(), 1);
+        assert!(choose_tab(&two, Some(&json!("8888"))).is_err());
     }
 
     #[test]

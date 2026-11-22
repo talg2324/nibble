@@ -907,7 +907,8 @@ mod tests {
 
     #[test]
     fn output_is_kept_as_the_terminal_shows_it() {
-        let lines = |chunks: &[(&[u8], Option<(u16, u16)>)]| {
+        type Chunk<'a> = (&'a [u8], Option<(u16, u16)>);
+        let lines = |chunks: &[Chunk]| {
             let mut p = Printed::default();
             chunks.iter().for_each(|(d, s)| p.feed(d, *s));
             p.lines()
