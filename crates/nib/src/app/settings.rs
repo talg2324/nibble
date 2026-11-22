@@ -665,7 +665,7 @@ impl App {
             line_height: cfg.editor.line_height,
         };
         self.beginner = cfg.editor.beginner_mode;
-        self.ai.retune(cfg.ai.effort, cfg.ai.prompt);
+        self.ai.retune(cfg.ai.effort, cfg.ai.prompt, cfg.ai.image_zoom_delay);
         let mut window_task = Task::none();
         if let Some(id) = self.settings.window.id {
             let size = Size::new(cfg.window.width, cfg.window.height);

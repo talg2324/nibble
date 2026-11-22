@@ -36,8 +36,8 @@ ratex-parser = "0.1.16"
 ratex-layout = "0.1.16"
 ratex-types = "0.1.16"
 ratex-svg = { version = "0.1.16", features = ["embed-fonts"] }
-# Mermaid diagrams in Markdown, to SVG in pure Rust (no browser).
-mermaid-rs-renderer = { version = "0.3", default-features = false }
+# Mermaid diagrams in Markdown, to SVG in pure Rust (no browser), with Mermaid's own layout.
+merman = { version = "0.11", default-features = false, features = ["all-diagrams", "svg"] }
 # PDF viewer: pure-Rust rasterizer (D-049).
 hayro = "0.9"
 arboard = "3.7.0"
