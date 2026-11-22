@@ -326,6 +326,18 @@ impl App {
         Task::batch([open, self.diff_scope(scope)])
     }
 
+    /// Model selection replaces the process, while its work and open review stay put.
+    pub(super) fn diff_replace_agent(&mut self, old: AiId, new: AiId) {
+        if let Some(work) = self.diff.work.remove(&old) { self.diff.work.insert(new, work); }
+        self.diff.scope = match self.diff.scope {
+            DiffScope::Agent(id) if id == old => DiffScope::Agent(new),
+            DiffScope::Since(id) if id == old => DiffScope::Since(new),
+            scope => scope,
+        };
+        if let Some(plan) = self.diff.plan.as_mut().filter(|p| p.id == old) { plan.id = new; }
+        if self.diff.plan_asked.is_some_and(|(id, _)| id == old) { self.diff.plan_asked = None; }
+    }
+
     /// An agent's `nib-work` state changed (`AiEvent::Work`).
     pub(super) fn diff_work(&mut self, id: AiId, work: AiWork) -> Task<Message> {
         // Its review changed (it answered a comment): read it again.

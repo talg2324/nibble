@@ -4,8 +4,8 @@
 //! line, Esc gives the keyboard back.
 //!
 //! The header's one dropdown picks both: the assistants (model providers) across the top, the
-//! chosen one's models below; picking a model starts a new chat with it. When none is ready on
-//! that machine the panel doesn't send the user off to install one: the dropdown is open, and
+//! chosen one's models below; picking a model continues the current work with it. When none
+//! is ready on that machine the panel doesn't send the user off to install one: the dropdown is open, and
 //! Install / Sign in runs the vendor's installer and sign-in in a terminal. When that terminal
 //! finishes, the chat starts. OpenCode comes with Ollama (its Install sets up both); its tab also
 //! manages Ollama's models: each local one's size on disk and a delete button, and a field to
@@ -107,6 +107,11 @@ pub struct Chat {
     /// Stays the same while the chat lives (its place in the list doesn't).
     key: u64,
     session: Session,
+    generation: u64,
+    /// The session and selection to restore if replacing the assistant fails.
+    switching: Option<(AiId, AiAgent, Option<String>)>,
+    /// An exited process still owns the work until its replacement is ready.
+    retired: Option<AiId>,
     /// Who the chat is with (the last one picked).
     agent: Option<AiAgent>,
     /// The model the chat runs (one of the agent's `models`); `None`: the one it's set up with.
@@ -1039,7 +1044,7 @@ impl App {
                 self.focus = Focus::Ai;
                 self.ai.last = Some((agent, model.clone()));
                 let save = self.ai_save_choice();
-                return Task::batch([self.ai_new_chat(agent, model), save]);
+                return Task::batch([self.ai_use_model(agent, model), save]);
             }
             Msg::AskModel(on) => {
                 self.ai.pick_model = on;
@@ -1414,6 +1419,30 @@ impl App {
         }
     }
 
+    /// Change the assistant without discarding the conversation or its work.
+    fn ai_use_model(&mut self, agent: AiAgent, model: Option<String>) -> Task<Message> {
+        if self.ai.busy || (matches!(self.ai.session, Session::Starting) && (self.ai.switching.is_some() || !self.ai.turns.is_empty())) {
+            return self.flash_info("stop the current reply before switching models");
+        }
+        self.ai.picking = false;
+        self.ai.tab = None;
+        self.ai.pull_focus = false;
+        self.ai.confirm_delete = None;
+        if self.ai.agent == Some(agent) && self.ai.chosen == model && matches!(self.ai.session, Session::Ready(_)) {
+            return Task::none();
+        }
+        let previous = match self.ai.session { Session::Ready(id) => Some(id), _ => self.ai.retired };
+        if let (Some(id), Some(old)) = (previous, self.ai.agent) {
+            self.ai.switching = Some((id, old, self.ai.chosen.clone()));
+        }
+        self.ai.chosen = model;
+        self.ai.error = None;
+        if self.ai.effort.as_deref().is_some_and(|e| !agent.efforts().contains(&e)) {
+            self.ai.effort = None;
+        }
+        self.ai_start(agent)
+    }
+
     /// End the chat there is and start one with `agent` running `model`. A message still waiting
     /// for an assistant (sent before one was ready) goes to this one.
     fn ai_new_chat(&mut self, agent: AiAgent, model: Option<String>) -> Task<Message> {
@@ -1745,6 +1774,7 @@ impl App {
     }
 
     fn ai_start(&mut self, agent: AiAgent) -> Task<Message> {
+        self.ai.generation += 1;
         self.ai.session = Session::Starting;
         self.ai.usage = None;
         self.ai.since = Some(Instant::now());
@@ -1761,9 +1791,9 @@ impl App {
         let (effort, prompt) = self.ai_tuning(agent);
         self.ai.told_tuning = (effort.clone(), prompt.clone());
         let remember = self.ai_remember_tuning(effort.clone(), prompt.clone());
-        let open = Request::AiOpen { agent, model, tools: true, mode, resume: self.ai.past.clone(), effort, prompt };
-        let t = Task::batch([self.request(open, Pending::AiOpen { chat }), skills, remember]);
-        if !self.pending.values().any(|p| matches!(p, Pending::AiOpen { chat: c } if *c == chat)) {
+        let open = Request::AiOpen { replace: self.ai.switching.as_ref().map(|s| s.0).or(self.ai.retired), agent, model, tools: true, mode, resume: self.ai.past.clone(), effort, prompt };
+        let t = Task::batch([self.request(open, Pending::AiOpen { chat, generation: self.ai.generation }), skills, remember]);
+        if !self.pending.values().any(|p| matches!(p, Pending::AiOpen { chat: c, .. } if *c == chat)) {
             self.ai.session = Session::Failed(format!("not connected to {}", self.label));
             self.ai.busy = false;
         }
@@ -1771,6 +1801,12 @@ impl App {
     }
 
     fn ai_end_session(&mut self) {
+        if let Some(id) = self.ai.retired.take() {
+            self.notify(ClientNotify::AiClose { id });
+        }
+        if let Some((id, _, _)) = self.ai.switching.take() {
+            self.notify(ClientNotify::AiClose { id });
+        }
         if let Session::Ready(id) = self.ai.session {
             self.notify(ClientNotify::AiClose { id });
         }
@@ -1796,8 +1832,8 @@ impl App {
     }
 
     /// `AiOpen` was answered for the chat with key `chat`.
-    pub(super) fn on_ai_opened(&mut self, chat: u64, result: Result<Response, RpcError>) -> Task<Message> {
-        let Some(i) = self.ai.chats.iter().position(|c| c.key == chat) else {
+    pub(super) fn on_ai_opened(&mut self, chat: u64, generation: u64, result: Result<Response, RpcError>) -> Task<Message> {
+        let Some(i) = self.ai.chats.iter().position(|c| c.key == chat && c.generation == generation) else {
             // Killed in the meantime.
             if let Ok(Response::AiOpened { id }) = result {
                 self.notify(ClientNotify::AiClose { id });
@@ -1826,6 +1862,8 @@ impl App {
         }
         match result {
             Ok(Response::AiOpened { id }) => {
+                let previous = self.ai.switching.take().map(|s| s.0).or(self.ai.retired.take());
+                if let Some(old) = previous { self.diff_replace_agent(old, id); }
                 self.ai.session = Session::Ready(id);
                 if self.ai.mode != self.ai.told_mode {
                     let mode = self.ai.mode;
@@ -1838,6 +1876,18 @@ impl App {
             }
             Ok(_) => self.ai.session = Session::Failed("unexpected answer from nibd".into()),
             Err(e) => {
+                if let Some((id, agent, model)) = self.ai.switching.take() {
+                    self.ai.session = if self.ai.retired == Some(id) { Session::Failed("the previous assistant exited".into()) } else { Session::Ready(id) };
+                    self.ai.agent = Some(agent);
+                    self.ai.chosen = model;
+                    self.ai.busy = false;
+                    self.ai.error = Some(e.msg);
+                    if let Some(text) = self.ai.queued.take() {
+                        self.ai.input = text;
+                        self.ai.turns.pop();
+                    }
+                    return Task::none();
+                }
                 self.ai.session = Session::Failed(e.msg);
                 self.ai.busy = false;
                 // Missing or signed out: show what there is and how to fix it.
@@ -2057,7 +2107,7 @@ impl App {
                 let name = ai.agent.map_or("The assistant", AiAgent::name);
                 let msg = msg.unwrap_or_else(|| format!("{name} exited."));
                 ai.session = Session::Failed(if needs_login(&msg) { login_hint } else { msg });
-                self.notify(ClientNotify::AiClose { id });
+                ai.retired = Some(id);
             }
         }
         Task::none()
@@ -3559,6 +3609,84 @@ mod tests {
         }
         assert!(opening(&a).is_some(), "the chat still starts");
         assert_eq!((a.ai.picking, a.ai.tab), (true, Some(AiAgent::OpenCode)));
+    }
+
+    #[test]
+    fn selecting_a_model_keeps_the_conversation_draft_and_work() {
+        let mut a = chatting();
+        say(&mut a, "fix the parser");
+        event(&mut a, 7, AiEvent::Text("Parser updated; tests remain.".into()));
+        event(&mut a, 7, AiEvent::TurnDone { error: Some("usage limit".into()) });
+        let work = nib_proto::AiWork { branch: Some("nib/feat/parser".into()), dir: Some("/work/parser".into()), base: Some("main".into()), plan: None, review: None };
+        let _ = a.diff_work(7, work);
+        a.ai.name = Some("parser".into());
+        let chat_key = a.ai.key;
+        type_str(&mut a, "continue with the tests");
+        let _ = a.diff_show(nib_proto::DiffScope::Agent(7));
+        let _ = a.on_ai_msg(Msg::Use(AiAgent::Codex, Some("gpt-6-sol".into())));
+        assert_eq!(a.ai.turns.len(), 2);
+        assert_eq!(a.ai.input, "continue with the tests");
+        assert_eq!(a.ai.name.as_deref(), Some("parser"));
+        assert_eq!(a.ai.key, chat_key);
+        assert_eq!(a.ai.switching.as_ref().map(|s| s.0), Some(7));
+        key(&mut a, "enter");
+        let req = opening(&a).unwrap();
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::AiOpened { id: 8 }) });
+        assert!(matches!(a.ai.session, Session::Ready(8)));
+        assert_eq!(a.ai.turns.len(), 3);
+        assert_eq!(a.diff_branch(8).unwrap().0, "nib/feat/parser");
+        assert_eq!(a.diff_json()["scope"], "agent:8");
+        event(&mut a, 7, AiEvent::Text("stale reply".into()));
+        assert_eq!(a.ai.turns.len(), 3);
+        let _ = a.on_ai_msg(Msg::NewChat);
+        assert!(a.ai.turns.is_empty());
+        assert_eq!(a.ai.agent, Some(AiAgent::Codex));
+        assert!(a.ai.switching.is_none());
+    }
+
+    #[test]
+    fn a_failed_model_switch_restores_the_previous_session_and_message() {
+        let mut a = chatting();
+        say(&mut a, "fix it");
+        event(&mut a, 7, AiEvent::TurnDone { error: None });
+        let _ = a.on_ai_msg(Msg::Use(AiAgent::Codex, None));
+        say(&mut a, "continue");
+        let req = opening(&a).unwrap();
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Err(RpcError::new(ErrorKind::NotFound, "Codex is unavailable")) });
+        assert!(matches!(a.ai.session, Session::Ready(7)));
+        assert_eq!(a.ai.agent, Some(AiAgent::Claude));
+        assert_eq!(a.ai.input, "continue");
+        assert_eq!(a.ai.turns.len(), 1);
+        assert_eq!(a.ai.error.as_deref(), Some("Codex is unavailable"));
+    }
+
+    #[test]
+    fn switching_after_the_assistant_exits_keeps_its_work_owner() {
+        let mut a = chatting();
+        say(&mut a, "fix it");
+        event(&mut a, 7, AiEvent::Exit { msg: Some("usage limit".into()) });
+        let _ = a.on_ai_msg(Msg::Use(AiAgent::Codex, None));
+        assert_eq!(a.ai.switching.as_ref().map(|s| s.0), Some(7));
+        assert_eq!(a.ai.turns.len(), 1);
+        let req = opening(&a).unwrap();
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Err(RpcError::new(ErrorKind::NotFound, "not installed")) });
+        assert!(matches!(a.ai.session, Session::Failed(_)));
+        assert_eq!(a.ai.retired, Some(7), "sending again can restart the exited assistant with its work intact");
+    }
+
+    #[test]
+    fn an_old_open_response_cannot_replace_the_selected_model() {
+        let mut a = app();
+        let _ = a.update(Message::Control(Command::ToggleAi));
+        agents(&mut a, vec![info(AiAgent::Claude, true, Some(true))]);
+        let stale = opening(&a).unwrap();
+        let _ = a.on_ai_msg(Msg::Use(AiAgent::Codex, None));
+        let _ = a.on_server(ServerMsg::Response { id: stale, result: Ok(Response::AiOpened { id: 7 }) });
+        assert!(matches!(a.ai.session, Session::Starting));
+        let req = opening(&a).unwrap();
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::AiOpened { id: 8 }) });
+        assert!(matches!(a.ai.session, Session::Ready(8)));
+        assert_eq!(a.ai.agent, Some(AiAgent::Codex));
     }
 
     #[test]

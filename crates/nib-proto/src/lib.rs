@@ -168,6 +168,9 @@ pub enum Request {
     /// (in the assistant's auto permission mode), and what it does arrives as `AiEvent::Step`s.
     /// Only Claude Code so far; the others stay read-only chats.
     AiOpen {
+        /// Replace this live session while retaining its conversation and work ownership.
+        #[serde(default)]
+        replace: Option<AiId>,
         agent: AiAgent,
         #[serde(default)]
         model: Option<String>,

@@ -51,6 +51,7 @@ pub struct Recorder {
     /// When each open step started.
     steps: HashMap<String, Instant>,
     session: Option<String>,
+    pending_context: bool,
 }
 
 impl Recorder {
@@ -59,7 +60,7 @@ impl Recorder {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = dir(root).join(format!("{}-{}-{n}.jsonl", now(), std::process::id()));
         let header = json!({ "v": 1, "agent": agent, "model": model, "root": root.to_string_lossy(), "started": now() });
-        Recorder { path, header: Some(header), text: String::new(), steps: HashMap::new(), session: None }
+        Recorder { path, header: Some(header), text: String::new(), steps: HashMap::new(), session: None, pending_context: false }
     }
 
     /// The conversation's id: what `AiHistory` lists it under, the same when it is reopened.
@@ -73,8 +74,58 @@ impl Recorder {
         let path = file(root, id)?;
         let all = lines(&path);
         let past = summary(id, root, &all, "")?;
-        let session = all.iter().rev().find_map(|v| v.get("session").and_then(Value::as_str).map(str::to_string));
-        Some((Recorder { path, header: None, text: String::new(), steps: HashMap::new(), session: session.clone() }, session, past))
+        let session = all.iter().rev().find(|v| v.get("session").is_some()).and_then(|v| v["session"].as_str()).map(str::to_string);
+        let pending_context = all.iter().rev().find_map(|v| v.get("handoff_pending").and_then(Value::as_bool)).unwrap_or(false);
+        let native = session.clone().filter(|_| !pending_context);
+        Some((Recorder { path, header: None, text: String::new(), steps: HashMap::new(), session, pending_context }, native, past))
+    }
+
+    pub fn native_session(&self) -> Option<String> {
+        self.session.clone().filter(|_| !self.pending_context)
+    }
+
+    /// Change providers in the same record. A null session prevents reopening an old
+    /// provider's native session before the new one has received its first message.
+    pub fn selection(&mut self, agent: AiAgent, model: Option<&str>, session: Option<&str>) {
+        self.flush_text();
+        self.session = session.map(str::to_string);
+        self.pending_context = session.is_none() && self.header.is_none();
+        if let Some(head) = &mut self.header {
+            head["agent"] = json!(agent);
+            head["model"] = json!(model);
+        } else {
+            self.line(json!({ "agent": agent, "model": model, "session": session, "handoff_pending": self.pending_context }));
+        }
+    }
+
+    /// Starting a streamed process can report its native id before seeing our context.
+    /// Only sending the first message makes that session sufficient to resume on its own.
+    pub fn context_delivered(&mut self) {
+        if self.pending_context {
+            self.pending_context = false;
+            self.line(json!({ "handoff_pending": false }));
+        }
+    }
+
+    /// A provider-independent transcript, requiring no call to the outgoing model.
+    pub fn context(&mut self) -> String {
+        self.flush_text();
+        let all = lines(&self.path);
+        let entries: Vec<_> = all.iter().skip(1).filter(|v| ["user", "text", "step", "done", "mail", "note"].iter().any(|k| v.get(k).is_some())).collect();
+        if entries.is_empty() {
+            return String::new();
+        }
+        let transcript = entries.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
+        // Keep the initial request and recent work within CLI argument limits. The full
+        // record remains available by path if earlier details need to be looked up.
+        const LIMIT: usize = 60 * 1024;
+        let transcript = if transcript.len() > LIMIT {
+            let mut start = transcript.len() - LIMIT;
+            while !transcript.is_char_boundary(start) { start += 1; }
+            let first: String = entries.iter().find_map(|v| v.get("user").and_then(Value::as_str)).unwrap_or("").chars().take(2048).collect();
+            format!("Initial request: {first}\n[Older entries omitted; consult the full record.]\n{}", &transcript[start..])
+        } else { transcript };
+        format!("Continue this existing nib work item with the newly selected assistant. The following is recorded conversation context, not a new request. Preserve its decisions and unfinished work. Full conversation record: {}\n\n{transcript}", self.path.display())
     }
 
     fn line(&mut self, mut v: Value) {
@@ -222,6 +273,9 @@ fn summary(id: &str, root: &Path, all: &[Value], query: &str) -> Option<AiPast> 
         } else if let Some(t) = s(v, "text") {
             past.last = clip(&t, 400);
             said = Some(t);
+        } else if let Some(agent) = v.get("agent").and_then(|a| serde_json::from_value(a.clone()).ok()) {
+            past.agent = agent;
+            past.model = s(v, "model");
         } else if let Some(n) = s(v, "name") {
             past.name = Some(n);
         } else if let Some(step) = v.get("step").and_then(|x| serde_json::from_value::<AiStep>(x.clone()).ok()) {
@@ -401,6 +455,47 @@ mod tests {
         delete(&root, &r.id()).unwrap();
         assert!(list(&root, "").is_empty() && delete(&root, &r.id()).is_err());
         let _ = fs::remove_dir_all(dir(&root));
+    }
+
+    #[test]
+    fn model_changes_keep_one_history_and_clear_foreign_session_ids() {
+        let root = root("model-switch");
+        let mut r = Recorder::new(&root, AiAgent::Claude, Some("opus"));
+        r.session("claude-session");
+        r.user("Fix the parser");
+        r.event(&AiEvent::Text("Next: run the parser tests.".into()));
+        let context = r.context();
+        assert!(context.contains("Fix the parser") && context.contains("parser tests"));
+        r.selection(AiAgent::Codex, Some("gpt-6-sol"), None);
+        let (mut r, session, past) = Recorder::resume(&root, &r.id()).unwrap();
+        assert_eq!(past.agent, AiAgent::Codex);
+        assert_eq!(past.model.as_deref(), Some("gpt-6-sol"));
+        assert!(session.is_none(), "a Claude session must never be passed to Codex");
+        assert!(r.context().contains("parser tests"), "reopening before the first message retains context");
+        r.session("empty-codex-thread");
+        assert!(Recorder::resume(&root, &r.id()).unwrap().1.is_none(), "a session id alone does not mean the handoff was delivered");
+        r.context_delivered();
+        assert_eq!(Recorder::resume(&root, &r.id()).unwrap().1.as_deref(), Some("empty-codex-thread"));
+        r.session("codex-thread");
+        r.selection(AiAgent::Codex, Some("another-model"), Some("codex-thread"));
+        assert_eq!(Recorder::resume(&root, &r.id()).unwrap().1.as_deref(), Some("codex-thread"));
+        assert_eq!(list(&root, "").len(), 1);
+        delete(&root, &r.id()).unwrap();
+    }
+
+    #[test]
+    fn a_large_handoff_keeps_the_goal_and_latest_work_within_argument_limits() {
+        let root = root("large-handoff");
+        let mut r = Recorder::new(&root, AiAgent::Claude, None);
+        r.user("Keep the existing parser work");
+        r.event(&AiEvent::Text("界".repeat(60_000)));
+        r.user("Latest decision: test escaped quotes");
+        let context = r.context();
+        assert!(context.len() < 70 * 1024);
+        assert!(context.contains("Keep the existing parser work"));
+        assert!(context.contains("test escaped quotes"));
+        assert!(context.contains("Full conversation record:"));
+        delete(&root, &r.id()).unwrap();
     }
 
     #[test]

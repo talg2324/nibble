@@ -334,9 +334,11 @@ impl App {
         let Some(c) = self.ai.chats.get(i) else { return Task::none() };
         let (key, agent, model) = (c.key, c.agent, c.chosen.clone());
         // The daemon thaws a frozen one before it ends it.
-        if let Session::Ready(id) = c.session {
-            self.notify(ClientNotify::AiClose { id });
-        }
+        let mut sessions: Vec<_> = c.retired.into_iter().chain(c.switching.as_ref().map(|s| s.0)).collect();
+        if let Session::Ready(id) = c.session { sessions.push(id); }
+        sessions.sort_unstable();
+        sessions.dedup();
+        for id in sessions { self.notify(ClientNotify::AiClose { id }); }
         self.ai.chats.remove(i);
         if let Some((rows, sel)) = &mut self.ai.panic {
             rows.retain(|(k, _)| *k != key);

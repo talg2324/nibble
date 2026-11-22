@@ -746,6 +746,8 @@ const CARRY_HEAD: &str = "(Our conversation so far was compacted. Summary of it:
 pub struct Sessions {
     next: AiId,
     map: HashMap<AiId, Session>,
+    /// Context for the first message after changing providers (also for streamed sessions).
+    carry: HashMap<AiId, String>,
     /// Sessions whose processes are frozen (`suspend`).
     frozen: std::collections::HashSet<AiId>,
     /// The agents' mailbox folder (`mail`), once a session has started.
@@ -1233,7 +1235,7 @@ fn codex_skill_catalog(skills: &[AiSkill]) -> String {
 /// Check that `agent` is there and signed in and start a chat at `root` with `model` (`None`:
 /// the one it's set up with); what it says streams to the client as `AiEvent`s.
 #[allow(clippy::too_many_arguments)]
-pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tuning, tools: bool, mode: AiMode, resume: Option<&str>, root: &Path, dirs: Dirs, tx: Sender<ServerMsg>) -> Result<AiId, RpcError> {
+pub fn open(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: Option<String>, tuning: Tuning, tools: bool, mode: AiMode, resume: Option<&str>, root: &Path, dirs: Dirs, tx: Sender<ServerMsg>) -> Result<AiId, RpcError> {
     let tuning = tuning.for_agent(agent);
     let Some(exe) = find(agent) else {
         return Err(not_ready(agent, ErrorKind::NotFound, "isn't installed"));
@@ -1247,7 +1249,20 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
             log!("ollama: {e}");
         }
     }
+    open_ready(sessions, replace, agent, model, tuning, tools, mode, resume, root, dirs, tx, exe)
+}
+
+/// Start a validated assistant. Keeping this separate also lets lifecycle tests run without
+/// installed assistants, credentials, or paid model calls.
+#[allow(clippy::too_many_arguments)]
+fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: Option<String>, tuning: Tuning, tools: bool, mode: AiMode, resume: Option<&str>, root: &Path, dirs: Dirs, tx: Sender<ServerMsg>, exe: PathBuf) -> Result<AiId, RpcError> {
     let mut s = sessions.lock().unwrap();
+    if let Some(old) = replace {
+        let m = s.meta.get(&old).ok_or_else(|| RpcError::new(ErrorKind::NotFound, "the previous conversation is no longer available"))?;
+        if m.busy.load(Ordering::Relaxed) {
+            return Err(RpcError::new(ErrorKind::BadRequest, "stop the current reply before switching models"));
+        }
+    }
     let id = s.next;
     s.next += 1;
     if s.mail.is_none() {
@@ -1264,7 +1279,7 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
         thread::spawn(move || post_office(weak));
     }
     // What the agent's commands see: nib's folders (the nib-artifacts skill), and the mailbox.
-    let name = mail::name(agent, id);
+    let name = replace.and_then(|old| s.meta.get(&old)).map(|m| m.id_name.clone()).unwrap_or_else(|| mail::name(agent, id));
     let mut env: Vec<(&'static str, OsString)> = Vec::new();
     env.extend(dirs.scratch.map(|p| ("NIB_SCRATCH", p.as_os_str().to_os_string())));
     env.extend(dirs.nibdir.map(|p| ("NIBDIR", p.as_os_str().to_os_string())));
@@ -1284,11 +1299,26 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
     }
     // A past conversation goes on in its own record, with the assistant's session of it.
     // It also keeps its task and the name made from it.
-    let (rec, session, past) = match resume.and_then(|id| history::Recorder::resume(root, id)) {
-        Some((rec, session, past)) => (rec, session, Some(past)),
-        None => (history::Recorder::new(root, agent, model.as_deref()), None, None),
+    let (rec, session, past, previous_agent) = if let Some((old, m)) = replace.and_then(|old| s.meta.get(&old).map(|m| (old, m))) {
+        let session = match s.map.get(&old) {
+            Some(Session::PerTurn(p)) => p.resume.lock().unwrap().clone(),
+            _ => m.rec.lock().unwrap().native_session(),
+        };
+        (m.rec.clone(), session, None, Some(m.agent))
+    } else {
+        match resume.and_then(|id| history::Recorder::resume(root, id)) {
+            Some((rec, session, past)) => {
+                let previous = past.agent;
+                (Arc::new(Mutex::new(rec)), session, Some(past), Some(previous))
+            }
+            None => (Arc::new(Mutex::new(history::Recorder::new(root, agent, model.as_deref()))), None, None, None),
+        }
     };
-    let watch = Watch { sessions: Arc::downgrade(sessions), busy: Arc::new(AtomicBool::new(false)), rec: Arc::new(Mutex::new(rec)) };
+    let session = session.filter(|_| previous_agent == Some(agent));
+    let mut recording = rec.lock().unwrap();
+    let mut carry = if session.is_none() { recording.context() } else { String::new() };
+    let watch = Watch { sessions: Arc::downgrade(sessions), busy: Arc::new(AtomicBool::new(false)), rec: rec.clone() };
+    let native = session.clone();
     let session = match agent {
         AiAgent::Claude => open_claude(&exe, model.as_deref(), &tuning, tools, mode, session.as_deref(), root, &env, watch.clone(), id, tx.clone())?,
         AiAgent::Codex | AiAgent::Grok | AiAgent::OpenCode => Session::PerTurn(Arc::new(PerTurn {
@@ -1313,19 +1343,35 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
             carry: Mutex::new(None),
         })),
     };
+    recording.selection(agent, model.as_deref(), native.as_deref());
+    drop(recording);
     s.map.insert(id, session);
+    let old = replace.and_then(|old| {
+        let m = s.meta.remove(&old)?;
+        let touched = s.touched.remove(&old).unwrap_or_default();
+        s.touched.insert(id, touched);
+        for by in s.edits.values_mut() { if *by == old { *by = id; } }
+        for (by, _) in s.edit_at.values_mut() { if *by == old { *by = id; } }
+        s.carry.remove(&old);
+        let session = s.map.remove(&old);
+        Some((m, session, s.frozen.remove(&old)))
+    });
     if tools {
         let taken: Vec<&String> = s.meta.values().map(|m| &m.name).collect();
-        let (task, called) = match past {
-            Some(p) => (p.title, p.name.filter(|n| !taken.contains(&n)).unwrap_or_else(|| name.clone())),
-            None => (String::new(), name.clone()),
+        let (task, called) = if let Some((m, _, _)) = &old {
+            (m.task.clone(), m.name.clone())
+        } else {
+            match past {
+                Some(p) => (p.title, p.name.filter(|n| !taken.contains(&n)).unwrap_or_else(|| name.clone())),
+                None => (String::new(), name.clone()),
+            }
         };
         if called != name {
             let _ = tx.send(ServerMsg::Notify(ServerNotify::AiEvent { id, event: AiEvent::Name(called.clone()) }));
         }
         // A reopened conversation: its branch, plan and review come back, and the files it
         // changed with its edit tools are its again (the session that knew is gone).
-        if let Some(past) = resume {
+        if let Some(past) = resume.filter(|_| replace.is_none()) {
             if let (Some(dir), Some(store)) = (s.mail.clone(), s.store.clone()) {
                 work::restore(&dir, &name, &store, past);
                 mail::report(&dir, &name, &mail::Report::Work);
@@ -1337,6 +1383,23 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
             s.touched.entry(id).or_default().extend(edited);
         }
         s.meta.insert(id, Meta { id_name: name, name: called, agent, model, task, mode, busy: watch.busy, tx, rec: watch.rec });
+    }
+    if !carry.is_empty() {
+        if let (Some(dir), Some(m)) = (&s.mail, s.meta.get(&id)) {
+            if let Some(record) = work::record(dir, &m.id_name) {
+                carry.push_str(&format!("\n\nContinue in the existing work tree: {}. Branch: {}. Do not start a new work item.\n", record.dir.display(), record.branch));
+            }
+            if let Some(plan) = work::plan(dir, &m.id_name) {
+                carry.push_str(&format!("Current plan:\n{plan}\n"));
+            }
+            carry.push_str("Use nib-review comments to read any outstanding review before continuing.\n");
+        }
+        s.carry.insert(id, carry);
+    }
+    drop(s);
+    if let Some((_, Some(session), frozen)) = old {
+        if let (true, Some(pid)) = (frozen, pid(&session)) { let _ = signal_tree(pid, "CONT"); }
+        end(session);
     }
     Ok(id)
 }
@@ -2422,6 +2485,10 @@ pub fn send(sessions: &Shared, id: AiId, text: &str, images: &[AiImage]) {
             text.push_str(&format!("\n\n(nib: mail that came while you were idle)\n{waited}"));
         }
     }
+    if let Some(context) = s.carry.remove(&id) {
+        if let Some(m) = s.meta.get(&id) { m.rec.lock().unwrap().context_delivered(); }
+        text = format!("{context}\n\n---\nCurrent user message:\n{text}");
+    }
     let text = text.as_str();
     match s.map.get_mut(&id) {
         Some(Session::Stream { stdin, .. }) => {
@@ -2618,6 +2685,7 @@ pub fn close(sessions: &Shared, id: AiId) {
     let (session, frozen) = {
         let mut s = sessions.lock().unwrap();
         s.meta.remove(&id);
+        s.carry.remove(&id);
         (s.map.remove(&id), s.frozen.remove(&id))
     };
     if let Some(s) = session {
@@ -2643,6 +2711,127 @@ impl Drop for Sessions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_open(shared: &Shared, replace: Option<AiId>, agent: AiAgent, model: &str, root: &Path, tx: &Sender<ServerMsg>) -> Result<AiId, RpcError> {
+        open_ready(shared, replace, agent, Some(model.into()), Tuning::default(), true, AiMode::Auto, None, root, Dirs { scratch: Some(root), nibdir: Some(root) }, tx.clone(), root.join("missing-assistant"))
+    }
+
+    #[test]
+    fn model_switch_transfers_native_context_work_and_review_without_an_old_model_call() {
+        let root = std::env::temp_dir().join(format!("nibd-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let shared: Shared = Default::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let first = test_open(&shared, None, AiAgent::Codex, "first-model", &root, &tx).unwrap();
+        let (name, history_id, mailbox) = {
+            let mut s = shared.lock().unwrap();
+            let m = s.meta.get_mut(&first).unwrap();
+            m.task = "fix parser".into();
+            m.name = "parser".into();
+            let mut rec = m.rec.lock().unwrap();
+            rec.user("Fix parser; retain escaped quotes");
+            rec.session("codex-native");
+            rec.event(&AiEvent::Text("Next: run parser tests.".into()));
+            let name = m.id_name.clone();
+            let history_id = rec.id();
+            drop(rec);
+            if let Session::PerTurn(p) = &s.map[&first] { *p.resume.lock().unwrap() = Some("codex-native".into()); }
+            s.touched.entry(first).or_default().insert("parser.rs".into());
+            s.edits.insert("parser.rs".into(), first);
+            (name, history_id, s.mail.clone().unwrap())
+        };
+        work::set_plan(&mailbox, &name, "# Parser\nRun escaped quote tests").unwrap();
+        let record = work::Record { branch: "nib/feat/parser".into(), base: "main".into(), tree: root.join("parser-tree"), dir: root.join("parser-tree") };
+        std::fs::create_dir_all(&record.dir).unwrap();
+        std::fs::write(mailbox.join("work").join(format!("{name}.json")), serde_json::to_vec(&record).unwrap()).unwrap();
+        review_edit(&shared, first, nib_proto::ReviewOp::Comment(nib_proto::ReviewComment { body: "Cover escaped quotes".into(), ..Default::default() })).unwrap();
+        let work_before = work::state(&mailbox, &name);
+        work::persist(&mailbox, &name, &root.join("work"), &history_id);
+        let second = test_open(&shared, Some(first), AiAgent::Codex, "second-model", &root, &tx).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            assert!(!s.meta.contains_key(&first));
+            assert_eq!(s.meta[&second].id_name, name);
+            assert_eq!(s.meta[&second].name, "parser");
+            assert_eq!(s.meta[&second].rec.lock().unwrap().id(), history_id);
+            assert!(s.touched[&second].contains("parser.rs"));
+            assert_eq!(s.edits["parser.rs"], second);
+            let Session::PerTurn(p) = &s.map[&second] else { panic!("per-turn") };
+            assert_eq!(p.resume.lock().unwrap().as_deref(), Some("codex-native"));
+            assert_eq!(p.model.as_deref(), Some("second-model"));
+            assert!(!s.carry.contains_key(&second), "same provider resumes natively");
+        }
+        let third = test_open(&shared, Some(second), AiAgent::Grok, "other-provider", &root, &tx).unwrap();
+        {
+            let s = shared.lock().unwrap();
+            let Session::PerTurn(p) = &s.map[&third] else { panic!("per-turn") };
+            assert!(p.resume.lock().unwrap().is_none());
+            assert!(s.carry[&third].contains("retain escaped quotes"));
+            assert!(s.carry[&third].contains("Next: run parser tests"));
+            assert!(s.carry[&third].contains("parser-tree"));
+            assert!(s.carry[&third].contains("Run escaped quote tests"));
+            assert_eq!(p.env.iter().find(|(key, _)| *key == "NIB_AGENT").unwrap().1, std::ffi::OsString::from(&name));
+        }
+        assert_eq!(work::state(&mailbox, &name).review, work_before.review);
+        assert_eq!(review(&shared, third).comments[0].body, "Cover escaped quotes");
+        assert_eq!(plan(&shared, third).as_deref(), Some("# Parser\nRun escaped quote tests"));
+        assert!(matches!(diff_target(&shared, third), Some(DiffTarget::Tree { .. })));
+        // Repeated selection before sending must not lose the waiting context.
+        let fourth = test_open(&shared, Some(third), AiAgent::Grok, "another-model", &root, &tx).unwrap();
+        assert!(shared.lock().unwrap().carry[&fourth].contains("retain escaped quotes"));
+        // Failure starting a streamed provider leaves the existing work owner intact.
+        assert!(test_open(&shared, Some(fourth), AiAgent::Claude, "opus", &root, &tx).is_err());
+        assert!(shared.lock().unwrap().meta.contains_key(&fourth));
+        assert_eq!(history::list(&root, "")[0].agent, AiAgent::Grok);
+        close(&shared, fourth);
+        let reopened = open_ready(&shared, None, AiAgent::Grok, Some("another-model".into()), Tuning::default(), true, AiMode::Auto, Some(&history_id), &root, Dirs { scratch: Some(&root), nibdir: Some(&root) }, tx, root.join("missing-assistant")).unwrap();
+        assert_eq!(plan(&shared, reopened).as_deref(), Some("# Parser\nRun escaped quote tests"));
+        assert_eq!(review(&shared, reopened).comments[0].body, "Cover escaped quotes");
+        assert!(shared.lock().unwrap().carry[&reopened].contains("parser-tree"));
+        close(&shared, reopened);
+        history::delete(&root, &history_id).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_provider_handoff_delivers_context_with_the_next_message() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("nibd-switch-send-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.join("assistant");
+        // A local stand-in for Claude's streaming transport; never contacts a provider.
+        std::fs::write(&exe, "#!/bin/sh\nIFS= read -r message\nprintf '%s' \"$message\" > \"$NIB_SCRATCH/received.json\"\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"continued\"}'\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shared: Shared = Default::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let old = test_open(&shared, None, AiAgent::Codex, "first", &root, &tx).unwrap();
+        let history_id = {
+            let s = shared.lock().unwrap();
+            let mut r = s.meta[&old].rec.lock().unwrap();
+            r.user("Fix escaped quotes");
+            r.event(&AiEvent::Text("Parser changed; tests still need running.".into()));
+            r.id()
+        };
+        let new = open_ready(&shared, Some(old), AiAgent::Claude, Some("opus".into()), Tuning::default(), true, AiMode::Auto, None, &root, Dirs { scratch: Some(&root), nibdir: Some(&root) }, tx, exe).unwrap();
+        send(&shared, new, "Run the tests now", &[]);
+        loop {
+            let msg = rx.recv_timeout(Duration::from_secs(5)).expect("the stand-in should answer");
+            if matches!(msg, ServerMsg::Notify(ServerNotify::AiEvent { id, event: AiEvent::TurnDone { .. } }) if id == new) { break; }
+        }
+        let received: Value = serde_json::from_str(&std::fs::read_to_string(root.join("received.json")).unwrap()).unwrap();
+        let prompt = received.pointer("/message/content").unwrap().as_str().unwrap();
+        assert!(prompt.contains("Fix escaped quotes"));
+        assert!(prompt.contains("tests still need running"));
+        assert!(prompt.contains("Current user message:\nRun the tests now"));
+        assert!(!shared.lock().unwrap().carry.contains_key(&new));
+        let (_, entries) = history::load(&root, &history_id).unwrap();
+        assert!(entries.iter().any(|e| matches!(e, nib_proto::AiPastEntry::User(t) if t == "Run the tests now")), "the UI/history retain the user's actual message, without injected context");
+        close(&shared, new);
+        history::delete(&root, &history_id).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn what_a_command_changes_in_the_shared_tree_is_its_agents() {

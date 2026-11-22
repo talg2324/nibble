@@ -147,7 +147,7 @@ enum Pending {
     Lsp { tab: u64, version: u64, op: LspOp },
     ApplyEdits,
     /// For the chat with this key.
-    AiOpen { chat: u64 },
+    AiOpen { chat: u64, generation: u64 },
     /// `then`: the assistant just set up in a terminal, to chat with if it's ready now.
     AiAgents { then: Option<nib_proto::AiAgent> },
     /// The list of past conversations.
@@ -925,7 +925,7 @@ impl App {
                 Task::batch([first, self.git_refresh()])
             }
             (Pending::Git { poll }, result) => self.on_git(poll, result),
-            (Pending::AiOpen { chat }, result) => self.on_ai_opened(chat, result),
+            (Pending::AiOpen { chat, generation }, result) => self.on_ai_opened(chat, generation, result),
             (Pending::AiAgents { then }, result) => self.on_ai_agents(then, result),
             (Pending::AiHistory, result) => self.on_ai_history(result),
             (Pending::AiMailHistory, result) => self.on_ai_mail_history(result),
