@@ -1,6 +1,6 @@
 //! The project's apps (nibd's `serve`), in the window: each server of an app that runs is a
-//! terminal in the terminal column, headed with its app, its name and its state; an app's page
-//! gets a web tab once its server's port answers. Started and stopped from the Apps panel
+//! terminal, headed with its app, its name and its state, shown beside the app's page only
+//! (`term_here`); an app's page gets a web tab once its server's port answers. Started and stopped from the Apps panel
 //! (`apps.rs`), by the `app_*` commands, and by `nib ctl app …`.
 
 use super::{App, Focus, Message, Pending, Term};
@@ -253,24 +253,40 @@ impl App {
         Some(format!("http://127.0.0.1:{here}{}", p.path))
     }
 
+    /// The app whose page web tab `page` shows (any address on the page's origin), if any.
+    fn web_app(&self, page: u32) -> Option<&AppInfo> {
+        if self.serve.list.is_empty() {
+            return None;
+        }
+        let url = &self.web_info(page)?.url;
+        self.serve.list.iter().find(|a| {
+            let Some(base) = self.app_page_url(a) else { return false };
+            let origin = base.split('/').take(3).collect::<Vec<_>>().join("/");
+            url.starts_with(&format!("{origin}/")) || *url == origin
+        })
+    }
+
     /// What a web tab is called in the tab bar: the title of the app whose page it shows, if it
     /// is one, else the page's own name.
     pub(super) fn web_title(&self, page: u32) -> String {
-        let titled = || {
-            if self.serve.list.is_empty() {
-                return None;
-            }
-            // The engine's account of its pages has their addresses.
-            let state = crate::web::state();
-            let url = state["tabs"].as_array()?.iter().find(|t| t["id"] == page)?["url"].as_str()?.to_string();
-            let a = self.serve.list.iter().find(|a| {
-                let Some(base) = self.app_page_url(a) else { return false };
-                let origin = base.split('/').take(3).collect::<Vec<_>>().join("/");
-                url.starts_with(&format!("{origin}/")) || url == origin
-            })?;
-            Some(a.title().to_string())
-        };
-        titled().unwrap_or_else(|| self.web_label(page))
+        self.web_app(page).map_or_else(|| self.web_label(page), |a| a.title().to_string())
+    }
+
+    /// Whether terminal `t` belongs where the window is now. A server's terminal is part of its
+    /// app's page: it shows while that page is the tab in front, and not over code, the agents
+    /// or another page. Until then it shows while the user's Open waits for the page (they
+    /// watch it start), and always for an app with no page (there is nowhere else to put it).
+    pub(super) fn term_here(&self, t: &Term) -> bool {
+        let Some(key) = t.server.as_deref() else { return true };
+        let app = key.split_once('/').map_or(key, |(a, _)| a);
+        let Some(a) = self.serve.get(app) else { return true };
+        if a.def.page.is_none() || self.serve.opening.iter().any(|n| n == app) {
+            return true;
+        }
+        if self.ai.shown() {
+            return false;
+        }
+        self.tab().and_then(|t| t.web).and_then(|page| self.web_app(page)).is_some_and(|f| f.name == app)
     }
 
     /// For `state`: every app the daemon told of, with its servers.
@@ -416,6 +432,45 @@ mod tests {
     }
 
     #[test]
+    fn a_servers_terminal_shows_on_its_apps_page_only() {
+        let mut a = app();
+        a.headless = true;
+        let _ = a.new_terminal();
+        let shell = a.terms[0].key;
+        told(&mut a, demo(vec![server("api", 8765, ServerState::Ready, Some(7)), server("web", 8766, ServerState::Ready, Some(8))]));
+        let here = |a: &App| a.terms_here().map(|t| t.key).collect::<Vec<_>>();
+        let page = |id: u32, url: &str| crate::web::TabInfo {
+            id, name: "p".into(), address: String::new(), url: url.into(), loading: false, blocked: None,
+            dialog: None, choice: None, cursor: String::new(), saved: Vec::new(), zoom: 1.0,
+        };
+        // No page in front: the user's shell, not the app's servers.
+        assert_eq!(here(&a), vec![shell]);
+        // A file, another app's page, then the app's own page (anywhere on its origin).
+        a.put_doc(nib_editor::Document::new_plain(Default::default(), None), true);
+        let file = a.active;
+        for (id, url) in [(1, "http://127.0.0.1:9000/"), (2, "http://127.0.0.1:8766/study/3")] {
+            a.put_doc(nib_editor::Document::new_plain(Default::default(), None), true);
+            let i = a.active;
+            a.tabs[i].web = Some(id);
+            a.web.pages.push(page(id, url));
+        }
+        assert_eq!(here(&a).len(), 3, "on its page: the shell and both servers");
+        let api = a.terms[1].key;
+        a.set_focus(Focus::Terminal(api));
+        assert!(a.focus_ring().contains(&Focus::Terminal(api)));
+        let _ = a.update(Message::SelectTab(file));
+        assert_eq!(here(&a), vec![shell], "over code they are gone");
+        assert!(!matches!(a.focus, Focus::Terminal(_)), "and the keys left them");
+        assert!(!a.focus_ring().contains(&Focus::Terminal(api)));
+        let _ = a.update(Message::SelectTab(file + 1));
+        assert_eq!(here(&a), vec![shell], "another page: gone too");
+        // Opened by the user and not up yet: watched starting from wherever they are.
+        a.serve.opening.push("demo".into());
+        assert_eq!(here(&a).len(), 3);
+        assert_eq!(a.control_state()["terminals"][1]["shown"], true);
+    }
+
+    #[test]
     fn the_apps_are_asked_for_at_connect_and_a_refusal_then_is_not_a_message() {
         let mut a = app();
         a.headless = true;
@@ -452,6 +507,8 @@ mod tests {
         a.headless = true;
         told(&mut a, demo(vec![server("api", 8765, ServerState::Ready, Some(7)), server("web", 8766, ServerState::Stopped, None)]));
         let key = a.terms[0].key;
+        // Shown while the user's Open waits for its page.
+        a.serve.opening.push("demo".into());
         let _ = a.exec(nib_editor::Command::AppRestart);
         assert!(!a.pending.values().any(|p| matches!(p, Pending::Serve { .. })), "no server's terminal has the keyboard");
         a.set_focus(Focus::Terminal(key));

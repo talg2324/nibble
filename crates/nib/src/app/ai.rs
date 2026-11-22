@@ -1794,7 +1794,7 @@ impl App {
         // Back to the file that was in front, if there is one; the agents keep working.
         self.ai.front = self.tabs.is_empty();
         self.focus = match self.ai.return_to.take() {
-            Some(Focus::Terminal(k)) if self.terms_visible && self.terms.iter().any(|t| t.key == k) => Focus::Terminal(k),
+            Some(Focus::Terminal(k)) if self.term_shown(k) => Focus::Terminal(k),
             Some(Focus::Tree) if self.tree.open => Focus::Tree,
             Some(Focus::Git) if self.git_ui.open => Focus::Git,
             _ => Focus::Main,

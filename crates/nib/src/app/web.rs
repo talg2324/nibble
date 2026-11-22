@@ -18,7 +18,7 @@ use nib_editor::{Command, Document};
 /// What the window keeps for its web tabs.
 pub struct Tabs {
     /// The pages there are, as last told, and those this window has (or had) a tab for.
-    pages: Vec<TabInfo>,
+    pub(super) pages: Vec<TabInfo>,
     mine: Vec<u32>,
     shown: u64,
     /// The picture being shown, the page it is of, and what keeps it in the renderer's memory
@@ -112,7 +112,7 @@ impl App {
         self.tab().and_then(|t| t.web)
     }
 
-    fn web_info(&self, page: u32) -> Option<&TabInfo> {
+    pub(super) fn web_info(&self, page: u32) -> Option<&TabInfo> {
         self.web.pages.iter().find(|p| p.id == page)
     }
 

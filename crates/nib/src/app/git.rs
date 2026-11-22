@@ -222,7 +222,7 @@ impl App {
             return;
         }
         self.focus = match self.git_ui.return_to.take() {
-            Some(Focus::Terminal(k)) if self.terms_visible && self.terms.iter().any(|t| t.key == k) => Focus::Terminal(k),
+            Some(Focus::Terminal(k)) if self.term_shown(k) => Focus::Terminal(k),
             Some(Focus::Tree) if self.tree.open => Focus::Tree,
             _ => Focus::Main,
         };

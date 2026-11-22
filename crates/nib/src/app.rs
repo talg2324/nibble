@@ -694,6 +694,7 @@ impl App {
         let web = self.web_follow();
         let task = Task::batch([task, web]);
         self.ai_sync();
+        self.terms_sync();
         self.sync_watch();
         let derived = self.refresh_derived();
         let task = Task::batch([task, derived, self.sync_preview(), self.pdf_tick()]);
@@ -1136,8 +1137,27 @@ impl App {
 
     fn focused_term(&self) -> Option<&Term> {
         match self.focus {
-            Focus::Terminal(k) if self.terms_visible => self.terms.iter().find(|t| t.key == k),
+            Focus::Terminal(k) if self.term_shown(k) => self.terms.iter().find(|t| t.key == k),
             _ => None,
+        }
+    }
+
+    /// The terminals that belong where the window is now (a server's only on its app's page).
+    fn terms_here(&self) -> impl Iterator<Item = &Term> {
+        self.terms.iter().filter(|t| self.term_here(t))
+    }
+
+    /// Terminal `k` is on screen.
+    fn term_shown(&self, k: u64) -> bool {
+        self.terms_visible && self.terms_here().any(|t| t.key == k)
+    }
+
+    /// The keyboard leaves a terminal that is no longer on screen (its app's page went behind).
+    fn terms_sync(&mut self) {
+        if let Focus::Terminal(k) = self.focus {
+            if !self.term_shown(k) {
+                self.focus = self.content_focus();
+            }
         }
     }
 
@@ -1160,7 +1180,7 @@ impl App {
         }
         ring.push(if self.ai.shown() { Focus::Ai } else { Focus::Main });
         if self.terms_visible {
-            ring.extend(self.terms.iter().map(|t| Focus::Terminal(t.key)));
+            ring.extend(self.terms_here().map(|t| Focus::Terminal(t.key)));
         }
         if self.git_ui.open {
             ring.push(Focus::Git);
@@ -1270,7 +1290,7 @@ impl App {
     fn leave_toolbar(&mut self) {
         let back = self.toolbar_return;
         let alive = match back {
-            Focus::Terminal(k) => self.terms_visible && self.terms.iter().any(|t| t.key == k),
+            Focus::Terminal(k) => self.term_shown(k),
             Focus::Git => self.git_ui.open,
             Focus::Ai => self.ai.shown(),
             Focus::Ssh => self.ssh.open,
@@ -1284,7 +1304,7 @@ impl App {
 
     /// Ctrl + ` + H. Never opens a terminal.
     fn hide_show_terms(&mut self) -> Task<Message> {
-        if self.terms.is_empty() {
+        if self.terms_here().next().is_none() {
             return self.flash_info("no terminals (Ctrl+` opens one)");
         }
         self.toggle_terminal(true)
@@ -1345,13 +1365,11 @@ impl App {
     /// Ctrl+`: open a terminal if there is none, show the terminals if hidden, otherwise
     /// switch between the editor and the last-used terminal. The strip button shows/hides.
     fn toggle_terminal(&mut self, from_button: bool) -> Task<Message> {
-        if self.terms.is_empty() {
+        // Another app's servers are not terminals to come back to here.
+        let Some(first) = self.terms_here().next().map(|t| t.key) else {
             return self.new_terminal();
-        }
-        let back_to = self
-            .last_term
-            .filter(|k| self.terms.iter().any(|t| t.key == *k))
-            .unwrap_or(self.terms[0].key);
+        };
+        let back_to = self.last_term.filter(|k| self.terms_here().any(|t| t.key == *k)).unwrap_or(first);
         if !self.terms_visible {
             self.terms_visible = true;
             self.set_focus(Focus::Terminal(back_to));
@@ -1791,7 +1809,7 @@ impl App {
     /// Close only what has focus: the focused terminal, the file tree, or the editor tab. The bottom toolbar has nothing to close.
     fn close_focused(&mut self) -> Task<Message> {
         match self.focus {
-            Focus::Terminal(_) if self.terms_visible => {
+            Focus::Terminal(k) if self.term_shown(k) => {
                 self.close_focused_term();
                 Task::none()
             }
@@ -1951,15 +1969,16 @@ impl App {
         };
 
         // The halo marks where keys go; on the main view only when another pane competes for them.
-        let halo = self.terms_visible || self.tree.open;
+        let here: Vec<&Term> = if self.terms_visible { self.terms_here().collect() } else { Vec::new() };
+        let halo = !here.is_empty() || self.tree.open;
         let mut center = row![];
         if self.tree.open {
             center = center.push(self.tree_view()).push(self.vrule());
         }
         center = center.push(self.pane(main, halo && matches!(self.focus, Focus::Main | Focus::Ai)).id(drop::MAIN).width(Length::FillPortion(3)));
-        if self.terms_visible {
+        if !here.is_empty() {
             let mut stack = column![];
-            for (i, t) in self.terms.iter().enumerate() {
+            for (i, t) in here.into_iter().enumerate() {
                 if i > 0 {
                     stack = stack.push(self.hrule());
                 }

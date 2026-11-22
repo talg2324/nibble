@@ -429,7 +429,7 @@ impl App {
         });
     }
 
-    fn control_state(&self) -> Value {
+    pub(super) fn control_state(&self) -> Value {
         let focus = match self.focus {
             Focus::Tree => "tree".to_owned(),
             Focus::Tabs => "tabs".to_owned(),
@@ -504,6 +504,8 @@ impl App {
                 json!({
                     "key": t.key,
                     "focused": self.focus == Focus::Terminal(t.key),
+                    // On screen: a server's terminal shows on its app's page only.
+                    "shown": self.term_shown(t.key),
                     "started": t.id.is_some(),
                     "server": t.server,
                     "size": [t.size.0, t.size.1],
