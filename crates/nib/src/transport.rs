@@ -61,17 +61,30 @@ impl Conn {
 /// Ping the daemon every `PING_EVERY` so it knows this window is still there (it exits after a
 /// couple of minutes of silence). Runs off the UI thread: a busy or headless window still pings.
 fn heartbeat(stdin: Weak<Mutex<ChildStdin>>) {
-    std::thread::spawn(move || {
-        for seq in 0.. {
-            std::thread::sleep(nib_proto::PING_EVERY);
-            let Some(w) = stdin.upgrade() else { return };
-            let Ok(mut w) = w.lock() else { return };
-            let ping = ClientMsg::Notify(nib_proto::ClientNotify::Ping { seq });
-            if nib_proto::send(&mut *w, &ping).is_err() {
-                return;
-            }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(nib_proto::PING_EVERY);
+        let Some(w) = stdin.upgrade() else { return };
+        let Ok(mut w) = w.lock() else { return };
+        let seq = PING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ping = ClientMsg::Notify(nib_proto::ClientNotify::Ping { seq });
+        PINGS.lock().unwrap().push_back((seq, std::time::Instant::now()));
+        if nib_proto::send(&mut *w, &ping).is_err() {
+            return;
         }
     });
+}
+
+/// Pings in flight, for the round trip (`seq` is unique across connections, so the window's
+/// daemons don't answer each other's).
+static PING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PINGS: Mutex<std::collections::VecDeque<(u64, std::time::Instant)>> = Mutex::new(std::collections::VecDeque::new());
+
+/// The round trip of ping `seq`, now that its pong is here.
+pub fn pong(seq: u64) -> Option<std::time::Duration> {
+    let mut q = PINGS.lock().unwrap();
+    q.retain(|(_, t)| t.elapsed() < std::time::Duration::from_secs(600));
+    let i = q.iter().position(|(s, _)| *s == seq)?;
+    q.remove(i).map(|(_, t)| t.elapsed())
 }
 
 impl Drop for Conn {

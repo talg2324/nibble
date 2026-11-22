@@ -391,6 +391,7 @@ impl App {
     /// Everything that belongs to the machine the window was connected to.
     fn reset_machine_state(&mut self) {
         self.pending.clear();
+        self.sent.clear();
         // config.toml and other local tabs don't live on the daemon's machine.
         self.tabs.retain(|t| t.local);
         self.active = self.active.min(self.tabs.len().saturating_sub(1));

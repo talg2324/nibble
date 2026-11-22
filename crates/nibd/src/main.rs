@@ -28,11 +28,13 @@ use nib_proto::{
     recv, send, AiEvent, ClientMsg, ClientNotify, ErrorKind, Place, ReqId, Request, Response, RpcError, ServerMsg,
     ServerNotify, PROTOCOL_VERSION,
 };
+use nib_proto::timing;
+use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -114,10 +116,22 @@ fn serve_with<W: io::Write + Send + 'static>(
     output: W,
 ) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<ServerMsg>();
+    // Requests in flight: when each arrived and what it was. A request is timed from here until
+    // its response is written, wherever it was answered (this thread, a worker, a language server).
+    let started: Arc<Mutex<HashMap<ReqId, (Instant, String)>>> = Default::default();
+    let started_w = started.clone();
     let writer = thread::spawn(move || -> anyhow::Result<()> {
         let mut out = BufWriter::new(output);
         for msg in rx {
             send(&mut out, &msg)?;
+            if let ServerMsg::Response { id, .. } = &msg {
+                if let Some((t, name)) = started_w.lock().unwrap().remove(id) {
+                    let d = t.elapsed();
+                    if let Some(kind) = timing::verdict(d, timing::SLOW_RPC) {
+                        log!("{kind}  {}", timing::line("req", &name, d));
+                    }
+                }
+            }
         }
         Ok(())
     });
@@ -125,6 +139,16 @@ fn serve_with<W: io::Write + Send + 'static>(
     let mut state =
         State { root: None, places: None, ptys: pty::Ptys::default(), lsp: None, ai: Default::default(), watch: watch::Watcher::new(tx.clone()), tx: tx.clone() };
     while let Some(msg) = next()? {
+        let t0 = Instant::now();
+        // Requests are timed by the writer; a notification is done when this loop turns.
+        let notify = match &msg {
+            ClientMsg::Request { id, req } => {
+                started.lock().unwrap().insert(*id, (t0, timing::label(req)));
+                None
+            }
+            ClientMsg::Notify(n) => Some(n),
+        }
+        .map(timing::label);
         match msg {
             ClientMsg::Request { id, req } => {
                 let shutdown = matches!(req, Request::Shutdown);
@@ -174,6 +198,12 @@ fn serve_with<W: io::Write + Send + 'static>(
                 if let Some(lsp) = &mut state.lsp {
                     lsp.close(resolve(state.root.as_ref(), &path));
                 }
+            }
+        }
+        if let Some(name) = notify {
+            let d = t0.elapsed();
+            if let Some(kind) = timing::verdict(d, timing::SLOW_RPC) {
+                log!("{kind}  {}", timing::line("notify", &name, d));
             }
         }
     }

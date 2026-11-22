@@ -324,6 +324,8 @@ pub struct App {
     /// Files dropped on the window, waiting to be told where.
     drops: drop::Drops,
     pending: HashMap<ReqId, Pending>,
+    /// Requests in flight: when each was sent and what it was (timed into `nib.log`).
+    sent: HashMap<ReqId, (Instant, String)>,
     keymap: Keymap,
     theme: Theme,
     icons: Icons,
@@ -451,6 +453,7 @@ impl App {
             ssh: Default::default(),
             drops: Default::default(),
             pending,
+            sent: HashMap::new(),
             keymap,
             theme,
             icons,
@@ -592,8 +595,10 @@ impl App {
         let Some(conn) = self.conn.as_mut().filter(|_| !self.disconnected) else {
             return self.flash_warn("not connected");
         };
+        let (t0, name) = (Instant::now(), nib_proto::timing::label(&req));
         match conn.request(req) {
             Ok(id) => {
+                self.sent.insert(id, (t0, name));
                 self.pending.insert(id, p);
                 Task::none()
             }
@@ -612,11 +617,30 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Message) -> Task<Message> {
+        let t0 = Instant::now();
+        // Daemon traffic is named by what came, a response by the request it answers.
+        let name = match &msg {
+            Message::Conn(_, ConnEvent::Server(m)) => match m {
+                ServerMsg::Response { id, .. } => {
+                    format!("Server/Response/{}", self.sent.get(id).map_or("?", |(_, req)| req.as_str()))
+                }
+                ServerMsg::Notify(n) => format!("Server/Notify/{}", nib_proto::timing::label(n)),
+            },
+            Message::Conn(_, e) => format!("Conn/{}", nib_proto::timing::label(e)),
+            // `nib ctl run save` is `Ctl/run/save`, `nib ctl open …` is `Ctl/open`.
+            Message::Ctl(c) => match c.str_arg("command") {
+                Some(name) => format!("Ctl/{}/{name}", c.cmd()),
+                None => format!("Ctl/{}", c.cmd()),
+            },
+            _ => nib_proto::timing::label(&msg),
+        };
         let task = self.handle(msg);
         self.ai_sync();
         self.sync_watch();
         let derived = self.refresh_derived();
-        Task::batch([task, derived, self.sync_preview(), self.pdf_tick()])
+        let task = Task::batch([task, derived, self.sync_preview(), self.pdf_tick()]);
+        crate::timing::report("update", &name, t0.elapsed(), nib_proto::timing::SLOW_UI);
+        task
     }
 
     /// Keep the agents tab and the file tabs from both being in front: a file tab that was
@@ -819,7 +843,12 @@ impl App {
         let (id, result) = match m {
             ServerMsg::Response { id, result } => (id, result),
             ServerMsg::Notify(ServerNotify::Log { msg, .. }) => return self.flash_info(msg),
-            ServerMsg::Notify(ServerNotify::Pong { .. }) => return Task::none(),
+            ServerMsg::Notify(ServerNotify::Pong { seq }) => {
+                if let Some(d) = crate::transport::pong(seq) {
+                    crate::timing::report("ping", "nibd", d, nib_proto::timing::SLOW_RPC);
+                }
+                return Task::none();
+            }
             ServerMsg::Notify(ServerNotify::PtyOutput { id, data }) => {
                 let mut reply = Vec::new();
                 if let Some(t) = self.terms.iter_mut().find(|t| t.id == Some(id)) {
@@ -848,6 +877,9 @@ impl App {
                 return Task::none();
             }
         };
+        if let Some((t0, name)) = self.sent.remove(&id) {
+            crate::timing::report("rpc", &name, t0.elapsed(), nib_proto::timing::SLOW_RPC);
+        }
         let Some(p) = self.pending.remove(&id) else { return Task::none() };
         match (p, result) {
             (Pending::Hello { open }, Ok(Response::Hello { root, scratch, nibdir, lsp_extensions, .. })) => {
@@ -1788,6 +1820,13 @@ impl App {
     // -----------------------------------------------------------------------------------------
 
     pub fn view(&self) -> Element<'_, Message> {
+        let t0 = Instant::now();
+        let e = self.build_view();
+        crate::timing::report("view", "window", t0.elapsed(), nib_proto::timing::SLOW_UI);
+        e
+    }
+
+    fn build_view(&self) -> Element<'_, Message> {
         let th = &self.theme;
         let bg = th.background;
         let main: Element<'_, Message> = if self.ai_history_front() && self.ai.shown() {

@@ -10,6 +10,7 @@ use std::io::{self, Read, Write};
 pub mod frame;
 pub mod path;
 pub mod skills;
+pub mod timing;
 pub use frame::{read_frame, write_frame, FrameError, MAX_FRAME};
 
 /// Bumped on any incompatible change. Client and daemon must match exactly (the daemon binary is
