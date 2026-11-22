@@ -13,6 +13,7 @@ mod ai;
 mod history;
 mod mail;
 mod attach;
+mod diff;
 mod fs_ops;
 mod git;
 mod jobs;
@@ -20,9 +21,11 @@ mod lsp;
 mod ollama;
 mod places;
 mod pty;
+mod review;
 mod search;
 mod tree;
 mod watch;
+mod work;
 
 use nib_proto::{
     recv, send, AiEvent, ClientMsg, ClientNotify, ErrorKind, Place, ReqId, Request, Response, RpcError, ServerMsg,
@@ -49,6 +52,10 @@ fn main() -> anyhow::Result<()> {
         }
         // Run by an agent nib started: the agents' mailbox (see `mail`).
         Some("mail") => std::process::exit(mail::cli(&args[1..])),
+        // And their branches and plans (see `work`).
+        Some("work") => std::process::exit(work::cli(&args[1..])),
+        // And their answers to the user's review of their work (see `review`).
+        Some("review") => std::process::exit(review::cli(&args[1..])),
         None | Some("--stdio") => {}
         Some(other) => anyhow::bail!("unknown argument {other:?}; usage: nibd [--stdio|--version]"),
     }
@@ -341,7 +348,7 @@ impl State {
             });
             return None;
         }
-        if matches!(req, Request::GitInfo | Request::GitDetails { .. } | Request::GitRun { .. } | Request::Tree { .. }) {
+        if matches!(req, Request::GitInfo | Request::GitDetails { .. } | Request::GitRun { .. } | Request::Diff { .. } | Request::WorkLand { .. } | Request::Review { .. } | Request::ReviewEdit { .. } | Request::Tree { .. }) {
             let Some(root) = self.root.clone() else {
                 return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
             };
@@ -355,6 +362,14 @@ impl State {
             // `git` runs (a pull can take a while) or the project is walked: off the reader thread,
             // so input to terminals is never held up.
             let tx = self.tx.clone();
+            let ai = self.ai.clone();
+            // Whose work an agents' diff shows, as it stands now.
+            let targets = match &req {
+                Request::Diff { scope: nib_proto::DiffScope::Agent(id), .. } => ai::diff_target(&self.ai, *id).map(|t| vec![(*id, t)]).unwrap_or_default(),
+                Request::Diff { scope: nib_proto::DiffScope::Everyone, .. } => ai::diff_targets(&self.ai),
+                Request::Diff { scope: nib_proto::DiffScope::Since(id), .. } => ai::diff_since(&self.ai, *id).map(|t| vec![(*id, t)]).unwrap_or_default(),
+                _ => Vec::new(),
+            };
             thread::spawn(move || {
                 let resp = match req {
                     Request::Tree { known, place, open } => {
@@ -363,6 +378,20 @@ impl State {
                     Request::GitDetails { log_limit } => {
                         let (commits, changes) = git::details(&root, log_limit);
                         Response::GitDetails { commits, changes }
+                    }
+                    Request::Diff { scope, known } => Response::Diff(diff::diff(&root, scope, known, &targets)),
+                    Request::Review { id } => Response::Review(ai::review(&ai, id)),
+                    Request::ReviewEdit { id: agent, op } => match ai::review_edit(&ai, agent, op) {
+                        Ok((review, Some(message))) => Response::ReviewSent { review, message },
+                        Ok((review, None)) => Response::Review(review),
+                        Err(e) => {
+                            let _ = tx.send(ServerMsg::Response { id, result: Err(RpcError::new(ErrorKind::BadRequest, e)) });
+                            return;
+                        }
+                    },
+                    Request::WorkLand { id, message } => {
+                        let (ok, output) = ai::land(&ai, id, &root, &message);
+                        Response::GitRan { ok, output }
                     }
                     Request::GitRun { op } => {
                         let (ok, output) = git::run(&root, &op);
@@ -456,6 +485,10 @@ impl State {
             | Request::GitInfo
             | Request::GitDetails { .. }
             | Request::GitRun { .. }
+            | Request::Diff { .. }
+            | Request::WorkLand { .. }
+            | Request::Review { .. }
+            | Request::ReviewEdit { .. }
             | Request::Tree { .. }
             | Request::Search { .. }
             | Request::AiOpen { .. }
@@ -471,6 +504,7 @@ impl State {
             // In order, on this thread: a rename followed by a delete must not race.
             Request::Fs { op, place } => fs_ops::fs_op(&self.place_dir(place)?, &op),
             Request::ListDir { path } => fs_ops::list_dir(&self.resolve(&path)),
+            Request::WorkPlan { id } => Ok(Response::WorkPlan(ai::plan(&self.ai, id))),
             Request::AiSkills { agent } => Ok(Response::AiSkills(ai::skills(agent, self.root.as_deref()))),
             Request::AiHistory { query } => Ok(Response::AiHistory(self.root.as_deref().map(|r| history::list(r, &query)).unwrap_or_default())),
             Request::AiMailHistory { query } => Ok(Response::AiMailHistory(self.root.as_deref().map(|r| history::letters(r, &query)).unwrap_or_default())),

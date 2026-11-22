@@ -104,6 +104,37 @@ pub enum Request {
     GitRun {
         op: GitOp,
     },
+    /// What changed under the project root, as a parsed `git diff` -> `Diff`. `known`: the
+    /// `stamp` of the diff the client already has; when it is still that one, the answer leaves
+    /// `files` out (the client asks again and again while its diff view is open).
+    Diff {
+        scope: DiffScope,
+        #[serde(default)]
+        known: Option<u64>,
+    },
+    /// The plan agent `id` recorded (`nib-work plan`, or the one it asked approval for), as
+    /// Markdown -> `WorkPlan` (`None`: it has none).
+    WorkPlan {
+        id: AiId,
+    },
+    /// Land the branch of agent `id` on the branch it left, as one commit with `message`
+    /// (`git merge --squash`), then remove its work tree and branch -> `GitRan`. When it cannot
+    /// (the base moved and the two conflict, the project is on another branch, something is
+    /// staged), nothing is changed and `output` says why.
+    WorkLand {
+        id: AiId,
+        message: String,
+    },
+    /// The review of agent `id`'s work: the comments on it, each put back on the lines it is
+    /// about where those moved -> `Review`.
+    Review {
+        id: AiId,
+    },
+    /// Change that review -> `Review` as it is afterwards (`ReviewOp::Send`: `ReviewSent`).
+    ReviewEdit {
+        id: AiId,
+        op: ReviewOp,
+    },
     /// Every file and folder under the project root, with git's view of them -> `Tree`.
     /// `known`: the `stamp` of the listing the client already has; when nothing was added or
     /// removed since, the answer leaves `entries` out.
@@ -245,6 +276,100 @@ pub enum GitOp {
     Stage { paths: Vec<String> },
     /// Take `paths` out of the index again; the work tree is not touched.
     Unstage { paths: Vec<String> },
+}
+
+/// Which two states of the project a diff compares.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum DiffScope {
+    /// The last commit against the work tree: everything not committed, untracked files included.
+    #[default]
+    Head,
+    /// The index against the work tree: what `git add` would stage (untracked files included).
+    Unstaged,
+    /// The last commit against the index: what a commit would record.
+    Staged,
+    /// One agent's work, like its pull request. An agent on its own branch (`nib-work start`):
+    /// where the branch left its base against its work tree, committed or not. An agent in the
+    /// shared work tree: `Head`, only the files it changed.
+    Agent(AiId),
+    /// Everybody's work: `Head` of the shared work tree, then each agent's branch.
+    Everyone,
+    /// What an agent on its own branch changed since the last review was sent to it
+    /// (`ReviewOp::Send`): that moment's work tree against the work tree now.
+    Since(AiId),
+}
+
+/// A diff: its files in git's order (by path). Paths are relative to the project root, with `/`
+/// separators; changes outside the root are left out.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DiffSet {
+    /// Identifies this diff (a hash of what git printed).
+    pub stamp: u64,
+    /// `None`: the same diff as the `known` stamp of the request.
+    pub files: Option<Vec<DiffFile>>,
+    /// The root is inside a git work tree. `false`: there is nothing to compare.
+    pub repo: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DiffFile {
+    /// Where the file is now (a deleted file: where it was).
+    pub path: String,
+    /// A renamed file's path before.
+    pub old_path: Option<String>,
+    pub status: DiffStatus,
+    /// Not text: no hunks.
+    pub binary: bool,
+    /// Lines added and removed, over the whole file (also when `truncated`).
+    pub adds: u32,
+    pub dels: u32,
+    /// The diff is longer than one answer carries; the last hunks are missing.
+    pub truncated: bool,
+    pub hunks: Vec<DiffHunk>,
+    /// The agents whose work this is (`DiffScope::Agent` / `Everyone`): on its branch, or having
+    /// changed the file in the shared work tree. Empty: nobody nib knows of.
+    #[serde(default)]
+    pub agents: Vec<AiId>,
+    /// The folder `path` is relative to when that is not the project root: an agent's work tree
+    /// (absolute, on the daemon's machine).
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DiffStatus {
+    Added,
+    #[default]
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+/// One `@@ -old_start,old_len +new_start,new_len @@ header` block. Line numbers are 1-based.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DiffHunk {
+    pub old_start: u32,
+    pub old_len: u32,
+    pub new_start: u32,
+    pub new_len: u32,
+    /// What git prints after the second `@@`: the enclosing function, usually.
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    /// Without its line ending.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DiffLineKind {
+    /// In both.
+    Context,
+    Add,
+    Del,
 }
 
 /// File operations of the file tree. Paths are relative to the project root and may not leave it.
@@ -631,6 +756,12 @@ pub enum Response {
         output: String,
     },
     Tree(TreeSnapshot),
+    Diff(DiffSet),
+    WorkPlan(Option<String>),
+    Review(Review),
+    /// The review was sent: `message` is what to say to the agent (the open comments, and how
+    /// to answer them).
+    ReviewSent { review: Review, message: String },
     Search(SearchResults),
     Ok,
 }
@@ -806,6 +937,85 @@ pub enum AiEvent {
     /// The agent believes the job it was given is done (`nib-mail done`): what was asked,
     /// found and done, for the user to accept (the agent is then ended) or keep working.
     Finished(AiFinished),
+    /// The agent recorded its plan or started its own branch (`nib-work`): how things stand.
+    Work(AiWork),
+}
+
+/// An agent's organized work (`nib-work`): its plan, and the branch it works on in a work tree
+/// of its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AiWork {
+    /// `nib/feat/<slug>` or `nib/fix/<slug>`; `None`: it has no branch (yet), and works in the
+    /// shared work tree.
+    pub branch: Option<String>,
+    /// The folder it works in (the work tree, at the project root's place in it), absolute on
+    /// the daemon's machine.
+    pub dir: Option<String>,
+    /// The branch its own left, and lands on.
+    pub base: Option<String>,
+    /// It recorded a plan; the number changes when the plan does (`Request::WorkPlan` reads it).
+    pub plan: Option<u64>,
+    /// Its work has review comments; the number changes when they do (`Request::Review`).
+    #[serde(default)]
+    pub review: Option<u64>,
+}
+
+/// The user's review of an agent's work, as nibd keeps it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct Review {
+    /// How many times it was sent to the agent.
+    pub round: u32,
+    /// A review was sent while the agent was on its own branch, so `DiffScope::Since` has
+    /// something to compare with.
+    #[serde(default)]
+    pub since: bool,
+    pub comments: Vec<ReviewComment>,
+}
+
+/// One comment: on lines of a file, on a file (`start_line` 0), or on the work as a whole (no
+/// `path`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ReviewComment {
+    /// `c1`, `c2`, …
+    pub id: String,
+    /// Relative to where the agent works; `None`: about the whole work.
+    pub path: Option<String>,
+    /// On the file as it was (a removed line), not as it is now.
+    #[serde(default)]
+    pub old: bool,
+    /// 1-based, both included; 0 and 0: about the whole file.
+    pub start_line: u32,
+    pub end_line: u32,
+    /// The text of those lines when it was written: where they went is found by it.
+    pub anchor: String,
+    pub body: String,
+    pub author: String,
+    /// The round it was first sent in; 0: not sent yet.
+    pub round: u32,
+    pub resolved: bool,
+    /// Its lines changed and their text wasn't found again: the line numbers are a guess.
+    pub drifted: bool,
+    pub replies: Vec<ReviewReply>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ReviewReply {
+    pub id: String,
+    pub body: String,
+    pub author: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ReviewOp {
+    /// A new comment by the user (`id`, `author`, `round`, `replies` are filled in).
+    Comment(ReviewComment),
+    /// The user's reply to comment `to`.
+    Reply { to: String, body: String },
+    Resolve { comment: String, resolved: bool },
+    /// Take a comment back.
+    Remove { comment: String },
+    /// Send the open comments to the agent: the next round.
+    Send,
 }
 
 /// An agent's word that its job is done, at most `AiFinished::WORDS` words in all.

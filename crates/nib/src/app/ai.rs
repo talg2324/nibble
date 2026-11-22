@@ -663,6 +663,8 @@ pub enum Msg {
     Revise,
     /// Accept the shown agent's word that its job is done, ending it (`true`), or go back to it.
     Accept(bool),
+    /// Put that question away and show the agent's work in the diff tab.
+    AcceptDiff,
     /// Paste was pressed in the message box: what the clipboard held.
     Clip(Clip),
     /// Take picture `i` off the message being written.
@@ -932,6 +934,61 @@ impl App {
         self.ai.cur
     }
 
+    /// The agents with a live session, in the rail's order: the session and what it is called
+    /// (for the diff tab's per-agent scopes).
+    pub(super) fn ai_agents(&self) -> Vec<(AiId, String)> {
+        self.ai
+            .chats
+            .iter()
+            .filter_map(|c| match c.session {
+                Session::Ready(id) => Some((id, stage::agent_name(c)?)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The session of the agent shown, once it is up.
+    pub(super) fn ai_shown_session(&self) -> Option<AiId> {
+        match self.ai.session {
+            Session::Ready(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The agent with session `id` said its job is done, and the user has not answered yet.
+    pub(super) fn ai_said_done(&self, id: AiId) -> bool {
+        self.ai.chats.iter().any(|c| matches!(c.session, Session::Ready(s) if s == id) && c.finished.is_some())
+    }
+
+    /// Bring the agent with session `id` to the front of the agents tab. `false`: it is gone.
+    pub(super) fn ai_show_session(&mut self, id: AiId) -> bool {
+        let Some(i) = self.ai.chats.iter().position(|c| matches!(c.session, Session::Ready(s) if s == id)) else { return false };
+        self.ai.open = true;
+        self.ai.front = true;
+        self.focus = Focus::Ai;
+        self.ai_select(i);
+        true
+    }
+
+    /// End the agent with session `id` (its work landed).
+    pub(super) fn ai_end_agent(&mut self, id: AiId) -> Task<Message> {
+        match self.ai.chats.iter().position(|c| matches!(c.session, Session::Ready(s) if s == id)) {
+            Some(i) => self.ai_kill(i),
+            None => Task::none(),
+        }
+    }
+
+    /// Say `text` to the agent with session `id`, as the user would, and show it in its chat.
+    pub(super) fn ai_tell(&mut self, id: AiId, text: String) {
+        let Some(i) = self.ai.chats.iter().position(|c| matches!(c.session, Session::Ready(s) if s == id)) else { return };
+        let c = &mut self.ai.chats[i];
+        c.finished = None;
+        c.accepting = false;
+        c.busy = true;
+        c.turns.push(Turn { who: Who::User, text: text.clone(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+        self.notify(ClientNotify::AiSend { id, text, attach: Vec::new(), images: Vec::new() });
+    }
+
     /// The agents tab's name in the tab bar: how many are at work.
     pub(super) fn ai_tab_title(&self) -> String {
         match self.ai.chats.iter().filter(|c| c.busy).count() {
@@ -1072,6 +1129,7 @@ impl App {
             Msg::Revise => return self.ai_revise(),
             Msg::Pick(q, o) => return self.ai_pick_answer(q, o),
             Msg::Accept(yes) => return self.ai_accept(yes),
+            Msg::AcceptDiff => return self.ai_accept_diff(),
             Msg::Clip(Clip::Text(s)) => {
                 self.ai.insert(&s.replace("\r\n", "\n"));
                 return self.ai_follow_caret();
@@ -1907,6 +1965,7 @@ impl App {
                 }
             }
             AiEvent::Name(n) => ai.name = Some(n),
+            AiEvent::Work(w) => return self.diff_work(id, w),
             AiEvent::Mail(m) => {
                 let text = if m.incoming { format!("from {}: {}", m.from, m.text) } else { format!("to {}: {}", m.to, m.text) };
                 ai.turns.push(Turn { who: Who::Mail, text, md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
@@ -2109,6 +2168,15 @@ impl App {
         }
         if self.ai.accepting {
             return self.ai_accept_key(chord);
+        }
+        // ⌘D: this agent's work in the diff tab, like its pull request (Esc there comes back).
+        let see = if cfg!(target_os = "macos") { chord.logo && !chord.ctrl } else { chord.ctrl };
+        if see && chord.key == Key::Char('d') && !chord.shift && !chord.alt && !self.ai_history_front() {
+            return match self.ai_shown_session() {
+                Some(id) => self.diff_show(nib_proto::DiffScope::Agent(id)),
+                // Reopened from history, or not started: nib knows its work once it runs.
+                None => self.flash_info("this agent is not running yet: send it a message, then its work shows here"),
+            };
         }
         if self.ai_history_front() {
             return self.ai_history_key(chord, text);
@@ -2936,6 +3004,52 @@ mod tests {
         assert!(!a.ai.accepting && a.ai.chats.len() == 1);
         say(&mut a, "one more thing");
         assert!(a.ai.finished.is_none());
+    }
+
+    #[test]
+    fn cmd_d_in_an_agents_chat_shows_its_work_and_esc_comes_back() {
+        let mut a = chatting();
+        say(&mut a, "add a sum");
+        key(&mut a, if cfg!(target_os = "macos") { "cmd+d" } else { "ctrl+d" });
+        assert!(a.diff_active() && a.focus == Focus::Main);
+        assert_eq!(a.diff_json()["scope"], "agent:7");
+        key(&mut a, "esc");
+        assert!(a.ai.shown() && a.focus == Focus::Ai && a.ai.input.is_empty());
+    }
+
+    #[test]
+    fn an_agent_on_its_own_branch_is_seen_in_the_diff_tab_and_landed_on_accept() {
+        let (accept, see) = if cfg!(target_os = "macos") { ("cmd+enter", "cmd+d") } else { ("ctrl+enter", "ctrl+d") };
+        let done = || AiEvent::Finished(nib_proto::AiFinished { asked: "Add a sum".into(), found: None, did: "Added sum()\nand a test".into() });
+        let landing = |a: &App| a.pending.iter().find_map(|(id, p)| matches!(p, Pending::WorkLand { id: 7 }).then_some(*id));
+        let mut a = chatting();
+        say(&mut a, "add a sum");
+        let work = nib_proto::AiWork { branch: Some("nib/feat/sum".into()), dir: Some("/w/sum".into()), base: Some("main".into()), plan: None, review: None };
+        event(&mut a, 7, AiEvent::Work(work));
+        event(&mut a, 7, done());
+        assert!(a.ai.accepting);
+        // ⌘D: the question is put away and its work shows, like a pull request.
+        key(&mut a, see);
+        assert!(!a.ai.accepting && a.diff_active() && a.ai.finished.is_some());
+        assert_eq!(a.diff_json()["scope"], "agent:7");
+        // ⌘↵ there accepts: the branch is landed first, and the agent stays until that worked.
+        key(&mut a, accept);
+        let req = landing(&a).expect("asked to land");
+        assert_eq!(a.ai.chats.len(), 1);
+        // It could not be: nothing ended, and the agent is told why, in its chat.
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::GitRan { ok: false, output: "CONFLICT (content): a.rs".into() }) });
+        assert!(a.ai.shown() && a.focus == Focus::Ai && a.ai.finished.is_none() && a.ai.busy);
+        let last = a.ai.turns.last().unwrap();
+        assert!(last.who == Who::User && last.text.contains("CONFLICT") && last.text.contains("nib-work sync"), "{}", last.text);
+        // It fixes that and says done again; accepted from the dialog, it lands and is ended.
+        event(&mut a, 7, AiEvent::TurnDone { error: None });
+        event(&mut a, 7, done());
+        assert!(a.ai.accepting);
+        key(&mut a, accept);
+        let req = landing(&a).expect("asked to land again");
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::GitRan { ok: true, output: "abc1234 Added sum() and a test\nlanded nib/feat/sum on main".into() }) });
+        assert!(!a.ai.chats.iter().any(|c| matches!(c.session, Session::Ready(7))), "the agent is ended");
+        assert!(a.diff_branch(7).is_none());
     }
 
     #[test]

@@ -55,6 +55,9 @@ pub struct Entry {
     /// tell whose work its own touches without asking everyone.
     #[serde(default)]
     pub files: Vec<String>,
+    /// How much it may do without asking: `auto`, `manual`, `accept-edits`, `plan`.
+    #[serde(default)]
+    pub mode: String,
 }
 
 /// Words that say nothing about a task.
@@ -111,15 +114,18 @@ fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
     let exe = exe.display().to_string();
     // `C:/…` is the form Git Bash and every MSYS tool take; on Unix there are no `\` to change.
     let sh_exe = if cfg!(windows) { exe.replace('\\', "/") } else { exe.clone() };
-    let script = bin.join("nib-mail");
-    fs::write(&script, format!("#!/bin/sh\nexec '{}' mail \"$@\"\n", sh_exe.replace('\'', "'\\''")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
-    }
-    if cfg!(windows) {
-        fs::write(bin.join("nib-mail.cmd"), format!("@\"{exe}\" mail %*\r\n"))?;
+    // `nib-work` (see `work`) is the same binary's other command for agents.
+    for (name, sub) in [("nib-mail", "mail"), ("nib-work", "work"), ("nib-review", "review")] {
+        let script = bin.join(name);
+        fs::write(&script, format!("#!/bin/sh\nexec '{}' {sub} \"$@\"\n", sh_exe.replace('\'', "'\\''")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+        }
+        if cfg!(windows) {
+            fs::write(bin.join(format!("{name}.cmd")), format!("@\"{exe}\" {sub} %*\r\n"))?;
+        }
     }
     Ok(())
 }
@@ -131,6 +137,8 @@ fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
 pub enum Report {
     Step(AiStep),
     StepDone(AiStepDone),
+    /// The owner's plan or branch changed (`work`): read them again.
+    Work,
 }
 
 /// Where to report to and as whom, when this process runs inside an agent nib started:
@@ -206,6 +214,16 @@ pub fn write_roster(dir: &Path, entries: &[Entry]) {
     if fs::write(&tmp, serde_json::to_vec_pretty(entries).unwrap_or_default()).is_ok() {
         let _ = fs::rename(tmp, dir.join("roster.json"));
     }
+}
+
+/// What the agents call the one with id `id`.
+pub fn name_of(dir: &Path, id: &str) -> Option<String> {
+    roster(dir).into_iter().find(|e| e.id == id).map(|e| e.name)
+}
+
+/// The mode the agent with id `id` works in, as the roster has it.
+pub fn mode_of(dir: &Path, id: &str) -> Option<String> {
+    roster(dir).into_iter().find(|e| e.id == id).map(|e| e.mode).filter(|m| !m.is_empty())
 }
 
 fn roster(dir: &Path) -> Vec<Entry> {
@@ -402,7 +420,7 @@ mod tests {
         s.split(' ').map(String::from).collect()
     }
     fn entry(name: &str, task: &str) -> Entry {
-        Entry { id: name.into(), name: name.into(), assistant: "Claude Code".into(), model: None, task: task.into(), busy: true, files: Vec::new() }
+        Entry { id: name.into(), name: name.into(), assistant: "Claude Code".into(), model: None, task: task.into(), busy: true, files: Vec::new(), mode: String::new() }
     }
 
     #[test]

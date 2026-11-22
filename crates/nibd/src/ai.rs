@@ -14,7 +14,10 @@
 
 use crate::history;
 use crate::mail;
+use crate::diff;
 use crate::ollama;
+use crate::review;
+use crate::work;
 use nib_proto::{
     AiAgent, AiAgentInfo, AiAsk, AiEvent, AiOption, AiQuestion, AiId, AiImage, AiLimit, AiMode, AiModel, AiSkill, AiStep, AiStepDone, AiStepKind, AiUsage, ErrorKind, RpcError, ServerMsg, ServerNotify, SkillGroup,
 };
@@ -620,6 +623,7 @@ fn prime_once(exe: &Path, model: &str, root: &Path, text: &str, config: &str) ->
     opencode_offline(&mut cmd);
     cmd.env("OPENCODE_CONFIG_CONTENT", config)
         .args(one_shot_args(AiAgent::OpenCode, Some(model), None, AiMode::Plan, &[], text))
+        .env("PWD", root)
         .current_dir(root);
     let out = run_for(cmd, PRIME_TIMEOUT).ok_or("the warm-up message didn't finish")?;
     // Not a chat of the user's: out of OpenCode's session list.
@@ -724,6 +728,110 @@ pub struct Sessions {
     /// Who last changed each file, and the pairs already told about sharing one.
     edits: HashMap<String, AiId>,
     warned: std::collections::HashSet<(String, AiId, AiId)>,
+    /// Every file each session changed with its edit tools: its share of the shared work tree
+    /// (`DiffScope::Agent`).
+    touched: HashMap<AiId, std::collections::BTreeSet<String>>,
+    /// When each file was last changed with an edit tool, and by whom.
+    edit_at: HashMap<String, (AiId, Instant)>,
+    /// Where agents' branch records, plans and reviews are kept between sessions
+    /// (`$NIBDIR/work`, by conversation).
+    store: Option<PathBuf>,
+    /// A command (or, for an assistant that reports its commands only when they are over, a
+    /// whole run) of a session in the shared work tree is under way: what was changed there
+    /// when it began, and when that was. What differs when it ends is the session's doing.
+    windows: HashMap<(AiId, String), (diff::Changed, Instant)>,
+}
+
+/// Where an agent's work is, for a diff of it.
+pub enum DiffTarget {
+    /// On its own branch, checked out at `dir` (`nib-work start`), which left `base`.
+    Tree { dir: PathBuf, base: String },
+    /// In the shared work tree: the files it changed (absolute).
+    Paths(Vec<PathBuf>),
+    /// On its own branch at `dir`: what changed there since `commit` (the last review).
+    Since { dir: PathBuf, commit: String },
+}
+
+/// What session `id` changed since its work was last reviewed (`None`: never, or it has no
+/// work tree of its own).
+pub fn diff_since(sessions: &Shared, id: AiId) -> Option<DiffTarget> {
+    let s = sessions.lock().unwrap();
+    let (dir, agent) = (s.mail.as_deref()?, &s.meta.get(&id)?.id_name);
+    Some(DiffTarget::Since { dir: work::record(dir, agent)?.dir, commit: review::since(dir, agent)? })
+}
+
+/// The mailbox folder, session `id`'s name in it, and where it works (its work tree, or the
+/// project).
+fn review_of(sessions: &Shared, id: AiId) -> Option<(PathBuf, String, PathBuf, Option<work::Record>)> {
+    let s = sessions.lock().unwrap();
+    let (dir, agent) = (s.mail.clone()?, s.meta.get(&id)?.id_name.clone());
+    let rec = work::record(&dir, &agent);
+    let at = rec.as_ref().map(|r| r.dir.clone()).or_else(|| s.root.clone())?;
+    Some((dir, agent, at, rec))
+}
+
+/// The review of session `id`'s work (`review::load`).
+pub fn review(sessions: &Shared, id: AiId) -> nib_proto::Review {
+    review_of(sessions, id).map(|(dir, agent, at, _)| review::load(&dir, &agent, &at)).unwrap_or_default()
+}
+
+/// Change it (`review::edit`); sending it also gives what to say to the agent.
+pub fn review_edit(sessions: &Shared, id: AiId, op: nib_proto::ReviewOp) -> Result<(nib_proto::Review, Option<String>), String> {
+    let (dir, agent, at, rec) = review_of(sessions, id).ok_or("no such agent")?;
+    let message = match op {
+        nib_proto::ReviewOp::Send => {
+            // On its own branch: its work as it is now is kept, to compare the next round with.
+            let snapshot = rec.as_ref().and_then(|r| diff::snapshot(&r.tree, &r.branch));
+            Some(review::send(&dir, &agent, snapshot)?)
+        }
+        op => {
+            review::edit(&dir, &agent, op)?;
+            None
+        }
+    };
+    // The client hears that the review changed, as it does when the agent answers.
+    mail::report(&dir, &agent, &mail::Report::Work);
+    Ok((review::load(&dir, &agent, &at), message))
+}
+
+/// The work of session `id` (`None`: no such agent).
+pub fn diff_target(sessions: &Shared, id: AiId) -> Option<DiffTarget> {
+    let s = sessions.lock().unwrap();
+    let m = s.meta.get(&id)?;
+    if let Some(r) = s.mail.as_deref().and_then(|dir| work::record(dir, &m.id_name)) {
+        return Some(DiffTarget::Tree { dir: r.dir, base: r.base });
+    }
+    Some(DiffTarget::Paths(s.touched.get(&id).map(|t| t.iter().map(PathBuf::from).collect()).unwrap_or_default()))
+}
+
+/// The work of every agent, in the order they were started.
+pub fn diff_targets(sessions: &Shared) -> Vec<(AiId, DiffTarget)> {
+    let mut ids: Vec<AiId> = sessions.lock().unwrap().meta.keys().copied().collect();
+    ids.sort();
+    ids.into_iter().filter_map(|id| Some((id, diff_target(sessions, id)?))).collect()
+}
+
+/// Land session `id`'s branch on its base (`work::land`): succeeded, and what to tell the user.
+pub fn land(sessions: &Shared, id: AiId, root: &Path, message: &str) -> (bool, String) {
+    let found = {
+        let s = sessions.lock().unwrap();
+        s.mail.clone().zip(s.meta.get(&id).map(|m| m.id_name.clone()))
+    };
+    let Some((dir, agent)) = found else { return (false, "no such agent".to_string()) };
+    match work::land(&dir, &agent, root, message) {
+        Ok(out) => {
+            // Its branch is gone: the client hears so.
+            mail::report(&dir, &agent, &mail::Report::Work);
+            (true, out)
+        }
+        Err(e) => (false, e),
+    }
+}
+
+/// The plan session `id` recorded.
+pub fn plan(sessions: &Shared, id: AiId) -> Option<String> {
+    let s = sessions.lock().unwrap();
+    work::plan(s.mail.as_deref()?, &s.meta.get(&id)?.id_name)
 }
 
 pub type Shared = Arc<Mutex<Sessions>>;
@@ -742,6 +850,8 @@ struct Meta {
     model: Option<String>,
     /// The start of the user's first message.
     task: String,
+    /// How much it may do without asking, as last heard.
+    mode: AiMode,
     busy: Arc<AtomicBool>,
     tx: Sender<ServerMsg>,
     /// Writes the conversation down (`history`).
@@ -757,14 +867,85 @@ struct Watch {
     rec: Arc<Mutex<history::Recorder>>,
 }
 
+/// The window of a whole run (`Sessions::windows`).
+const RUN: &str = "run";
+
 impl Watch {
+    /// Something that may change files of the shared work tree begins for session `id`
+    /// (`Sessions::windows`). Nothing to watch for a session on its own branch: its work is its
+    /// branch.
+    fn begins(&self, id: AiId, key: &str) {
+        let Some(shared) = self.sessions.upgrade() else { return };
+        let root = {
+            let s = shared.lock().unwrap();
+            let own_tree = s.mail.as_deref().zip(s.meta.get(&id)).is_some_and(|(dir, m)| work::record(dir, &m.id_name).is_some());
+            if own_tree || !s.meta.contains_key(&id) {
+                return;
+            }
+            s.root.clone()
+        };
+        let Some(root) = root else { return };
+        // git runs without the lock held.
+        let before = diff::changed(&root);
+        shared.lock().unwrap().windows.insert((id, key.to_string()), (before, Instant::now()));
+    }
+
+    /// It ended: the files that differ from when it began are session `id`'s.
+    fn ends(&self, id: AiId, key: &str) {
+        let Some(shared) = self.sessions.upgrade() else { return };
+        let (window, root) = {
+            let mut s = shared.lock().unwrap();
+            (s.windows.remove(&(id, key.to_string())), s.root.clone())
+        };
+        let (Some((before, since)), Some(root)) = (window, root) else { return };
+        let after = diff::changed(&root);
+        let mut s = shared.lock().unwrap();
+        for (path, now) in after {
+            if before.get(&path) == Some(&now) {
+                continue;
+            }
+            let path = path.to_string_lossy().into_owned();
+            // Another agent's edit tool changed it meanwhile: theirs.
+            if s.edit_at.get(&path).is_some_and(|(by, at)| *by != id && *at >= since) {
+                continue;
+            }
+            s.touched.entry(id).or_default().insert(path.clone());
+            s.edits.entry(path).or_insert(id);
+        }
+    }
+
     fn see(&self, id: AiId, event: &AiEvent) {
         self.rec.lock().unwrap().event(event);
         match event {
-            AiEvent::TurnDone { .. } | AiEvent::Exit { .. } => self.busy.store(false, Ordering::Relaxed),
+            AiEvent::Step(AiStep { id: step, kind: AiStepKind::Command { background: false, .. }, .. }) => self.begins(id, step),
+            AiEvent::StepDone(done) => self.ends(id, &done.id),
+            _ => {}
+        }
+        match event {
+            AiEvent::TurnDone { .. } | AiEvent::Exit { .. } => {
+                self.busy.store(false, Ordering::Relaxed);
+                self.ends(id, RUN);
+            }
             AiEvent::Step(AiStep { kind: AiStepKind::Edit { path, .. } | AiStepKind::Write { path, .. }, .. }) if !path.is_empty() => {
                 if let Some(s) = self.sessions.upgrade() {
                     s.lock().unwrap().changed(id, path);
+                }
+            }
+            AiEvent::Mode(mode) => {
+                if let Some(s) = self.sessions.upgrade() {
+                    if let Some(m) = s.lock().unwrap().meta.get_mut(&id) {
+                        m.mode = *mode;
+                    }
+                }
+            }
+            // A plan it asks approval for is its plan, whether or not it also runs `nib-work plan`.
+            AiEvent::Ask(ask) if ask.tool == "ExitPlanMode" && !ask.what.trim().is_empty() => {
+                let Some(s) = self.sessions.upgrade() else { return };
+                let s = s.lock().unwrap();
+                if let (Some(dir), Some(m)) = (&s.mail, s.meta.get(&id)) {
+                    if work::set_plan(dir, &m.id_name, &ask.what).is_ok() {
+                        mail::report(dir, &m.id_name, &mail::Report::Work);
+                    }
                 }
             }
             _ => {}
@@ -776,6 +957,8 @@ impl Sessions {
     /// Session `id` is changing `path`. If another live agent changed it before, both are told,
     /// once: they share the working tree.
     fn changed(&mut self, id: AiId, path: &str) {
+        self.touched.entry(id).or_default().insert(path.to_string());
+        self.edit_at.insert(path.to_string(), (id, Instant::now()));
         let before = self.edits.insert(path.to_string(), id).filter(|b| *b != id && self.meta.contains_key(b));
         let (Some(other), Some(dir)) = (before, self.mail.clone()) else { return };
         if !self.warned.insert((path.to_string(), id.min(other), id.max(other))) {
@@ -810,6 +993,13 @@ impl Sessions {
                     task: m.task.clone(),
                     busy: m.busy.load(Ordering::Relaxed),
                     files,
+                    mode: match m.mode {
+                        AiMode::Auto => "auto",
+                        AiMode::Manual => "manual",
+                        AiMode::AcceptEdits => "accept-edits",
+                        AiMode::Plan => "plan",
+                    }
+                    .to_string(),
                 }
             })
             .collect()
@@ -857,6 +1047,13 @@ fn route(shared: &Shared, dir: &Path, letter: mail::Letter) {
                 Err(_) => match serde_json::from_str::<mail::Report>(&letter.text) {
                     Ok(mail::Report::Step(step)) => Some(AiEvent::Step(step)),
                     Ok(mail::Report::StepDone(done)) => Some(AiEvent::StepDone(done)),
+                    Ok(mail::Report::Work) => {
+                        // Kept for when this conversation is reopened in another session.
+                        if let (Some(store), Some(m)) = (&s.store, s.meta.values().find(|m| m.id_name == letter.from)) {
+                            work::persist(dir, &letter.from, store, &m.rec.lock().unwrap().id());
+                        }
+                        Some(AiEvent::Work(work::state(dir, &letter.from)))
+                    }
                     Err(_) => None,
                 },
             };
@@ -1007,6 +1204,9 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
     if s.root.is_none() {
         s.root = Some(root.to_path_buf());
     }
+    if s.store.is_none() {
+        s.store = dirs.nibdir.map(|d| d.join("work"));
+    }
     if !std::mem::replace(&mut s.posting, true) {
         let weak = Arc::downgrade(sessions);
         thread::spawn(move || post_office(weak));
@@ -1020,6 +1220,8 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
         env.push(("NIB_MAILBOX", dir.as_os_str().to_os_string()));
         env.push(("NIB_AGENT", name.clone().into()));
         env.push(("NIBD", me.into_os_string()));
+        // For `nib-work`: where the project is, whatever folder the agent is in.
+        env.push(("NIB_ROOT", root.as_os_str().to_os_string()));
         // `nib-mail` is in the mailbox's `bin`.
         // `join_paths` uses the system's separator (`;` on Windows).
         let rest = std::env::var_os("PATH").unwrap_or_default();
@@ -1069,9 +1271,52 @@ pub fn open(sessions: &Shared, agent: AiAgent, model: Option<String>, tuning: Tu
         if called != name {
             let _ = tx.send(ServerMsg::Notify(ServerNotify::AiEvent { id, event: AiEvent::Name(called.clone()) }));
         }
-        s.meta.insert(id, Meta { id_name: name, name: called, agent, model, task, busy: watch.busy, tx, rec: watch.rec });
+        // A reopened conversation: its branch, plan and review come back, and the files it
+        // changed with its edit tools are its again (the session that knew is gone).
+        if let Some(past) = resume {
+            if let (Some(dir), Some(store)) = (s.mail.clone(), s.store.clone()) {
+                work::restore(&dir, &name, &store, past);
+                mail::report(&dir, &name, &mail::Report::Work);
+            }
+            let edited = history::load(root, past).map(|(_, entries)| entries).unwrap_or_default().into_iter().filter_map(|e| match e {
+                nib_proto::AiPastEntry::Step(AiStep { kind: AiStepKind::Edit { path, .. } | AiStepKind::Write { path, .. }, .. }) if !path.is_empty() => Some(path),
+                _ => None,
+            });
+            s.touched.entry(id).or_default().extend(edited);
+        }
+        s.meta.insert(id, Meta { id_name: name, name: called, agent, model, task, mode, busy: watch.busy, tx, rec: watch.rec });
     }
     Ok(id)
+}
+
+/// Codex's sandbox lets a run write in the folder it is started in and nowhere else. An agent
+/// also writes to the mailbox (`nib-mail`, `nib-work`), to its own work tree, and, when it
+/// commits or makes that work tree, to the repository's git folder: `-c` overrides adding those.
+fn codex_writable(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
+    let var = |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| PathBuf::from(v));
+    let mut roots: Vec<PathBuf> = Vec::new();
+    roots.extend(var("NIB_MAILBOX"));
+    roots.extend(work_trees(env));
+    let git = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).stdin(Stdio::null()).output();
+    if let Ok(out) = git {
+        let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() && !dir.is_empty() {
+            roots.push(PathBuf::from(dir));
+        }
+    }
+    if roots.is_empty() {
+        return Vec::new();
+    }
+    // A JSON list of strings is a TOML one.
+    let list = Value::from(roots.iter().map(|r| r.to_string_lossy().into_owned()).collect::<Vec<_>>());
+    vec!["-c".to_string(), format!("sandbox_workspace_write.writable_roots={list}")]
+}
+
+/// The folder agents' work trees go in (`$NIBDIR/worktrees`), made if needed.
+fn work_trees(env: &[(&'static str, OsString)]) -> Option<PathBuf> {
+    let dir = PathBuf::from(&env.iter().find(|(k, _)| *k == "NIBDIR")?.1).join("worktrees");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 /// Collects the end of stderr on its own thread (a full pipe would stall the assistant).
@@ -1112,7 +1357,9 @@ fn open_claude(exe: &Path, model: Option<&str>, tuning: &Tuning, tools: bool, mo
         .args(resume.map(|id| vec!["--resume", id]).unwrap_or_default())
         // The mailbox is nib's own, and the agents use it at each other's request, not only the
         // user's: without this, auto mode's safety check refuses a reply as unasked-for.
-        .args(if tools { vec!["--allowedTools", "Bash(nib-mail:*)"] } else { vec![] })
+        .args(if tools { vec!["--allowedTools", "Bash(nib-mail:*)", "Bash(nib-work:*)", "Bash(nib-review:*)"] } else { vec![] })
+        // Where `nib-work start` puts an agent's own work tree: its commands may `cd` there.
+        .args(work_trees(env).filter(|_| tools).map(|d| vec!["--add-dir".to_string(), d.to_string_lossy().into_owned()]).unwrap_or_default())
         // nib's own skills, as a plugin for this session (they show up as `nib:<name>`).
         .args(skills_plugin().filter(|_| tools).map(|d| vec!["--plugin-dir".to_string(), d.to_string_lossy().into_owned()]).unwrap_or_default())
         .current_dir(root)
@@ -1837,6 +2084,15 @@ impl PerTurn {
                 c["instructions"] = serde_json::json!([f]);
                 config = c.to_string();
             }
+            // An agent that may work may also work in its own work tree (`nib-work start`),
+            // which is outside the project: the one folder out there it is let into.
+            if let (true, Some(trees)) = (matches!(mode, AiMode::AcceptEdits | AiMode::Auto), work_trees(&self.env)) {
+                let mut c: Value = serde_json::from_str(&config).unwrap_or_default();
+                let trees = trees.to_string_lossy().into_owned();
+                // The last rule that matches decides (the keys are kept sorted: `*` comes first).
+                c["permission"]["external_directory"] = serde_json::json!({ "*": "deny", format!("{trees}/*"): "allow", trees: "allow" });
+                config = c.to_string();
+            }
             cmd.env("OPENCODE_CONFIG_CONTENT", config);
             if self.local {
                 opencode_offline(&mut cmd);
@@ -1854,12 +2110,28 @@ impl PerTurn {
         let mut args = one_shot_args(self.agent, self.model.as_deref(), resume.as_deref(), mode, images, text);
         if self.agent == AiAgent::Codex {
             // Right after `exec`: before `resume`, whose own options these aren't.
-            args.splice(1..1, self.tuning.codex_args());
+            let mut more = self.tuning.codex_args();
+            if matches!(mode, AiMode::AcceptEdits | AiMode::Auto) {
+                more.extend(codex_writable(&self.root, &self.env));
+            }
+            args.splice(1..1, more);
         }
+        if self.agent == AiAgent::OpenCode && purpose == Run::Chat {
+            // It tells of a command only once it is over: what the whole run changes in the
+            // shared work tree is its (nothing is watched for an agent on its own branch).
+            self.watch.begins(self.id, RUN);
+        }
+        // An agent on its own branch stays a process of the project folder: OpenCode keeps a
+        // session to the folder it began in, so it reaches its work tree by path (it is let
+        // into that folder: see the `external_directory` rule, and Codex's writable roots).
+        let dir = &self.root;
         let spawned = cmd
             .envs(self.env.iter().map(|(k, v)| (*k, v.as_os_str())))
+            // OpenCode takes its project folder from `$PWD`, not from the folder it is started
+            // in: left as nibd inherited it, the agent would work wherever nib was started from.
+            .env("PWD", dir)
             .args(args)
-            .current_dir(&self.root)
+            .current_dir(dir)
             // Codex adds piped-in text to the prompt; there is none.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2313,6 +2585,67 @@ impl Drop for Sessions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_a_command_changes_in_the_shared_tree_is_its_agents() {
+        let dir = std::env::temp_dir().join(format!("nibd-ai-windows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = |args: &[&str]| Command::new("git").arg("-C").arg(&dir).args(args).output().is_ok_and(|o| o.status.success());
+        if !sh(&["init", "-q", "-b", "trunk"]) {
+            return; // no git on this machine
+        }
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+            assert!(sh(args));
+        }
+        let dir = nib_proto::path::canonical(&dir).unwrap();
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(f), "one\n").unwrap();
+        }
+        assert!(sh(&["add", "-A"]) && sh(&["commit", "-q", "-m", "first"]));
+        // c.txt was changed before anybody ran anything: nobody's.
+        std::fs::write(dir.join("c.txt"), "mine\n").unwrap();
+
+        let shared: Shared = Default::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let watch = Watch { sessions: Arc::downgrade(&shared), busy: Arc::new(AtomicBool::new(false)), rec: Arc::new(Mutex::new(history::Recorder::new(&dir, AiAgent::Claude, None))) };
+        {
+            let mut s = shared.lock().unwrap();
+            s.root = Some(dir.clone());
+            for id in [1, 2] {
+                let m = Meta { id_name: format!("claude-{id}"), name: format!("claude-{id}"), agent: AiAgent::Claude, model: None, task: "t".into(), mode: AiMode::Auto, busy: watch.busy.clone(), tx: tx.clone(), rec: watch.rec.clone() };
+                s.meta.insert(id, m);
+            }
+        }
+        let path = |f: &str| dir.join(f).to_string_lossy().into_owned();
+        // Agent 1 runs a script that rewrites a.txt and makes n.txt; meanwhile agent 2 edits
+        // b.txt with its edit tool.
+        watch.begins(1, "cmd");
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        std::fs::write(dir.join("n.txt"), "new\n").unwrap();
+        shared.lock().unwrap().changed(2, &path("b.txt"));
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        watch.ends(1, "cmd");
+        let touched = |id: AiId| shared.lock().unwrap().touched.get(&id).map(|t| t.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!(touched(1), [path("a.txt"), path("n.txt")]);
+        assert_eq!(touched(2), [path("b.txt")]);
+        assert!(matches!(diff_target(&shared, 1), Some(DiffTarget::Paths(p)) if p.len() == 2));
+        // A command that changes nothing adds nothing; one that was never begun is ignored.
+        watch.begins(2, "cmd");
+        watch.ends(2, "cmd");
+        watch.ends(2, "other");
+        assert_eq!(touched(2), [path("b.txt")]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn codex_may_write_where_an_agent_must() {
+        let env: Vec<(&'static str, OsString)> = vec![("NIB_MAILBOX", "/s/mailbox".into())];
+        let args = codex_writable(Path::new("/nonexistent-nib-root"), &env);
+        assert_eq!(args, ["-c", r#"sandbox_workspace_write.writable_roots=["/s/mailbox"]"#]);
+        assert!(codex_writable(Path::new("/nonexistent-nib-root"), &[]).is_empty());
+    }
+
 
     fn read(t: &mut Turn, line: &str) -> Vec<AiEvent> {
         t.read(&serde_json::from_str(line).unwrap())

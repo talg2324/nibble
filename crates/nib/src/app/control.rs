@@ -238,6 +238,39 @@ impl App {
                 call.ok(json!({ "allowed": allow }));
                 Task::none()
             }
+            "diff.open" => {
+                let scope = match call.str_arg("scope") {
+                    None => self.diff_scope_named("head"),
+                    Some(name) => self.diff_scope_named(name),
+                };
+                let Some(scope) = scope else {
+                    call.err("no such scope: head, unstaged, staged, everyone, agent:N or an agent's name");
+                    return Task::none();
+                };
+                call.ok(json!({}));
+                self.diff_show(scope)
+            }
+            "diff.review" => {
+                let (what, target, body) = (call.str_arg("what").unwrap_or(""), call.str_arg("target"), call.str_arg("body"));
+                match self.diff_review_ctl(what, target, body) {
+                    Ok(task) => {
+                        call.ok(json!({}));
+                        task
+                    }
+                    Err(e) => {
+                        call.err(e);
+                        Task::none()
+                    }
+                }
+            }
+            "ai.diff" => {
+                if self.ai_shown_session().is_none() {
+                    call.err("the shown agent has no session yet");
+                    return Task::none();
+                }
+                call.ok(json!({}));
+                self.ai_accept_diff()
+            }
             "ai.accept" => {
                 // The shown agent said its job is done: accept (it is ended), or keep it.
                 if !self.ai_finished_shown() {
@@ -445,6 +478,7 @@ impl App {
                 "settings": self.settings.page.map(|p| format!("{p:?}").to_lowercase()),
             },
             "ai": self.ai_state_json(),
+            "diff": self.diff_json(),
             "search": self.search_json(),
             "pending": self.pending.len(),
             "flash": self.flash.as_ref().map(|(text, warn, _)| json!({ "text": text, "warn": warn })),

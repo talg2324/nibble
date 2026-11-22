@@ -62,6 +62,11 @@ impl Recorder {
         Recorder { path, header: Some(header), text: String::new(), steps: HashMap::new(), session: None }
     }
 
+    /// The conversation's id: what `AiHistory` lists it under, the same when it is reopened.
+    pub fn id(&self) -> String {
+        self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
     /// Go on writing conversation `id`. `None` if there is no such one. Also gives the
     /// assistant's own session id to resume, if it ever told.
     pub fn resume(root: &Path, id: &str) -> Option<(Recorder, Option<String>, AiPast)> {
@@ -70,12 +75,6 @@ impl Recorder {
         let past = summary(id, root, &all, "")?;
         let session = all.iter().rev().find_map(|v| v.get("session").and_then(Value::as_str).map(str::to_string));
         Some((Recorder { path, header: None, text: String::new(), steps: HashMap::new(), session: session.clone() }, session, past))
-    }
-
-    /// The conversation's id: what `AiHistory` lists it under.
-    #[cfg(test)]
-    pub fn id(&self) -> String {
-        self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
     }
 
     fn line(&mut self, mut v: Value) {

@@ -331,6 +331,7 @@ impl App {
         let open = self.git_ui.open;
         self.git_ui = Default::default();
         self.git_ui.open = open;
+        self.diff.reset();
         // The new language server knows no open documents yet.
         for t in &mut self.tabs {
             t.lsp_synced = None;
@@ -406,6 +407,7 @@ impl App {
         let open = self.git_ui.open;
         self.git_ui = Default::default();
         self.git_ui.open = open;
+        self.diff.reset();
         let open = self.ai.open;
         self.ai = Default::default();
         self.ai.open = open;

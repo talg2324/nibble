@@ -446,12 +446,13 @@ impl Tab {
             preview: None,
             svg: None,
             lsp_synced: None,
+            diff: false,
         }
     }
 
     /// Shows something other than the editable text, so typing and cursor keys don't apply.
     pub(super) fn passive(&self) -> bool {
-        self.media.is_some() || (self.kind == Kind::Csv && self.rendered)
+        self.diff || self.media.is_some() || (self.kind == Kind::Csv && self.rendered)
     }
 
     fn csv_delimiter(&self) -> Option<u8> {
@@ -767,6 +768,9 @@ impl App {
     /// The main pane for a tab: its media, its table, its text, or text next to a live preview.
     pub(super) fn tab_view<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
         let th = &self.theme;
+        if tab.diff {
+            return self.diff_view();
+        }
         if let Some(m) = &tab.media {
             if let Some(v) = m.pdf() {
                 return v.view(th).map(Message::Pdf);

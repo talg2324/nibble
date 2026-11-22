@@ -7,6 +7,7 @@ mod ai_cli;
 mod app;
 mod color_picker;
 mod control;
+mod diff_view;
 mod editor_view;
 mod gif;
 mod gpu_log;

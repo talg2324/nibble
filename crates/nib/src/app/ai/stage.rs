@@ -260,16 +260,31 @@ impl App {
         if chord.key == Key::Enter && held {
             return self.ai_accept(true);
         }
+        // ⌘D: its work as a pull request, in the diff tab (from where it can still be landed).
+        if chord.key == Key::Char('d') && held {
+            return self.ai_accept_diff();
+        }
         self.ai_accept(false)
+    }
+
+    /// Put the question away and show the agent's work in the diff tab.
+    pub(in crate::app) fn ai_accept_diff(&mut self) -> Task<Message> {
+        self.ai.accepting = false;
+        match self.ai_shown_session() {
+            Some(id) => self.diff_show(nib_proto::DiffScope::Agent(id)),
+            None => Task::none(),
+        }
     }
 
     /// Accept the shown agent's job as done (it is ended), or put the question away.
     pub(in crate::app) fn ai_accept(&mut self, yes: bool) -> Task<Message> {
         self.ai.accepting = false;
-        if yes && self.ai.finished.is_some() {
-            return self.ai_kill(self.ai.cur);
+        let Some(f) = self.ai.finished.clone().filter(|_| yes) else { return Task::none() };
+        // On its own branch: the work is landed first, and the agent is ended once that worked.
+        if let Some(id) = self.ai_shown_session().filter(|id| self.diff_branch(*id).is_some()) {
+            return self.diff_land(id, &f);
         }
-        Task::none()
+        self.ai_kill(self.ai.cur)
     }
 
     /// The next (or previous) agent in the list.
@@ -1536,7 +1551,21 @@ impl App {
         }
         col = col.push(part("DONE", &f.did));
         let chord = if cfg!(target_os = "macos") { "⌘↵" } else { "ctrl+↵" };
-        let accept = button(text(format!("accept and end it · {chord}")).size(12).color(OK))
+        let see_chord = if cfg!(target_os = "macos") { "⌘D" } else { "ctrl+D" };
+        // On its own branch: accepting lands it.
+        let branch = self.ai_shown_session().and_then(|id| self.diff_branch(id));
+        let accept_label = match &branch {
+            Some((b, base)) => {
+                col = col.push(part("BRANCH", &format!("{b}, to land on {base} as one commit")));
+                format!("land on {base} and end it · {chord}")
+            }
+            None => format!("accept and end it · {chord}"),
+        };
+        let see = button(text(format!("see its work · {see_chord}")).size(12).color(fg))
+            .on_press(Message::Ai(Msg::AcceptDiff))
+            .padding([3, 10])
+            .style(move |_, _| button::Style { border: Border { color: dim, width: 1.0, radius: 3.0.into() }, ..Default::default() });
+        let accept = button(text(accept_label).size(12).color(OK))
             .on_press(Message::Ai(Msg::Accept(true)))
             .padding([3, 10])
             .style(|_, _| button::Style { border: Border { color: OK, width: 1.0, radius: 3.0.into() }, ..Default::default() });
@@ -1544,7 +1573,7 @@ impl App {
             .on_press(Message::Ai(Msg::Accept(false)))
             .padding([3, 10])
             .style(move |_, _| button::Style { border: Border { color: dim, width: 1.0, radius: 3.0.into() }, ..Default::default() });
-        col = col.push(space().height(6)).push(row![accept, back].spacing(14).align_y(Alignment::Center));
+        col = col.push(space().height(6)).push(row![accept, see, back].spacing(14).align_y(Alignment::Center));
         let dialog = container(col).padding(16).max_width(640).style(move |_| container::Style {
             background: Some(panel.into()),
             border: Border { color: OK, width: 1.0, radius: 4.0.into() },

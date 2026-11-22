@@ -3,6 +3,7 @@ mod code;
 mod comment;
 mod connection;
 mod control;
+mod diff;
 mod drop;
 mod git;
 mod pdf_tab;
@@ -84,6 +85,8 @@ pub enum Message {
     /// Time to ask the daemon about git again (for `App::epoch`).
     GitPoll(u64),
     Git(git::Msg),
+    /// The diff tab (`diff.rs`).
+    Diff(diff::Msg),
     Ai(ai::Msg),
     Ssh(ssh::Msg),
     /// A result in the definitions / references list was clicked.
@@ -119,6 +122,16 @@ enum Pending {
     Git { poll: bool },
     GitDetails,
     GitRun { action: git::Action },
+    /// The diff tab's diff of `scope`, asked while `App::epoch` was `epoch`.
+    Diff { scope: nib_proto::DiffScope, epoch: u64 },
+    /// The diff tab staged or unstaged a file.
+    DiffGit,
+    /// The review of agent `id`'s work, read or just changed.
+    DiffReview { id: nib_proto::AiId },
+    /// Landing agent `id`'s branch on its base.
+    WorkLand { id: nib_proto::AiId },
+    /// The plan of agent `id` (as of `AiWork::plan` = `stamp`), for the diff tab.
+    DiffPlan { id: nib_proto::AiId, stamp: u64 },
     /// Re-read of an open file that changed on disk (git, an agent, anything outside nib).
     Reload { tab: u64 },
     /// Re-read of an image tab's file that changed on disk.
@@ -175,6 +188,8 @@ pub struct Tab {
     svg: Option<viewers::SvgPreview>,
     /// `Document::version` last sent to the language server (`DocSync`).
     lsp_synced: Option<u64>,
+    /// The diff tab (`diff.rs`): its document is an empty placeholder.
+    diff: bool,
 }
 
 struct Term {
@@ -258,6 +273,7 @@ fn app_wide(c: Command) -> bool {
                 | Find
                 | ToggleTerminal
                 | ToggleGit
+                | ToggleDiff
                 | ToggleSsh
                 | OpenFolder
                 | ToggleAi
@@ -370,6 +386,7 @@ pub struct App {
     /// What the daemon's git says about the project root (None until it answers).
     git: Option<nib_proto::GitInfo>,
     git_ui: git::Panel,
+    diff: diff::View,
     flash: Option<(String, bool, u64)>,
     flash_seq: u64,
     /// Recent flash messages, newest last (the control socket's `state` shows them).
@@ -487,6 +504,7 @@ impl App {
             label: launch.label.clone(),
             git: None,
             git_ui: Default::default(),
+            diff: Default::default(),
             flash: None,
             flash_seq: 0,
             messages: VecDeque::new(),
@@ -792,6 +810,7 @@ impl App {
             // A poll from before a switch or root change: the new Hello starts its own.
             Message::GitPoll(_) => Task::none(),
             Message::Git(m) => self.on_git_msg(m),
+            Message::Diff(m) => self.on_diff_msg(m),
             Message::Ai(m) => self.on_ai_msg(m),
             Message::Drop(m) => self.on_drop(m),
             Message::TitleBar(m) => self.on_titlebar(m),
@@ -915,6 +934,11 @@ impl App {
             (Pending::Browse, result) => self.on_browse(result),
             (Pending::Search { seq }, result) => self.on_search_results(seq, result),
             (Pending::GitDetails, result) => self.on_git_details(result),
+            (Pending::Diff { scope, epoch }, result) => self.on_diff(scope, epoch, result),
+            (Pending::DiffGit, result) => self.on_diff_git(result),
+            (Pending::WorkLand { id }, result) => self.on_diff_landed(id, result),
+            (Pending::DiffReview { id }, result) => self.on_diff_review(id, result),
+            (Pending::DiffPlan { id, stamp }, result) => self.on_diff_plan(id, stamp, result),
             (Pending::GitRun { action }, result) => self.on_git_ran(action, result),
             (Pending::Tree, result) => self.on_tree(result),
             (Pending::TreeGit, result) => self.on_tree_git(result),
@@ -1464,6 +1488,11 @@ impl App {
             }
             return Task::none();
         }
+        if self.diff_active() {
+            if let Some(t) = self.diff_key(chord, text.clone()) {
+                return t;
+            }
+        }
         let cmd = self.keymap.lookup(&chord);
         if cmd != Some(Command::Quit) {
             self.quit_armed = false;
@@ -1555,6 +1584,7 @@ impl App {
             NewTerminal => return self.new_terminal(),
             ToggleAi => return self.on_ai_msg(ai::Msg::Toggle),
             ToggleGit => return self.on_git_msg(git::Msg::Toggle),
+            ToggleDiff => return self.diff_toggle(),
             ToggleSsh => return self.on_ssh_msg(ssh::Msg::Toggle),
             OpenFolder => {
                 let root = self.root.clone();
@@ -1616,6 +1646,9 @@ impl App {
                 return self.code_command(c);
             }
             _ => {}
+        }
+        if self.diff_active() {
+            return self.diff_command(c);
         }
         if !self.editing() {
             if let Some(task) = self.pdf_command(c) {
@@ -1957,6 +1990,7 @@ impl App {
         let tabs = self.tabs.iter().enumerate().map(|(i, t)| {
             let name = t.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // The tab a followed agent opened.
+            let name = if t.diff { "± diff".to_string() } else { name };
             let name = if t.doc.path.as_deref().is_some_and(|p| self.ai_follow_tab(p)) { format!("◉ {name}") } else { name };
             let active = i == self.active && !self.ai.shown();
             let fg = if active { th.foreground } else { th.dim };
@@ -2059,6 +2093,7 @@ impl App {
                 Message::Control(Command::ToggleTerminal),
             ),
             (if self.git_ui.open { &i.git_on } else { &i.git }, self.tip_with_key("Git", Command::ToggleGit), Message::Control(Command::ToggleGit)),
+            (if self.diff_active() { &i.diff_on } else { &i.diff }, self.tip_with_key("Diff: what changed", Command::ToggleDiff), Message::Control(Command::ToggleDiff)),
             (if self.ssh.open { &i.remote_on } else { &i.remote }, self.tip_with_key("SSH: connections", Command::ToggleSsh), Message::Control(Command::ToggleSsh)),
             (if gear_on { &i.gear_on } else { &i.gear }, "Settings".into(), Message::Settings(settings::Msg::ToggleMenu)),
         ]
@@ -2599,8 +2634,10 @@ mod tests {
         tap(&mut a, "right");
         tap(&mut a, "right");
         tap(&mut a, "right");
+        tap(&mut a, "right");
         tap(&mut a, "right"); // clamps at the last button
-        assert_eq!(a.toolbar_sel, 5);
+        assert_eq!(a.toolbar_sel, 6);
+        tap(&mut a, "left");
         tap(&mut a, "left");
         tap(&mut a, "left");
         tap(&mut a, "left");

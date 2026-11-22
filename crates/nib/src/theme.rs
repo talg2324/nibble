@@ -35,6 +35,8 @@ pub struct Theme {
     pub skill_repo: Color,
     pub skill_command: Color,
     pub skill_tool: Color,
+    pub diff_add: Color,
+    pub diff_del: Color,
     syntax: HashMap<String, Color>,
 }
 
@@ -88,6 +90,8 @@ ui_colors! {
     skill_repo:     "skill_repo",     "The project's skills",  "Agents", rgb(0x98, 0xc3, 0x79);
     skill_command:  "skill_command",  "Commands",               "Agents", rgb(0x56, 0xb6, 0xc2);
     skill_tool:     "skill_tool",     "Tools",                  "Agents", rgb(0xd1, 0x9a, 0x66);
+    diff_add:       "diff_added",     "Added lines",            "Diff", rgb(0x3f, 0xb9, 0x50);
+    diff_del:       "diff_removed",   "Removed lines",          "Diff", rgb(0xf8, 0x51, 0x49);
 }
 
 pub fn parse_hex(s: &str) -> Option<Color> {
@@ -128,6 +132,8 @@ impl Theme {
             skill_repo: black,
             skill_command: black,
             skill_tool: black,
+            diff_add: black,
+            diff_del: black,
             syntax: HashMap::new(),
         };
         for u in UI_COLORS {

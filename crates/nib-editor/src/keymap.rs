@@ -303,6 +303,7 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
         ("esc", CollapseSelection),
         ("mod+,", OpenSettings),
         ("mod+shift+g", ToggleGit),
+        ("mod+shift+d", ToggleDiff),
         ("mod+shift+i", ToggleAi),
         ("mod+shift+]", NextAgent),
         ("mod+shift+[", PrevAgent),

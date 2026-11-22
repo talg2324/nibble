@@ -99,7 +99,7 @@ pub enum Msg {
 impl App {
     /// Ask the daemon for the project's git state; the answer schedules the next ask.
     pub(super) fn git_refresh(&mut self) -> Task<Message> {
-        Task::batch([self.git_ask(true), self.tree_refresh()])
+        Task::batch([self.git_ask(true), self.tree_refresh(), self.diff_wake()])
     }
 
     /// Show the panel with its commit message box open (the file tree's `m`). Closing the panel
@@ -279,7 +279,7 @@ impl App {
 
     /// Re-read every open file that has no unsaved edits (git may have rewritten it). Tabs with
     /// edits are left alone: saving them reports the conflict.
-    fn reload_clean_tabs(&mut self) -> Task<Message> {
+    pub(super) fn reload_clean_tabs(&mut self) -> Task<Message> {
         let wanted: Vec<(u64, String)> = self
             .tabs
             .iter()
