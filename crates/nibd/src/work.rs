@@ -121,9 +121,9 @@ pub fn land(mailbox: &Path, agent: &str, root: &Path, message: &str) -> Result<S
         return Err(format!("something is staged in {}: commit or unstage it first, so that the landing is one commit of the agent's work only", root.display()));
     }
     // What it left uncommitted is part of its work.
-    if !git(&rec.tree, &["status", "--porcelain"])?.is_empty() {
-        git(&rec.tree, &["add", "-A"])?;
-        git(&rec.tree, &["commit", "-q", "--no-verify", "-m", "nib: what was not committed"])?;
+    if !tree_git(root, &rec, &["status", "--porcelain"])?.is_empty() {
+        tree_git(root, &rec, &["add", "-A"])?;
+        tree_git(root, &rec, &["commit", "-q", "--no-verify", "-m", "nib: what was not committed"])?;
     }
     if let Err(e) = git(root, &["merge", "--squash", &rec.branch]) {
         let _ = git(root, &["reset", "--merge"]);
@@ -182,11 +182,40 @@ fn sweep(landed: &Path) {
 }
 
 /// git at `dir`: its stdout when it succeeded, else what it said.
+/// git in an agent's work tree, run by the daemon (landing): pinned to the repository's own
+/// administrative folder for that tree, so neither the tree's `.git` file nor that folder's
+/// `commondir` is followed (both are the agent's to write, and a git folder of its own making
+/// would bring a config of its own), and with background git's [`crate::git::guard`].
+fn tree_git(root: &Path, rec: &Record, args: &[&str]) -> Result<String, String> {
+    let common = PathBuf::from(git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
+    // The folder git keeps for the tree: the one whose `gitdir` names it (usually its own name).
+    let ours = |admin: &Path| fs::read_to_string(admin.join("gitdir")).is_ok_and(|g| canonical_near(Path::new(g.trim())) == canonical_near(&rec.tree.join(".git")));
+    let named = rec.tree.file_name().map(|n| common.join("worktrees").join(n));
+    let admin = named
+        .filter(|a| ours(a))
+        .or_else(|| fs::read_dir(common.join("worktrees")).ok()?.flatten().map(|e| e.path()).find(|a| ours(a)))
+        .ok_or_else(|| format!("git keeps no work tree at {}", rec.tree.display()))?;
+    // git follows `commondir` for branches even with `GIT_COMMON_DIR` set: back to the repository's.
+    let points = fs::read_to_string(admin.join("commondir")).map(|c| canonical_near(&admin.join(c.trim())));
+    if points.ok() != Some(canonical_near(&common)) {
+        fs::write(admin.join("commondir"), "../..\n").map_err(|e| format!("{}: {e}", admin.display()))?;
+    }
+    let env = [("GIT_DIR", admin.as_path()), ("GIT_COMMON_DIR", common.as_path()), ("GIT_WORK_TREE", rec.tree.as_path())];
+    let guard = crate::git::guard_env(&rec.tree, &env).ok_or("the work tree's git config names a filter nib cannot turn off: not landed")?;
+    let guard: Vec<&str> = guard.iter().map(String::as_str).collect();
+    git_in(&rec.tree, &env, &[&guard[..], args].concat())
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    git_in(dir, &[], args)
+}
+
+fn git_in(dir: &Path, env: &[(&str, &Path)], args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
+        .envs(env.iter().copied())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_MERGE_AUTOEDIT", "no")
@@ -389,7 +418,13 @@ fn carry(ctx: &Ctx, rec: &Record) -> Result<String, String> {
     if !tracked.is_empty() {
         let mut args = vec!["restore", "--source=HEAD", "--staged", "--worktree", "--"];
         args.extend(tracked.iter().map(|f| f.as_str()));
-        git(root, &args)?;
+        if git(root, &args).is_err() {
+            // A sandbox (Codex's) may not let the agent write the repository's index: then the
+            // files come back as the index has them, which leaves the index as it is.
+            let mut args = vec!["checkout-index", "-f", "--"];
+            args.extend(tracked.iter().map(|f| f.as_str()));
+            git(root, &args)?;
+        }
     }
     for f in &new {
         let _ = fs::remove_file(root.join(f));
@@ -713,5 +748,101 @@ mod tests {
         persist(&mailbox, "claude-1", &store, "conv-7");
         assert!(!store.join("conv-7.json").exists() && !store.join("conv-7.plan.md").exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An agent may write its work tree's `.git` file (it is in its tree) and git's folder for
+    /// that tree: pointed at a git folder of its own making, whose config runs things, landing
+    /// must still use the repository's own and run none of it.
+    #[cfg(unix)]
+    #[test]
+    fn landing_ignores_a_git_folder_the_agent_made_for_its_work_tree() {
+        let dir = std::env::temp_dir().join(format!("nibd-land-pinned-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, mailbox, nibdir, marks) = (dir.join("repo"), dir.join("mailbox"), dir.join("nibdir"), dir.join("marks"));
+        for d in [&repo, &mailbox.join("outbox"), &marks] {
+            fs::create_dir_all(d).unwrap();
+        }
+        if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
+            return; // no git on this machine
+        }
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+            git(&repo, args).unwrap();
+        }
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["commit", "-q", "-m", "first"]).unwrap();
+        let ctx = Ctx { mailbox: mailbox.clone(), agent: "codex-1".into(), root: repo.clone(), nibdir };
+        let go = |args: &[&str]| run(&ctx, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), || Ok("# Plan\n".to_string()));
+        assert_eq!(go(&["plan", "-"]).1, 0);
+        assert_eq!(go(&["start", "pinned"]).1, 0);
+        let rec = record(&mailbox, "codex-1").unwrap();
+        fs::write(rec.tree.join("b.txt"), "the agent's work\n").unwrap();
+
+        // The agent's git folder: a copy of the real one, with a config and hooks of its own.
+        let fake = dir.join("nibdir/fake");
+        let real_admin = PathBuf::from(git(&rec.tree, &["rev-parse", "--absolute-git-dir"]).unwrap());
+        assert!(Command::new("cp").arg("-R").arg(git(&repo, &["rev-parse", "--absolute-git-dir"]).unwrap()).arg(&fake).status().unwrap().success());
+        let fake_admin = fake.join("worktrees").join(real_admin.file_name().unwrap());
+        fs::write(fake_admin.join("commondir"), "../..\n").unwrap();
+        let hooks = dir.join("nibdir/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        for hook in ["post-commit", "reference-transaction", "post-index-change"] {
+            fs::write(hooks.join(hook), format!("#!/bin/sh\ntouch '{}/{hook}'\n", marks.display())).unwrap();
+            fs::set_permissions(hooks.join(hook), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let mut config = fs::read_to_string(fake.join("config")).unwrap();
+        config.push_str(&format!("[core]\n\tfsmonitor = \"touch '{}/fsmonitor'; false #\"\n\thooksPath = {}\n", marks.display(), hooks.display()));
+        fs::write(fake.join("config"), config).unwrap();
+        // It points its tree there (its `.git` file), and git's own folder for the tree too.
+        fs::write(rec.tree.join(".git"), format!("gitdir: {}\n", fake_admin.display())).unwrap();
+        fs::write(real_admin.join("commondir"), format!("{}\n", fake.display())).unwrap();
+
+        let out = land(&mailbox, "codex-1", &repo, "The agent's work");
+        let ran: Vec<String> = fs::read_dir(&marks).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let landed = fs::read_to_string(repo.join("b.txt")).ok();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(ran.is_empty(), "landing ran what the agent's git folder says: {ran:?} ({out:?})");
+        assert!(out.is_ok(), "{out:?}");
+        assert_eq!(landed.as_deref(), Some("the agent's work\n"), "{out:?}");
+    }
+
+    /// In a sandbox that may not write the repository's index (Codex's), carry still puts the
+    /// shared folder back.
+    #[cfg(unix)]
+    #[test]
+    fn carry_works_when_the_index_cannot_be_written() {
+        let dir = std::env::temp_dir().join(format!("nibd-carry-ro-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, mailbox, nibdir) = (dir.join("repo"), dir.join("mailbox"), dir.join("nibdir"));
+        for d in [&repo, &mailbox.join("outbox")] {
+            fs::create_dir_all(d).unwrap();
+        }
+        if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
+            return; // no git on this machine
+        }
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+            git(&repo, args).unwrap();
+        }
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["commit", "-q", "-m", "first"]).unwrap();
+        let ctx = Ctx { mailbox: mailbox.clone(), agent: "codex-2".into(), root: repo.clone(), nibdir };
+        let go = |args: &[&str]| run(&ctx, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), || Ok("# Plan\n".to_string()));
+        assert_eq!(go(&["plan", "-"]).1, 0);
+        // A change made in the shared folder before the branch (what carry is for).
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        let me = mail::Entry { id: "codex-2".into(), name: "codex-2".into(), assistant: "Codex".into(), model: None, task: "t".into(), busy: true, files: vec!["a.txt".into()], mode: "auto".into() };
+        mail::write_roster(&mailbox, &[me]);
+        assert_eq!(go(&["start", "ro"]).1, 0);
+        let rec = record(&mailbox, "codex-2").unwrap();
+        // git's folder made read-only, as the sandbox has it: no `index.lock` can be made there.
+        let gitdir = repo.join(".git");
+        fs::set_permissions(&gitdir, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+        let (out, code) = go(&["carry"]);
+        fs::set_permissions(&gitdir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let (shared, tree) = (fs::read_to_string(repo.join("a.txt")).unwrap(), fs::read_to_string(rec.tree.join("a.txt")).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!((shared.as_str(), tree.as_str()), ("one\n", "one\ntwo\n"), "{out}");
     }
 }

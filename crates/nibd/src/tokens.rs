@@ -20,7 +20,7 @@ pub const VAR: &str = "NIB_TOKEN";
 static GIVEN: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// 128 bits nobody can guess: two hashers with keys of their own, fresh from the system.
-fn fresh() -> String {
+pub(crate) fn fresh() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let half = |salt: u64| {
         let mut h = RandomState::new().build_hasher();

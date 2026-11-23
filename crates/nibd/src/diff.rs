@@ -15,14 +15,28 @@ const ALL_LINES: usize = 60_000;
 /// git's stdout, or `None` when it could not run or failed. `index`: the index file to use
 /// instead of the repository's.
 fn git(dir: &Path, index: Option<&Path>, args: &[&str]) -> Option<Vec<u8>> {
+    let guard = crate::git::guard(dir)?;
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off"]).args(args);
+    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off"]).args(&guard).args(args);
     cmd.env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }
     let out = cmd.output().ok()?;
     out.status.success().then_some(out.stdout)
+}
+
+/// `git add FLAG -- .` into the shadow `index`, submodules left out: git would look into a
+/// submodule's work tree to tell whether it changed, and run the filters its own config names
+/// there (no option of `add` stops that). A submodule's own changes are not shown anyway.
+fn add(dir: &Path, index: &Path, flag: &str) -> Option<Vec<u8>> {
+    let listed = git(dir, Some(index), &["ls-files", "-s", "-z", "--", "."])?;
+    let listed = String::from_utf8_lossy(&listed);
+    // `MODE HASH STAGE\tPATH`; a submodule's mode is 160000.
+    let skip: Vec<String> = listed.split('\0').filter(|e| e.starts_with("160000 ")).filter_map(|e| e.split_once('\t')).map(|(_, p)| format!(":(exclude,literal){p}")).collect();
+    let mut args = vec!["add", flag, "--", "."];
+    args.extend(skip.iter().map(String::as_str));
+    git(dir, Some(index), &args)
 }
 
 fn text(dir: &Path, args: &[&str]) -> Option<String> {
@@ -42,7 +56,7 @@ impl ShadowIndex {
     /// A copy of `real`, the repository's index file (`index_path`).
     fn of(real: PathBuf) -> Option<ShadowIndex> {
         static N: AtomicU32 = AtomicU32::new(0);
-        let copy = std::env::temp_dir().join(format!("nib-index-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let copy = crate::places::private_temp()?.join(format!("index-{}", N.fetch_add(1, Ordering::Relaxed)));
         // No index yet (nothing was ever added): git starts an empty one at `copy`.
         if real.exists() {
             std::fs::copy(&real, &copy).ok()?;
@@ -162,7 +176,7 @@ pub fn round_ref(branch: &str) -> String {
 pub fn snapshot(dir: &Path, branch: &str) -> Option<String> {
     let top = PathBuf::from(text(dir, &["rev-parse", "--show-toplevel"])?);
     let shadow = ShadowIndex::new(&top)?;
-    git(&top, Some(&shadow.0), &["add", "-A", "--", "."])?;
+    add(&top, &shadow.0, "-A")?;
     let tree = String::from_utf8_lossy(&git(&top, Some(&shadow.0), &["write-tree"])?).trim().to_string();
     let made = Command::new("git")
         .arg("-C")
@@ -184,7 +198,7 @@ pub fn snapshot(dir: &Path, branch: &str) -> Option<String> {
 /// What `git diff` prints for the work tree at `dir` against `commit` exactly.
 fn raw_since(dir: &Path, commit: &str) -> Option<Vec<u8>> {
     let shadow = ShadowIndex::new(dir)?;
-    git(dir, Some(&shadow.0), &["add", "-A", "--", "."])?;
+    add(dir, &shadow.0, "-A")?;
     git(dir, Some(&shadow.0), &[&DIFF[..], &["--cached", commit]].concat())
 }
 
@@ -193,13 +207,13 @@ fn raw_since(dir: &Path, commit: &str) -> Option<Vec<u8>> {
 fn raw_branch(dir: &Path, base: &str) -> Option<Vec<u8>> {
     let from = text(dir, &["merge-base", base, "HEAD"]).filter(|s| !s.is_empty()).unwrap_or_else(|| base.to_string());
     let shadow = ShadowIndex::new(dir)?;
-    git(dir, Some(&shadow.0), &["add", "-A", "--", "."])?;
+    add(dir, &shadow.0, "-A")?;
     git(dir, Some(&shadow.0), &[&DIFF[..], &["--cached", &from]].concat())
 }
 
-/// `git diff`, giving the same output whatever the user's config says; paths relative to the
-/// folder it runs in.
-const DIFF: [&str; 9] = ["diff", "--relative", "-M", "-U3", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"];
+/// `git diff`, giving the same output whatever the user's config says (and running nothing a
+/// submodule's config names); paths relative to the folder it runs in.
+const DIFF: [&str; 10] = ["diff", "--relative", "-M", "-U3", "--no-color", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--src-prefix=a/", "--dst-prefix=b/"];
 
 /// What `git diff` prints for `scope`; `None` outside a work tree.
 fn raw(dir: &Path, scope: DiffScope) -> Option<Vec<u8>> {
@@ -221,12 +235,12 @@ fn raw(dir: &Path, scope: DiffScope) -> Option<Vec<u8>> {
         DiffScope::Unstaged => {
             let shadow = shadow()?;
             // Intent to add: the untracked files show as new files of the work tree.
-            git(dir, Some(&shadow.0), &["add", "-N", "--", "."])?;
+            add(dir, &shadow.0, "-N")?;
             run(Some(&shadow.0), &[])
         }
         DiffScope::Head => {
             let shadow = shadow()?;
-            git(dir, Some(&shadow.0), &["add", "-A", "--", "."])?;
+            add(dir, &shadow.0, "-A")?;
             run(Some(&shadow.0), &[&["--cached"], head].concat())
         }
         // Made of the others, in `diff`.

@@ -90,11 +90,13 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Where the session's mailbox folder is (or will be): in its scratch directory, else the temp dir.
+/// Where the session's mailbox folder is (or will be): in its scratch directory, else in this
+/// process's private temp directory.
 pub fn path(scratch: Option<&Path>) -> PathBuf {
     match scratch {
         Some(s) => s.join("mailbox"),
-        None => std::env::temp_dir().join(format!("nibd-mailbox-{}", std::process::id())),
+        // Nowhere at all when even that cannot be made (`/dev/null` is no folder).
+        None => crate::places::private_temp().map(|d| d.join("mailbox")).unwrap_or_else(|| PathBuf::from("/dev/null/nibd-mailbox")),
     }
 }
 

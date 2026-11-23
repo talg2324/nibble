@@ -390,3 +390,118 @@ fn search_names_and_lines_skipping_hidden_ignored_and_binary() {
     assert!(found.lines.len() == 1 && found.truncated);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A folder that arrives with its own `.git` (an archive, a copied directory) must not run what
+/// that config names when nibd looks at it by itself: fsmonitor, filter drivers (also a
+/// submodule's), a signature program for `log`, hooks.
+#[cfg(unix)]
+#[test]
+fn a_repositorys_own_config_runs_nothing_in_the_background() {
+    let dir = std::env::temp_dir().join(format!("nibd-git-guard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (work, sub, marks) = (dir.join("work"), dir.join("sub"), dir.join("marks"));
+    for d in [&work, &sub, &marks] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let sh = |cwd: &std::path::Path, args: &[&str]| {
+        let o = std::process::Command::new("git").arg("-C").arg(cwd).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "protocol.file.allow=always"]).args(args).output();
+        o.is_ok_and(|o| o.status.success())
+    };
+    if !sh(&work, &["init", "-q"]) {
+        return; // no git on this machine
+    }
+    let mark = |what: &str| marks.join(what).to_string_lossy().into_owned();
+    let run_mark = |what: &str| format!("sh -c 'touch {}; cat' #", mark(what));
+    // The submodule: a filter of its own.
+    assert!(sh(&sub, &["init", "-q"]));
+    std::fs::write(sub.join(".gitattributes"), "* filter=subevil\n").unwrap();
+    std::fs::write(sub.join("s.txt"), "s\n").unwrap();
+    assert!(sh(&sub, &["add", "."]) && sh(&sub, &["commit", "-qm", "s"]));
+    // The project.
+    std::fs::write(work.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    std::fs::write(work.join("a.txt"), "one\n").unwrap();
+    assert!(sh(&work, &["add", "."]) && sh(&work, &["commit", "-qm", "a"]));
+    assert!(sh(&work, &["submodule", "add", "-q", sub.to_str().unwrap(), "s"]) && sh(&work, &["commit", "-qm", "sub"]));
+    // A signed-looking commit on top, for `log.showSignature`.
+    let tree = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&work).args(["write-tree"]).output().unwrap().stdout).unwrap();
+    let head = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&work).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap();
+    let body = format!("tree {}\nparent {}\nauthor t <t> 1 +0000\ncommitter t <t> 1 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n AAAA\n -----END PGP SIGNATURE-----\n\nsigned\n", tree.trim(), head.trim());
+    let mut hash = std::process::Command::new("git").arg("-C").arg(&work).args(["hash-object", "-t", "commit", "-w", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    use std::io::Write as _;
+    hash.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+    let signed = String::from_utf8(hash.wait_with_output().unwrap().stdout).unwrap();
+    assert!(sh(&work, &["update-ref", "HEAD", signed.trim()]));
+    let gpg = dir.join("gpg.sh");
+    std::fs::write(&gpg, format!("#!/bin/sh\ntouch {}\n", mark("gpg"))).unwrap();
+    std::fs::set_permissions(&gpg, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // What the folder's own config says.
+    let fsmon = format!("touch {}; false #", mark("fsmonitor"));
+    let (clean, process, subclean) = (run_mark("clean"), run_mark("process"), run_mark("subclean"));
+    for (k, v) in [("core.fsmonitor", fsmon.as_str()), ("filter.evil.clean", &clean), ("filter.evil.process", &process), ("log.showSignature", "true"), ("gpg.program", gpg.to_str().unwrap())] {
+        assert!(sh(&work, &["config", k, v]));
+    }
+    assert!(sh(&work.join("s"), &["config", "filter.subevil.clean", &subclean]));
+    // Hooks git runs on its own: on writing an index (`add`), on moving a ref (`update-ref`).
+    for hook in ["post-index-change", "reference-transaction"] {
+        let h = work.join(".git/hooks").join(hook);
+        std::fs::write(&h, format!("#!/bin/sh\ntouch {}\n", mark(hook))).unwrap();
+        std::fs::set_permissions(&h, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    // Files git must look at again (as after unpacking an archive), and one more to add.
+    for f in [work.join("a.txt"), work.join("s/s.txt")] {
+        assert!(std::process::Command::new("touch").args(["-m", "-t", "202001010000"]).arg(&f).status().unwrap().success());
+    }
+    std::fs::write(work.join("b.txt"), "new\n").unwrap();
+    // An untracked repository inside, with a filter of its own.
+    let nested = work.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    assert!(sh(&nested, &["init", "-q"]));
+    std::fs::write(nested.join(".gitattributes"), "* filter=nestevil\n").unwrap();
+    std::fs::write(nested.join("n.txt"), "n\n").unwrap();
+    assert!(sh(&nested, &["add", "."]) && sh(&nested, &["commit", "-qm", "n"]));
+    let nestclean = run_mark("nestclean");
+    assert!(sh(&nested, &["config", "filter.nestevil.clean", &nestclean]));
+    assert!(std::process::Command::new("touch").args(["-m", "-t", "202001010000"]).arg(nested.join("n.txt")).status().unwrap().success());
+    std::fs::remove_dir_all(&marks).unwrap();
+    std::fs::create_dir_all(&marks).unwrap();
+
+    // Everything nibd does by itself when a folder is opened, polled, or its diff shown.
+    let _ = git::info(&work);
+    let _ = git::details(&work, 10);
+    let _ = git::tree_state(&work);
+    for scope in [nib_proto::DiffScope::Unstaged, nib_proto::DiffScope::Head, nib_proto::DiffScope::Staged] {
+        let _ = diff::diff(&work, scope, None, &[]);
+    }
+    let _ = diff::snapshot(&work, "nib/guard-test");
+
+    let ran: Vec<String> = std::fs::read_dir(&marks).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ran.is_empty(), "the folder's own git config ran: {ran:?}");
+}
+
+/// What the user's Git LFS needs is not turned off, and what the folder adds is.
+#[cfg(unix)]
+#[test]
+fn the_guard_turns_off_the_folders_filters_not_git_lfs() {
+    let dir = std::env::temp_dir().join(format!("nibd-git-guard-lfs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sh = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().is_ok_and(|o| o.status.success());
+    if !sh(&["init", "-q"]) {
+        return;
+    }
+    std::fs::write(dir.join("more.cfg"), "[filter \"in cluded\"]\n\tclean = evil\n").unwrap();
+    for (k, v) in [("filter.lfs.clean", "git-lfs clean -- %f"), ("filter.lfs.process", "git-lfs filter-process"), ("filter.evil.smudge", "x"), ("filter.a.b.process", "y"), ("include.path", "../more.cfg")] {
+        assert!(sh(&["config", k, v]));
+    }
+    let g = git::guard(&dir).unwrap().join(" ");
+    for off in ["core.fsmonitor=false", "log.showSignature=false", "filter.evil.clean=", "filter.evil.process=", "filter.a.b.process=", "filter.in cluded.clean=", "filter.evil.required=false"] {
+        assert!(g.contains(off), "{off} missing from {g}");
+    }
+    assert!(!g.contains("filter.lfs"), "{g}");
+    // A name `-c` cannot say: nothing runs at all.
+    assert!(sh(&["config", "filter.x=y.clean", "z"]));
+    assert_eq!(git::guard(&dir), None);
+    assert_eq!(git::details(&dir, 5), (vec![], vec![]));
+    let _ = std::fs::remove_dir_all(&dir);
+}

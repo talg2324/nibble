@@ -9,11 +9,91 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// What a repository's own config could make a background git command run, turned off: the
+/// `-c` options for every command nibd runs by itself (status, log, diff, the shadow index).
+///
+/// A folder can arrive with its `.git` (an archive, a copied directory, a sandboxed agent that
+/// may write in `.git`), and opening it must not run what that config says: `core.fsmonitor`
+/// (run by `status`), `log.showSignature` with `gpg.program` (run by `log`), and filter drivers
+/// (run by `status` and `add` on any file `.gitattributes` gives one), hooks (`add` runs
+/// `post-index-change`, `update-ref` runs `reference-transaction`), and the `gc` or
+/// `maintenance` a command may start on its own. Filters the user's own
+/// config defines (global, system: Git LFS) are left alone, as are the standard Git LFS
+/// commands in the repository's config (`git lfs install --local`). `None`: a filter name that
+/// cannot be turned off from the command line; the caller then runs nothing.
+pub(crate) fn guard(dir: &Path) -> Option<Vec<String>> {
+    guard_env(dir, &[])
+}
+
+/// [`guard`] for git run with `env` (`GIT_DIR` and the like).
+pub(crate) fn guard_env(dir: &Path, env: &[(&str, &Path)]) -> Option<Vec<String>> {
+    const OFF: [&str; 5] = ["core.fsmonitor=false", "log.showSignature=false", "core.hooksPath=/dev/null", "gc.auto=0", "maintenance.auto=false"];
+    let mut args: Vec<String> = OFF.iter().flat_map(|c| ["-c".to_string(), c.to_string()]).collect();
+    // Both scopes at once (each is a process start, ~10 ms). `--includes`: a file scope reads no
+    // includes unless told, and `.git/config` may have one.
+    let read = |scope: &'static str| {
+        move || {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["config", scope, "--includes", "--null", "--get-regexp", r"^filter\."])
+                .envs(env.iter().copied())
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map(|o| o.stdout)
+                .unwrap_or_default()
+        }
+    };
+    let found = thread::scope(|s| {
+        let worktree = s.spawn(read("--worktree"));
+        let local = read("--local")();
+        [local, worktree.join().unwrap_or_default()]
+    });
+    let mut names: Vec<String> = Vec::new();
+    for out in found {
+        // `-z`: entries end with NUL, the key and its value are split by a newline.
+        for entry in String::from_utf8_lossy(&out).split('\0').filter(|e| !e.is_empty()) {
+            let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
+            let Some((name, var)) = key.strip_prefix("filter.").and_then(|k| k.rsplit_once('.')) else { continue };
+            if !matches!(var, "clean" | "smudge" | "process") || LFS.contains(&value.trim()) {
+                continue;
+            }
+            // `-c a=b` splits at the first `=`: a name with one would turn off something else.
+            if name.contains('=') {
+                return None;
+            }
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    for name in names {
+        for var in ["clean=", "smudge=", "process=", "required=false"] {
+            args.extend(["-c".to_string(), format!("filter.{name}.{var}")]);
+        }
+    }
+    Some(args)
+}
+
+/// What `git lfs install` writes: safe to run, and without it every LFS file shows as changed.
+const LFS: [&str; 3] = ["git-lfs clean -- %f", "git-lfs smudge -- %f", "git-lfs filter-process"];
+
 /// `Err`: git could not be started. `Ok(None)`: it ran and failed.
 fn git(dir: &Path, args: &[&str]) -> io::Result<Option<String>> {
+    match guard(dir) {
+        Some(guard) => git_with(dir, &guard, args),
+        None => Ok(None),
+    }
+}
+
+/// [`git`] with a [`guard`] already found (one for several commands in a row).
+fn git_with(dir: &Path, guard: &[String], args: &[&str]) -> io::Result<Option<String>> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(guard)
         .args(args)
         // Never take a lock or wait for a prompt: this runs in the background, repeatedly.
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -33,7 +113,9 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Option<String>> {
 
 pub fn info(dir: &Path) -> GitInfo {
     // Independent of each other: run at once (each is a process start, ~10 ms).
-    let get = |args: &'static [&'static str]| move || git(dir, args);
+    let Some(guard) = guard(dir) else { return GitInfo::NotRepo };
+    let guard = &guard;
+    let get = |args: &'static [&'static str]| move || git_with(dir, guard, args);
     let (top, branch, last, user_name, user_email) = thread::scope(|s| {
         let h = [
             s.spawn(get(&["symbolic-ref", "--short", "-q", "HEAD"])),
@@ -41,7 +123,7 @@ pub fn info(dir: &Path) -> GitInfo {
             s.spawn(get(&["config", "user.name"])),
             s.spawn(get(&["config", "user.email"])),
         ];
-        let top = git(dir, &["rev-parse", "--show-toplevel"]);
+        let top = git_with(dir, guard, &["rev-parse", "--show-toplevel"]);
         let [a, b, c, d] = h.map(|h| h.join().ok().and_then(Result::ok).flatten().filter(|s| !s.is_empty()));
         (top, a, b, c, d)
     });
@@ -73,11 +155,14 @@ fn parse_commit(line: &str) -> Option<GitCommit> {
 
 /// The newest `log_limit` commits and what `git status` lists. Both empty outside a repository.
 pub fn details(dir: &Path, log_limit: u32) -> (Vec<GitCommit>, Vec<GitChange>) {
-    let get = |args: &[&str]| git(dir, args).ok().flatten().unwrap_or_default();
+    let Some(guard) = guard(dir) else { return (Vec::new(), Vec::new()) };
+    let get = |args: &[&str]| git_with(dir, &guard, args).ok().flatten().unwrap_or_default();
     let n = log_limit.to_string();
     // Independent of each other: run at once.
     let (log, status) = thread::scope(|s| {
-        let status = s.spawn(|| get(&["status", "--porcelain=v1", "-z"]));
+        // `--ignore-submodules=dirty`: a submodule's work tree is not looked into, so its own
+        // config runs nothing either (a moved submodule still shows).
+        let status = s.spawn(|| get(&["status", "--porcelain=v1", "-z", "--ignore-submodules=dirty"]));
         (get(&["log", "-n", &n, LOG_FORMAT]), status.join().unwrap_or_default())
     });
     (log.lines().filter_map(parse_commit).collect(), parse_status(&status))
@@ -228,13 +313,14 @@ pub struct TreeState {
 /// `None`: `dir` is not in a work tree (or there is no git).
 pub fn tree_state(dir: &Path) -> Option<TreeState> {
     let range = "HEAD...@{upstream}";
-    let get = |args: &[&str]| git(dir, args).ok().flatten().unwrap_or_default();
+    let guard = guard(dir)?;
+    let get = |args: &[&str]| git_with(dir, &guard, args).ok().flatten().unwrap_or_default();
     // Independent of each other: run at once (each is a process start, ~10 ms).
     let (prefix, status, upstream, counts) = thread::scope(|s| {
-        let status = s.spawn(|| get(&["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"]));
+        let status = s.spawn(|| get(&["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=dirty"]));
         let upstream = s.spawn(|| get(&["diff", "--name-only", "-z", "--relative", range]));
         let counts = s.spawn(|| get(&["rev-list", "--left-right", "--count", range]));
-        let prefix = git(dir, &["rev-parse", "--show-prefix"]);
+        let prefix = git_with(dir, &guard, &["rev-parse", "--show-prefix"]);
         let j = |h: thread::ScopedJoinHandle<'_, String>| h.join().unwrap_or_default();
         (prefix, j(status), j(upstream), j(counts))
     });

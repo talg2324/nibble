@@ -62,6 +62,32 @@ fn private_dir(p: &Path) -> std::io::Result<()> {
     b.create(p)
 }
 
+/// A directory of this process's own in the temp dir, for the files nibd hands to other programs
+/// (a system prompt, pictures, a copy of the git index) and for the mailbox when there is no
+/// scratch directory. On a machine shared with other users `/tmp` is theirs too: a name they can
+/// guess (`/tmp/nibd-images-1234`) they can make first, and then read what is put in it and fill
+/// it with links to the user's files. So the name has 128 random bits, and the directory is made
+/// new and private here or not used at all. `None`: it could not be made.
+pub fn private_temp() -> Option<&'static Path> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        for _ in 0..8 {
+            let dir = std::env::temp_dir().join(format!("nibd-{}-{}", std::process::id(), crate::tokens::fresh()));
+            let mut b = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+            // Not `recursive`: a directory that is already there is somebody else's.
+            match b.create(&dir) {
+                Ok(()) => return Some(dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .as_deref()
+}
+
 /// Suffix of a temp project's throwaway NIBDIR, next to its scratch directory.
 const TEMP_NIBDIR: &str = ".nibdir";
 

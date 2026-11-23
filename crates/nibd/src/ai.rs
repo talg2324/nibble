@@ -1214,7 +1214,11 @@ fn route(shared: &Shared, dir: &Path, letter: mail::Letter) {
 
 /// Session `id`'s system prompt as a file, for OpenCode's `instructions`.
 fn prompt_file(id: AiId, prompt: &str) -> Option<PathBuf> {
-    let f = std::env::temp_dir().join(format!("nib-prompt-{}-{id}.md", std::process::id()));
+    let Some(dir) = crate::places::private_temp() else {
+        log!("system prompt: no private temp directory");
+        return None;
+    };
+    let f = dir.join(format!("nib-prompt-{id}.md"));
     match std::fs::write(&f, prompt) {
         Ok(()) => Some(f),
         Err(e) => {
@@ -1453,8 +1457,15 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
     Ok(id)
 }
 
-/// Codex's sandbox lets a run write in the folder it is started in and nowhere else. Nib's
-/// scratch, persistent data, mailbox, work trees, and git metadata may all live outside it.
+/// Codex's sandbox lets a run write in the folder it is started in and nowhere else (that
+/// folder's `.git` included). Nib's scratch, persistent data, mailbox and work trees may all live
+/// outside it, and an agent's work tree commits into the repository's git folder.
+///
+/// Of that git folder, only what a work tree's commits need: the objects, the agents' branches
+/// (`refs/heads/nib/…` and their logs), and git's folders for work trees. Not its `config` or
+/// `hooks` (what they name runs outside the sandbox, by the next git command nib or the user runs),
+/// `HEAD`, the user's own branches, or `info/`. The folders are made here: the sandbox cannot
+/// let a run make one inside a folder it may not write.
 fn codex_roots(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
     let var = |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| PathBuf::from(v));
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -1465,7 +1476,13 @@ fn codex_roots(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
     if let Ok(out) = git {
         let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if out.status.success() && !dir.is_empty() {
-            roots.push(PathBuf::from(dir));
+            let common = PathBuf::from(dir);
+            for part in ["objects", "refs/heads/nib", "logs/refs/heads/nib", "worktrees"] {
+                let p = common.join(part);
+                if std::fs::create_dir_all(&p).is_ok() {
+                    roots.push(p);
+                }
+            }
         }
     }
     roots.sort();
@@ -1889,10 +1906,11 @@ pub(crate) fn base64(data: &[u8]) -> String {
     out
 }
 
-/// Pictures for an assistant that takes them as files: saved under the temp dir, named by run.
+/// Pictures for an assistant that takes them as files: saved in nibd's private temp directory,
+/// named by run.
 fn image_files(images: &[AiImage]) -> Vec<PathBuf> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!("nibd-images-{}", std::process::id()));
+    let Some(dir) = crate::places::private_temp().map(|d| d.join("images")) else { return Vec::new() };
     if images.is_empty() || std::fs::create_dir_all(&dir).is_err() {
         return Vec::new();
     }
@@ -3875,6 +3893,72 @@ else:
                 assert!(stdout.contains(signed), "{stdout}");
                 assert!(stdout.contains("Codex is ready"), "{stdout}");
             }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On a machine shared with other users, the temp dir is theirs too. A name nibd uses there
+    /// that they can guess, they can make first: here, the folder for pictures and the system
+    /// prompt's file, made in advance with links to one of the user's files.
+    #[cfg(unix)]
+    #[test]
+    fn files_handed_to_assistants_cannot_be_planted_in_the_temp_dir() {
+        let victim_dir = std::env::temp_dir().join(format!("nibd-victim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&victim_dir);
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let victim = victim_dir.join("bashrc");
+        std::fs::write(&victim, "the user's own file\n").unwrap();
+        // What another user prepares, knowing nibd's pid (pids are few and handed out in order).
+        let pid = std::process::id();
+        let images = std::env::temp_dir().join(format!("nibd-images-{pid}"));
+        let _ = std::fs::remove_dir_all(&images);
+        std::fs::create_dir_all(&images).unwrap();
+        for n in 0..4 {
+            std::os::unix::fs::symlink(&victim, images.join(format!("{n}.png"))).unwrap();
+        }
+        let prompt = std::env::temp_dir().join(format!("nib-prompt-{pid}-7.md"));
+        let _ = std::fs::remove_file(&prompt);
+        std::os::unix::fs::symlink(&victim, &prompt).unwrap();
+
+        let saved = image_files(&[AiImage { media_type: "image/png".into(), data: b"PNG bytes".to_vec() }]);
+        let prompt_at = prompt_file(7, "the system prompt");
+        let after = std::fs::read_to_string(&victim).unwrap();
+        let (planted_images, planted_prompt) = (saved.iter().any(|p| p.starts_with(&images)), prompt_at.as_deref() == Some(prompt.as_path()));
+        let _ = std::fs::remove_dir_all(&images);
+        let _ = std::fs::remove_file(&prompt);
+        let _ = std::fs::remove_dir_all(&victim_dir);
+        assert_eq!(after, "the user's own file\n", "a link planted in the temp dir made nibd overwrite the user's file");
+        assert!(!planted_images && !planted_prompt, "nibd used a folder or file somebody else made: images {saved:?}, prompt {prompt_at:?}");
+        // Where they went instead: a folder only this user can open.
+        #[allow(clippy::unnecessary_cast)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = crate::places::private_temp().unwrap();
+            assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+    }
+
+    /// Codex's sandbox may write what a work tree's commits need in the repository's git folder,
+    /// and nothing that makes a later git command (nib's, or the user's) run something.
+    #[test]
+    fn codex_may_commit_in_its_work_tree_but_not_write_gits_config_or_hooks() {
+        let dir = std::env::temp_dir().join(format!("nibd-codex-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if !Command::new("git").arg("-C").arg(&dir).args(["init", "-q"]).status().is_ok_and(|s| s.success()) {
+            return; // no git on this machine
+        }
+        let git = nib_proto::path::canonical(&dir.join(".git")).unwrap();
+        let roots: Vec<PathBuf> = codex_roots(&dir, &[]).into_iter().map(PathBuf::from).collect();
+        let writable = |p: &Path| roots.iter().any(|r| p.starts_with(r));
+        for no in ["config", "config.worktree", "hooks/pre-commit", "hooks/post-commit", "HEAD", "index", "info/attributes", "refs/heads/main", "packed-refs", "logs/HEAD"] {
+            assert!(!writable(&git.join(no)), "the sandbox may write .git/{no}: {roots:?}");
+        }
+        for yes in ["objects/ab/cdef", "refs/heads/nib/feat/x", "logs/refs/heads/nib/feat/x", "worktrees/x/index", "worktrees/x/HEAD"] {
+            assert!(writable(&git.join(yes)), "the sandbox may not write .git/{yes}: {roots:?}");
+        }
+        for made in ["refs/heads/nib", "logs/refs/heads/nib", "worktrees"] {
+            assert!(git.join(made).is_dir(), "{made} was not made");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

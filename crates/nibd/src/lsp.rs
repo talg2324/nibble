@@ -343,12 +343,12 @@ impl Client {
         let argv = match &self.spec.command {
             Some(c) => {
                 let mut argv = c.clone();
-                if let Some(exe) = find_exe(&self.root, &argv[0]) {
+                if let Some(exe) = find_exe(&argv[0]) {
                     argv[0] = exe.to_string_lossy().into_owned();
                 }
                 argv
             }
-            None => find_ty(&self.root).ok_or_else(|| {
+            None => find_ty().ok_or_else(|| {
                 "ty not found: install it with `uv tool install ty`, or set `command` under \
                  [lsp.python] in the config"
                     .to_string()
@@ -512,16 +512,20 @@ impl Drop for Server {
 // finding the server
 // ---------------------------------------------------------------------------------------------
 
-/// A bare command name looked up in the project's venv and `node_modules/.bin`, `$PATH`, and the
-/// usual install dirs. (Over ssh nibd runs from a non-login shell, so `$PATH` often lacks
-/// `~/.local/bin`, `~/.cargo/bin`, `~/go/bin`.) Paths are left alone.
-fn find_exe(root: &Path, name: &str) -> Option<PathBuf> {
+/// A bare command name looked up in `$VIRTUAL_ENV`, `$PATH`, and the usual install dirs. (Over
+/// ssh nibd runs from a non-login shell, so `$PATH` often lacks `~/.local/bin`, `~/.cargo/bin`,
+/// `~/go/bin`.) Paths are left alone.
+///
+/// Never in the project itself (`.venv/bin`, `node_modules/.bin`): those come with whatever was
+/// cloned or unpacked, and a server starts as soon as one of its files is opened, before anybody
+/// has looked at the repository. A project's own server is named by path in the config.
+fn find_exe(name: &str) -> Option<PathBuf> {
     if name.contains(std::path::is_separator) {
         return None;
     }
     let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
     let bin = if cfg!(windows) { "Scripts" } else { "bin" };
-    let mut dirs: Vec<PathBuf> = vec![root.join(".venv").join(bin), root.join("node_modules/.bin")];
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(v) = std::env::var_os("VIRTUAL_ENV") {
         dirs.push(PathBuf::from(v).join(bin));
     }
@@ -536,8 +540,8 @@ fn find_exe(root: &Path, name: &str) -> Option<PathBuf> {
 }
 
 /// `ty server` found like any command; else through uv.
-fn find_ty(root: &Path) -> Option<Vec<String>> {
-    let find = |name: &str| find_exe(root, name);
+fn find_ty() -> Option<Vec<String>> {
+    let find = find_exe;
     let s = |p: PathBuf| p.to_string_lossy().into_owned();
     if let Some(ty) = find("ty") {
         return Some(vec![s(ty), "server".into()]);
@@ -1036,7 +1040,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // As the daemon makes a root: `canonicalize` alone gives `\\?\C:\…` on Windows.
         let dir = nib_proto::path::canonical(&dir).unwrap();
-        if find_ty(&dir).is_none() {
+        if find_ty().is_none() {
             eprintln!("ty not installed; skipping");
             return;
         }
@@ -1107,5 +1111,42 @@ mod tests {
         }
         drop(lsp);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A project cannot pick the program nibd starts as its language server: opening a file of a
+    /// cloned repository that ships `node_modules/.bin/…` or `.venv/bin/…` must not run them.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_cannot_choose_its_own_language_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("nibd-lsp-planted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir = {
+            std::fs::create_dir_all(&dir).unwrap();
+            nib_proto::path::canonical(&dir).unwrap()
+        };
+        let marks = dir.join("marks");
+        std::fs::create_dir_all(&marks).unwrap();
+        // What the repository ships: a server under each name nibd might look for there.
+        let plant = |at: &str, name: &str| {
+            let p = dir.join(at).join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("#!/bin/sh\ntouch '{}/{name}'\n", marks.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        plant("node_modules/.bin", "typescript-language-server");
+        plant(".venv/bin", "nib-test-langserver");
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        // A server the user named by its bare name, as a config entry would.
+        let user = [LspServer { name: "mine".into(), command: Some(vec!["nib-test-langserver".into()]), extensions: vec!["nibtest".into()], roots: vec![] }];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut lsp = Lsp::new(dir.clone(), &user, tx);
+        lsp.sync(dir.join("a.ts"), 1, "let x = 1;\n".into());
+        lsp.sync(dir.join("b.nibtest"), 1, "x\n".into());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let ran: Vec<String> = std::fs::read_dir(&marks).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        drop(lsp);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ran.is_empty(), "the project's own programs ran as language servers: {ran:?}");
     }
 }
