@@ -6,10 +6,10 @@
 #   dist/daemons/<triple>/nibd             static Linux daemons nib uploads to ssh/WSL remotes
 #
 # Usage:
-#   scripts/build.sh                 # this machine's client + Linux daemons (x86_64, aarch64)
-#   scripts/build.sh client          # this machine's client only
-#   scripts/build.sh daemons         # Linux daemons only
-#   scripts/build.sh client --target x86_64-pc-windows-msvc   # cross client (needs cargo-xwin)
+#   scripts/build/build.sh                 # this machine's client + Linux daemons (x86_64, aarch64)
+#   scripts/build/build.sh client          # this machine's client only
+#   scripts/build/build.sh daemons         # Linux daemons only
+#   scripts/build/build.sh client --target x86_64-pc-windows-msvc   # cross client (needs cargo-xwin)
 #
 # One-time setup for the Linux daemons:
 #   rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
@@ -23,7 +23,7 @@ while [ -L "$src" ]; do
   src="$(readlink "$src")"
   [[ "$src" != /* ]] && src="$dir/$src"
 done
-ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+ROOT="$(cd -P "$(dirname "$src")/../.." && pwd)"
 cd "$ROOT"
 
 HOST="$(rustc -vV | sed -n 's/^host: //p')"

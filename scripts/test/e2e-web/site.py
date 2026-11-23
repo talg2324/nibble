@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The pages scripts/e2e.sh shows in a web tab.
+"""The pages scripts/test/e2e.sh shows in a web tab.
 
   site.py inside PORT OUTSIDE_URL   a small local app on 127.0.0.1:PORT
   site.py outside HOST PORT LOG     "another machine": every request it gets is written to LOG

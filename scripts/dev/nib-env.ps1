@@ -7,7 +7,7 @@
 # A regular Visual Studio / Build Tools install needs none of this: cargo finds it by itself.
 
 $ErrorActionPreference = 'Stop'
-$NibRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$NibRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'

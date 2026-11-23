@@ -264,7 +264,7 @@ impl App {
         let label = self.label.clone();
         let why = match e.kind {
             ErrorKind::ProtocolMismatch => format!(
-                "nibd on {label} doesn't match this nib ({}). From a source checkout: scripts/build.sh daemons, then connect again",
+                "nibd on {label} doesn't match this nib ({}). From a source checkout: scripts/build/build.sh daemons, then connect again",
                 e.msg
             ),
             _ => e.msg.clone(),

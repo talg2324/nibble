@@ -2,10 +2,10 @@
 # Run nib from the current source tree. Rebuilds only what changed (incremental `fast` profile),
 # then runs it with your arguments, from your current directory.
 #
-#   ~/src/nibble/scripts/nib some_file.py
-#   ~/src/nibble/scripts/nib @gpu train.py
+#   ~/src/nibble/scripts/dev/nib some_file.py
+#   ~/src/nibble/scripts/dev/nib @gpu train.py
 #
-# Remote daemons come from dist/daemons (built by scripts/build.sh); nothing is installed.
+# Remote daemons come from dist/daemons (built by scripts/build/build.sh); nothing is installed.
 set -euo pipefail
 
 # Resolve the repo root even when this script is reached through a symlink or alias.
@@ -15,7 +15,7 @@ while [ -L "$src" ]; do
   src="$(readlink "$src")"
   [[ "$src" != /* ]] && src="$dir/$src"
 done
-ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+ROOT="$(cd -P "$(dirname "$src")/../.." && pwd)"
 
 command -v cargo >/dev/null || { echo "nib: cargo not found (brew install rustup && rustup default stable)" >&2; exit 1; }
 
@@ -24,7 +24,7 @@ cargo build --quiet --profile fast -p nib -p nibd --manifest-path "$ROOT/Cargo.t
 # Remote daemons are uploaded by content hash, so a stale one is reused silently and the remote
 # refuses the handshake. Rebuild them when nibd's sources are newer than any of them. None built
 # yet: build them once the musl targets are installed, else stay quiet (local use doesn't need
-# them; scripts/build.sh daemons says what to install).
+# them; scripts/build/build.sh daemons says what to install).
 # A failed build is not retried on every launch: only once the sources change again.
 FAILED="$ROOT/dist/.daemons-failed"
 sources_newer_than() {
@@ -45,8 +45,8 @@ daemons_stale() {
   return 1
 }
 if daemons_stale; then
-  echo "nib: nibd sources changed; rebuilding the remote daemons (scripts/build.sh daemons)" >&2
-  if "$ROOT/scripts/build.sh" daemons >&2; then
+  echo "nib: nibd sources changed; rebuilding the remote daemons (scripts/build/build.sh daemons)" >&2
+  if "$ROOT/scripts/build/build.sh" daemons >&2; then
     rm -f "$FAILED"
   else
     mkdir -p "$ROOT/dist" && touch "$FAILED"

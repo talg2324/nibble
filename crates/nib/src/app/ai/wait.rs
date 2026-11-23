@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(of("sleep 15"), w(15.0, false, true));
         assert_eq!(of("sleep 1m 30"), w(90.0, false, true));
         assert_eq!(of("/bin/sleep 0.5"), w(0.5, false, true));
-        assert_eq!(of("timeout 40 scripts/e2e.sh ai_menu"), w(40.0, true, true));
+        assert_eq!(of("timeout 40 scripts/test/e2e.sh ai_menu"), w(40.0, true, true));
         assert_eq!(of("gtimeout -k 5 2m cargo test"), w(120.0, true, true));
         assert_eq!(of("Start-Sleep -Seconds 5"), w(5.0, false, true));
         assert_eq!(of("Start-Sleep -Milliseconds 500"), w(0.5, false, true));

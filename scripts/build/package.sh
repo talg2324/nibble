@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Pack what scripts/build.sh put in dist/ into release archives, in dist/release/:
+# Pack what scripts/build/build.sh put in dist/ into release archives, in dist/release/:
 #
-#   scripts/package.sh client <triple> <version>   dist/<triple>/          -> nibble-<version>-<triple>.tar.gz
+#   scripts/build/package.sh client <triple> <version>   dist/<triple>/          -> nibble-<version>-<triple>.tar.gz
 #                                                   (.zip for Windows): nib, nibd, BUILD_INFO,
-#                                                   .skills/, LICENSE, README.md
-#   scripts/package.sh daemon <triple> <version>   dist/daemons/<triple>/  -> nibd-<version>-<triple>.tar.gz:
+#                                                   .skills/, LICENSE, README.md, icon.svg
+#   scripts/build/package.sh daemon <triple> <version>   dist/daemons/<triple>/  -> nibd-<version>-<triple>.tar.gz:
 #                                                   nibd, BUILD_INFO, LICENSE
-#   scripts/package.sh grammars <triple> <version> dist/grammars/<triple>/ -> nib-grammars-<version>-<triple>.tar.gz
+#   scripts/build/package.sh grammars <triple> <version> dist/grammars/<triple>/ -> nib-grammars-<version>-<triple>.tar.gz
 #                                                   (all platforms): what `nib grammar build` wrote;
 #                                                   `nib grammar add` downloads it
 #
@@ -21,7 +21,7 @@ while [ -L "$src" ]; do
   src="$(readlink "$src")"
   [[ "$src" != /* ]] && src="$dir/$src"
 done
-ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+ROOT="$(cd -P "$(dirname "$src")/../.." && pwd)"
 cd "$ROOT"
 
 [[ $# -eq 3 ]] || { sed -n '2,16p' "$0"; exit 1; }
@@ -38,11 +38,11 @@ esac
 stage="dist/release/stage/$name"
 rm -rf "$stage" && mkdir -p "$stage"
 for f in "${files[@]}"; do
-  [[ -e "$from/$f" ]] || { echo "package: $from/$f is missing (run scripts/build.sh first)" >&2; exit 1; }
+  [[ -e "$from/$f" ]] || { echo "package: $from/$f is missing (run scripts/build/build.sh first)" >&2; exit 1; }
   cp -R "$from/$f" "$stage/"
 done
 [[ "$what" != grammars ]] && cp LICENSE "$stage/"
-[[ "$what" == client ]] && cp README.md "$stage/"
+[[ "$what" == client ]] && cp README.md assets/icon.svg "$stage/"   # icon.svg: the installer's Linux .desktop entry
 
 cd dist/release/stage
 if [[ "$triple" == *windows* && "$what" != grammars ]]; then

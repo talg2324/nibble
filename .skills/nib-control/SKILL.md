@@ -112,7 +112,7 @@ the current machine: only do it in their window when they asked; otherwise use a
 
 ## For nibble developers
 Code: `crates/nib/src/control.rs` (socket + CLI), `crates/nib/src/app/control.rs` (answers),
-`crates/nib/src/headless.rs` (windowless loop). `scripts/e2e.sh` is the reference for scripted
+`crates/nib/src/headless.rs` (windowless loop). `scripts/test/e2e.sh` is the reference for scripted
 use. New request kinds go in `App::on_control`, and in `ctl()` if they need CLI sugar; then add
 a row above. Keep the transport plain (socket + JSON lines; no MCP). The local apps' requests
 (`web …`, `serve …`, `forward …`; `nib ctl help` lists them) are answered by `crate::web`'s

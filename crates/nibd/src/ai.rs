@@ -1837,17 +1837,30 @@ fn claude_questions(input: &Value) -> Vec<AiQuestion> {
         .collect()
 }
 
-/// nib's own skills as a Claude Code plugin for one session: a folder under nib's cache with a
-/// link to each skill that ships next to this binary (in a checkout: the nearest `.skills`
-/// above it). `None` when there are none here (a daemon deployed without them).
+/// nib's own skills: those nib uploaded with this daemon (`NIB_SKILLS`, on an SSH or WSL remote),
+/// else those that ship next to this binary (in a checkout: the nearest `.skills` above it).
 fn bundled_skills() -> Vec<AiSkill> {
-    let Some(exe) = std::env::current_exe().ok() else { return Vec::new() };
-    let Some(src) = exe.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir()) else { return Vec::new() };
+    let uploaded = std::env::var_os("NIB_SKILLS").map(PathBuf::from).filter(|d| d.is_dir());
+    let beside = || std::env::current_exe().ok().and_then(|exe| exe.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir()));
+    let Some(src) = uploaded.or_else(beside) else { return Vec::new() };
     nib_proto::skills::list(&src, SkillGroup::Nib)
 }
 
+/// nib's skills that `agent` doesn't already load by itself: one the installer put where the
+/// assistant looks (`~/.claude/skills`, `~/.agents/skills`, …) is left out, so it isn't there
+/// twice and the user's edits to it win.
+fn bundled_skills_for(agent: AiAgent) -> Vec<AiSkill> {
+    not_installed(bundled_skills(), home().as_deref(), agent)
+}
+
+fn not_installed(skills: Vec<AiSkill>, home: Option<&Path>, agent: AiAgent) -> Vec<AiSkill> {
+    let installed = |name: &str| home.is_some_and(|h| provider_skill_dirs(agent).iter().any(|d| h.join(d).join(name).join("SKILL.md").is_file()));
+    skills.into_iter().filter(|s| !installed(&s.name)).collect()
+}
+
+/// nib's plugin for one Claude Code session: the skills it doesn't have yet, and the hooks.
 fn skills_plugin() -> Option<PathBuf> {
-    let skills = bundled_skills();
+    let skills = bundled_skills_for(AiAgent::Claude);
     link_plugin(&crate::places::xdg("XDG_CACHE_HOME", &[".cache"]).join("plugin").join("nib"), &skills)
 }
 
@@ -1875,9 +1888,7 @@ fn write_plugin_hooks(dir: &Path) -> std::io::Result<()> {
 fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
     // Not offered unless the user opted in at install.
     let skills: Vec<&AiSkill> = skills.iter().filter(|s| s.name != "nib-upstream").collect();
-    if skills.is_empty() {
-        return None;
-    }
+    // Made even with no skills to link (all installed where Claude Code looks): it has the hooks.
     std::fs::create_dir_all(dir.join(".claude-plugin")).ok()?;
     std::fs::write(dir.join(".claude-plugin/plugin.json"), r#"{"name":"nib","description":"Skills for working in the nibble editor","version":"0.1.0"}"#).ok()?;
     write_plugin_hooks(dir).ok()?;
@@ -1908,9 +1919,7 @@ fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
     }
     // Not offered unless the user opted in at install.
     let skills: Vec<&AiSkill> = skills.iter().filter(|s| s.name != "nib-upstream").collect();
-    if skills.is_empty() {
-        return None;
-    }
+    // Made even with no skills to link (all installed where Claude Code looks): it has the hooks.
     std::fs::create_dir_all(dir.join(".claude-plugin")).ok()?;
     std::fs::write(dir.join(".claude-plugin/plugin.json"), r#"{"name":"nib","description":"Skills for working in the nibble editor","version":"0.1.0"}"#).ok()?;
     write_plugin_hooks(dir).ok()?;
@@ -2624,7 +2633,7 @@ impl PerTurn {
                             let config = if roots.is_empty() { Value::Null } else { serde_json::json!({ "sandbox_workspace_write": { "writable_roots": roots } }) };
                             let mut instructions = me.tuning.prompt.clone().unwrap_or_default();
                             if me.tools {
-                                let catalog = codex_skill_catalog(&bundled_skills());
+                                let catalog = codex_skill_catalog(&bundled_skills_for(AiAgent::Codex));
                                 if !catalog.is_empty() { if !instructions.is_empty() { instructions.push_str("\n\n"); } instructions.push_str(&catalog); }
                             }
                             let resume_id = me.resume.lock().unwrap().clone();
@@ -3613,8 +3622,26 @@ mod tests {
         assert!(plugin.join(".claude-plugin/plugin.json").is_file());
         assert!(plugin.join("skills/nib-control/SKILL.md").is_file());
         assert!(!plugin.join("skills/nib-upstream").exists());
-        assert!(link_plugin(&dir.join("none"), &[]).is_none());
+        // No skills to link: still a plugin, for its hooks.
+        let none = link_plugin(&dir.join("none"), &[]).unwrap();
+        assert!(none.join("hooks/hooks.json").is_file());
+        assert!(!none.join("skills/nib-control").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installed_skills_are_not_passed_again() {
+        let home = std::env::temp_dir().join(format!("nibd-installed-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".claude/skills/nib-work")).unwrap();
+        std::fs::write(home.join(".claude/skills/nib-work/SKILL.md"), "edited").unwrap();
+        let skill = |name: &str| AiSkill { name: name.into(), description: "d".into(), path: format!("/s/{name}/SKILL.md"), group: SkillGroup::Nib };
+        let names = |v: Vec<AiSkill>| v.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        let all = || vec![skill("nib-work"), skill("nib-control")];
+        assert_eq!(names(not_installed(all(), Some(&home), AiAgent::Claude)), ["nib-control"]);
+        // Codex looks in ~/.agents/skills, where there is none.
+        assert_eq!(names(not_installed(all(), Some(&home), AiAgent::Codex)), ["nib-work", "nib-control"]);
+        assert_eq!(names(not_installed(all(), None, AiAgent::Claude)), ["nib-work", "nib-control"]);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

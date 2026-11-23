@@ -4,6 +4,8 @@
 //! - ssh:   system OpenSSH. One exec on the fast path: a POSIX-sh snippet picks the
 //!   content-addressed daemon for the remote `uname -sm` and `exec`s it, or prints
 //!   `NIB_NEED_UPLOAD <os> <arch>`; we then upload over a second ssh exec and retry.
+//!   nib's skills go up the same way (`skills-<hash>`, handed to nibd as `NIB_SKILLS`), so
+//!   agents on the remote have them too; `NIB_NEED_UPLOAD +skills <os> <arch>`: only those.
 //! - wsl:   same snippet through `wsl.exe -d <distro> --`.
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -166,7 +168,7 @@ pub fn daemon_for(uname: &str) -> std::result::Result<PathBuf, String> {
     let Some((_, triple)) = REMOTE_TARGETS.iter().find(|(u, _)| *u == uname) else {
         return Err(format!("nib has no daemon for {uname} (Linux x86_64 and arm64 only); set `nibd` to one you built there"));
     };
-    bundled_daemon(triple).ok_or_else(|| format!("this nib has no Linux daemon to upload ({triple}). Build them once with scripts/build.sh daemons"))
+    bundled_daemon(triple).ok_or_else(|| format!("this nib has no Linux daemon to upload ({triple}). Build them once with scripts/build/build.sh daemons"))
 }
 
 /// The socket of nib's shared ssh connection to a host: `transport` opens it, `forward` and
@@ -472,16 +474,26 @@ fn short_hash(path: &Path) -> Result<String> {
         .collect())
 }
 
-/// Bootstrap snippet. Must not contain single quotes (see `Remote::sh`).
-fn bootstrap_script(hashes: &[(&str, String)]) -> String {
+/// What the bootstrap says when nibd is there but nib's skills (`skills-<hash>`) aren't.
+const SKILLS_ONLY: &str = "+skills ";
+
+/// Bootstrap snippet. Must not contain single quotes (see `Remote::sh`). `skills`: the hash of
+/// the skills to hand nibd (`None`: this nib has none).
+fn bootstrap_script(hashes: &[(&str, String)], skills: Option<&str>) -> String {
     let mut cases = String::new();
     for (uname, hash) in hashes {
         cases.push_str(&format!("\"{uname}\") h={hash};; "));
     }
+    let skills = skills.unwrap_or_default();
     format!(
-        "d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/nib\"; u=\"$(uname -sm)\"; h=; \
+        "d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/nib\"; u=\"$(uname -sm)\"; h=; s={skills}; \
          case \"$u\" in {cases}esac; \
-         if [ -n \"$h\" ] && [ -x \"$d/nibd-$h\" ]; then exec \"$d/nibd-$h\" --stdio; fi; \
+         if [ -n \"$h\" ] && [ -x \"$d/nibd-$h\" ]; then \
+           if [ -z \"$s\" ] || [ -d \"$d/skills-$s\" ]; then \
+             [ -z \"$s\" ] || export NIB_SKILLS=\"$d/skills-$s\"; exec \"$d/nibd-$h\" --stdio; \
+           fi; \
+           echo \"{NEED_UPLOAD_MARKER} {SKILLS_ONLY}$u\"; exit 0; \
+         fi; \
          echo \"{NEED_UPLOAD_MARKER} $u\""
     )
 }
@@ -499,15 +511,33 @@ fn remote(r: &Remote, nibd_override: Option<&str>, progress: &dyn Fn(String, Opt
             hashes.push((*uname, short_hash(&p)?));
         }
     }
+    let mut skills = local_skills();
     for attempt in 0..2 {
-        match launch(r.sh(&bootstrap_script(&hashes)), label.clone())? {
+        match launch(r.sh(&bootstrap_script(&hashes, skills.as_ref().map(|(h, _)| h.as_str()))), label.clone())? {
             Launch::Connected(mut c, rd) => {
                 c.mux = r.mux();
                 return Ok((c, rd));
             }
-            Launch::NeedUpload(uname) if attempt == 0 => upload(r, &uname, progress)?,
-            Launch::NeedUpload(uname) => {
-                bail!("{label}: nibd still missing after upload ({uname})")
+            Launch::NeedUpload(what) if attempt == 0 => {
+                let (uname, nibd) = match what.strip_prefix(SKILLS_ONLY) {
+                    Some(u) => (u.to_string(), false),
+                    None => (what, true),
+                };
+                if nibd {
+                    upload(r, &uname, progress)?;
+                }
+                if let Some((hash, tar)) = &skills {
+                    // Without them the remote's agents miss nib's skills; nibd itself still works.
+                    if let Err(e) = upload_skills(r, hash, tar) {
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path(&label)) {
+                            let _ = writeln!(f, "nib: skills not uploaded: {e:#}");
+                        }
+                        skills = None;
+                    }
+                }
+            }
+            Launch::NeedUpload(what) => {
+                bail!("{label}: nibd still missing after upload ({what})")
             }
         }
     }
@@ -541,7 +571,7 @@ fn upload(r: &Remote, uname: &str, progress: &dyn Fn(String, Option<f32>)) -> Re
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path(&r.label())) {
             let _ = writeln!(f, "nib: no nibd for {triple} in {:?}", daemons_dirs());
         }
-        anyhow!("this nib has no Linux daemon to upload ({triple}). Build them once with scripts/build.sh daemons, then connect again")
+        anyhow!("this nib has no Linux daemon to upload ({triple}). Build them once with scripts/build/build.sh daemons, then connect again")
     })?;
     let hash = short_hash(&bin)?;
     let size = std::fs::metadata(&bin).map(|m| m.len()).unwrap_or(0);
@@ -578,6 +608,107 @@ fn upload(r: &Remote, uname: &str, progress: &dyn Fn(String, Option<f32>)) -> Re
             r.label(),
             log_path(&r.label()).display()
         );
+    }
+    Ok(())
+}
+
+/// nib's skills on this machine (next to this binary; in a checkout, the nearest `.skills` above
+/// it), to go up with nibd: a hash of their contents and them as a tar archive.
+fn local_skills() -> Option<(String, Vec<u8>)> {
+    let dir = std::env::current_exe().ok()?.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir())?;
+    let mut files = Vec::new();
+    collect_files(&dir, "", &mut files);
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    let mut h = Sha256::new();
+    for (path, data) in &files {
+        h.update(path.as_bytes());
+        h.update([0]);
+        h.update((data.len() as u64).to_le_bytes());
+        h.update(data);
+    }
+    let hash = h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect();
+    Some((hash, tar(&files)))
+}
+
+/// Every file under `dir`, as (path relative to it with `/`, contents); links followed.
+fn collect_files(dir: &Path, rel: &str, out: &mut Vec<(String, Vec<u8>)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let path = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+        let Ok(meta) = std::fs::metadata(e.path()) else { continue };
+        if meta.is_dir() {
+            collect_files(&e.path(), &path, out);
+        } else if let Ok(data) = std::fs::read(e.path()) {
+            out.push((path, data));
+        }
+    }
+}
+
+/// A plain ustar archive of `files`, which `tar -xf -` unpacks anywhere (GNU, BSD, busybox).
+/// A path too long for the format is left out.
+fn tar(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    fn put(h: &mut [u8; 512], at: usize, s: &str) {
+        h[at..at + s.len()].copy_from_slice(s.as_bytes());
+    }
+    let mut out = Vec::new();
+    for (path, data) in files {
+        // name: 100 bytes; longer ones split at a `/` into prefix (155) and name
+        let (prefix, name) = if path.len() <= 100 {
+            ("", path.as_str())
+        } else {
+            match path.char_indices().filter(|&(i, c)| c == '/' && i <= 155 && path.len() - i - 1 <= 100).map(|(i, _)| i).next() {
+                Some(i) => (&path[..i], &path[i + 1..]),
+                None => continue,
+            }
+        };
+        let mut h = [0u8; 512];
+        put(&mut h, 0, name);
+        put(&mut h, 100, "0000644\0");
+        put(&mut h, 108, "0000000\0");
+        put(&mut h, 116, "0000000\0");
+        put(&mut h, 124, &format!("{:011o}\0", data.len()));
+        put(&mut h, 136, "00000000000\0");
+        put(&mut h, 148, "        ");
+        h[156] = b'0';
+        put(&mut h, 257, "ustar\0");
+        put(&mut h, 263, "00");
+        put(&mut h, 345, prefix);
+        let sum: u32 = h.iter().map(|&b| b as u32).sum();
+        put(&mut h, 148, &format!("{sum:06o}\0 "));
+        out.extend_from_slice(&h);
+        out.extend_from_slice(data);
+        out.resize(out.len().div_ceil(512) * 512, 0);
+    }
+    out.extend_from_slice(&[0; 1024]);
+    out
+}
+
+/// Unpack stdin (a tar of nib's skills) as `skills-<hash>` in the remote's nib cache
+/// (atomically), then prune as `upload_script` does: keep it and the two most recent others.
+/// Must not contain single quotes (see `Remote::sh`).
+fn skills_upload_script(hash: &str) -> String {
+    format!(
+        "set -e; d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/nib\"; mkdir -p \"$d\"; \
+         t=\"$d/.skills-{hash}.$$\"; rm -rf \"$t\"; mkdir \"$t\"; tar -xf - -C \"$t\"; \
+         rm -rf \"$d/skills-{hash}\"; mv \"$t\" \"$d/skills-{hash}\"; \
+         set +e; cd \"$d\" || exit 0; \
+         ls -td skills-* 2>/dev/null | grep -x \"skills-[0-9a-f]*\" | grep -vx \"skills-{hash}\" | tail -n +3 | while read -r f; do rm -rf \"./$f\"; done; \
+         find . -maxdepth 1 -name \".skills-*\" -mmin +10 -exec rm -rf {{}} + 2>/dev/null; exit 0"
+    )
+}
+
+fn upload_skills(r: &Remote, hash: &str, tar: &[u8]) -> Result<()> {
+    let mut cmd = r.sh(&skills_upload_script(hash));
+    cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(stderr_log(&r.label()));
+    let mut child = cmd.spawn()?;
+    child.stdin.take().unwrap().write_all(tar)?;
+    let st = child.wait()?;
+    if !st.success() {
+        bail!("skills upload to {} failed ({st})", r.label());
     }
     Ok(())
 }
@@ -634,7 +765,7 @@ mod tests {
 
     #[test]
     fn bootstrap_has_no_single_quotes() {
-        let s = bootstrap_script(&[("Linux x86_64", "abcd".into())]);
+        let s = bootstrap_script(&[("Linux x86_64", "abcd".into())], Some("5c11"));
         assert!(!s.contains('\''));
         assert!(s.contains("\"Linux x86_64\") h=abcd;;"));
     }
@@ -649,7 +780,7 @@ mod tests {
         let uname =
             String::from_utf8(Command::new("uname").arg("-sm").output().unwrap().stdout).unwrap();
         let uname = uname.trim().to_string();
-        let script = bootstrap_script(&[(uname.as_str(), "feed".into())]);
+        let script = bootstrap_script(&[(uname.as_str(), "feed".into())], None);
         let run = || {
             let out = Command::new("sh")
                 .arg("-c")
@@ -669,6 +800,50 @@ mod tests {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert_eq!(run().trim(), "ran --stdio");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Skills on the remote: asked for while missing, handed to nibd as `NIB_SKILLS` once there;
+    /// the upload script unpacks what `tar` makes.
+    #[test]
+    #[cfg(unix)]
+    fn skills_go_up_and_reach_nibd() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!("nib-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let cache = home.join(".cache/nib");
+        std::fs::create_dir_all(&cache).unwrap();
+        let uname = String::from_utf8(Command::new("uname").arg("-sm").output().unwrap().stdout).unwrap().trim().to_string();
+        let sh = |script: &str, input: &[u8]| {
+            let mut c = Command::new("sh").arg("-c").arg(script).env("HOME", &home).env_remove("XDG_CACHE_HOME")
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            c.stdin.take().unwrap().write_all(input).unwrap();
+            String::from_utf8(c.wait_with_output().unwrap().stdout).unwrap().trim().to_string()
+        };
+        let boot = bootstrap_script(&[(uname.as_str(), "feed".into())], Some("5c11"));
+        assert_eq!(sh(&boot, b""), format!("{NEED_UPLOAD_MARKER} {uname}"), "no nibd: upload both");
+        let fake = cache.join("nibd-feed");
+        std::fs::write(&fake, "#!/bin/sh\necho \"ran $1 $NIB_SKILLS\"\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(sh(&boot, b""), format!("{NEED_UPLOAD_MARKER} {SKILLS_ONLY}{uname}"), "nibd there: only the skills");
+
+        let long = format!("nib-work/{}/SKILL.md", "deep/".repeat(25));
+        let files = vec![("nib-work/SKILL.md".to_string(), b"---\nname: nib-work\n---\n".to_vec()), (long.clone(), vec![b'x'; 700])];
+        sh(&skills_upload_script("5c11"), &tar(&files));
+        assert_eq!(std::fs::read(cache.join("skills-5c11/nib-work/SKILL.md")).unwrap(), files[0].1);
+        assert_eq!(std::fs::read(cache.join("skills-5c11").join(&long)).unwrap(), files[1].1, "a path over 100 bytes");
+        assert_eq!(sh(&boot, b""), format!("ran --stdio {}", cache.join("skills-5c11").display()));
+
+        // Skills from an older nib are pruned past the two most recent others.
+        for (i, old) in ["aa01", "aa02", "aa03"].iter().enumerate() {
+            std::fs::create_dir_all(cache.join(format!("skills-{old}"))).unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(100 * (3 - i as u64));
+            std::fs::File::open(cache.join(format!("skills-{old}"))).unwrap().set_modified(t).unwrap();
+        }
+        sh(&skills_upload_script("5c11"), &tar(&files));
+        let mut left: Vec<String> = std::fs::read_dir(&cache).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("skills-")).collect();
+        left.sort();
+        assert_eq!(left, ["skills-5c11", "skills-aa02", "skills-aa03"]);
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

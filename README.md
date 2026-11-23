@@ -60,23 +60,23 @@ Until v0.4 there are no prebuilt binaries, so you build nibble yourself. You nee
 ```bash
 git clone https://github.com/talg2324/nibble
 cd nibble
-scripts/nib .                 # build (incrementally) and open the current folder
+scripts/dev/nib .             # build (incrementally) and open the current folder
 ```
 
-`scripts/nib` runs nibble straight from the source tree and rebuilds only what changed. Put it on your `PATH` (or alias it) and use it like any editor command: `nib file.py`, `nib ~/project`.
+`scripts/dev/nib` runs nibble straight from the source tree and rebuilds only what changed. Put it on your `PATH` (or alias it) and use it like any editor command: `nib file.py`, `nib ~/project`.
 
 On **Windows** (10 1803 or later), use the PowerShell scripts; the `.cmd` wrappers run from cmd or PowerShell without changing the execution policy. You also need the MSVC C++ build tools: [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload, or, without admin rights, any script that puts `cl.exe` / `link.exe` on `PATH`, named by `NIB_MSVC_ENV`.
 
 ```powershell
-scripts\nib.cmd .             # build (incrementally) and open the current folder
-scripts\build.cmd client      # release nib.exe + nibd.exe into dist\x86_64-pc-windows-msvc\
+scripts\dev\nib.cmd .         # build (incrementally) and open the current folder
+scripts\build\build.cmd client  # release nib.exe + nibd.exe into dist\x86_64-pc-windows-msvc\
 ```
 
 To work on Linux servers over SSH, also build the static daemons that nibble uploads to them:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-scripts/build.sh              # release client + Linux daemons into dist/
+scripts/build/build.sh        # release client + Linux daemons into dist/
 ```
 
 To use agents, install a supported coding agent (see [Agents](#agents)) on the machine with the code, and sign in to it. The agents tab can also install and update them for you.
@@ -209,7 +209,7 @@ nib ctl search --project smooth
 nib ctl ai use "Claude Code" --model claude-sonnet-5-5
 ```
 
-This is how agents debug nibble, how the end-to-end tests run (`scripts/e2e.sh`), and how the GIFs above were recorded. `nib --headless` gives you the same editor with a real daemon, terminals, language servers and git, but no window, for CI and for agents that need an editor of their own. The [`nib-control`](.skills/nib-control/SKILL.md) skill is the full reference.
+This is how agents debug nibble, how the end-to-end tests run (`scripts/test/e2e.sh`), and how the GIFs above were recorded. `nib --headless` gives you the same editor with a real daemon, terminals, language servers and git, but no window, for CI and for agents that need an editor of their own. The [`nib-control`](.skills/nib-control/SKILL.md) skill is the full reference.
 
 ## Adding a language
 

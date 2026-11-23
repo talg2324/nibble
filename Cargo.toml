@@ -47,7 +47,7 @@ panic = "abort"
 [profile.dev.package."*"]
 opt-level = 2
 
-# Used by scripts/nib (run from source): optimized but incremental, so rebuilds take seconds.
+# Used by scripts/dev/nib (run from source): optimized but incremental, so rebuilds take seconds.
 [profile.fast]
 inherits = "release"
 lto = false

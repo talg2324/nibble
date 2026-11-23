@@ -2,10 +2,10 @@
 # GUI end-to-end smoke test: runs the real `nib`, drives it through its control socket
 # (`nib ctl`), and checks the files on disk. macOS: runs in a normal window. Linux: under Xvfb on
 # the CPU renderer (apt install xvfb). Optional ssh leg via NIB_E2E_SSH_HOST.
-#   cargo build --release && scripts/e2e.sh
+#   cargo build --release && scripts/test/e2e.sh
 set -euo pipefail
-cd "$(dirname "$0")/.."
-NIB=${NIB:-target/release/nib}   # also built by `scripts/build.sh client` (host target)
+cd "$(dirname "$0")/../.."
+NIB=${NIB:-target/release/nib}   # also built by `scripts/build/build.sh client` (host target)
 TMP=$(mktemp -d)
 XPID=
 KIDS=
@@ -134,7 +134,7 @@ closed "$P1" && closed "$P2" || { echo "FAIL: a server outlived the window"; exi
 kill $HOLD 2>/dev/null; wait $HOLD 2>/dev/null || true
 echo "  ok"
 
-# The web tab's engine and the agents' page requests, against scripts/e2e-web/site.py: a small
+# The web tab's engine and the agents' page requests, against scripts/test/e2e-web/site.py: a small
 # local app, and a stand-in for "another machine" on this one's network address, which must
 # never be asked for a page. Runs with the browser nib would use; NIB_E2E_BROWSERS (paths,
 # separated by ":") runs it once for each of those instead.
@@ -191,7 +191,7 @@ web_leg() {
   KIDS="$KIDS $pid"
   for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
   if "$NIB" ctl -s "$SOCK" state | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["web"]["browser"] else 1)'; then
-    python3 scripts/e2e-web/check.py "$NIB" "$pid" "$WEB_PORT" "http://$OUTSIDE:$((WEB_PORT + 1))" "$TMP/outside.log" > "$TMP/web.log" 2>&1 \
+    python3 scripts/test/e2e-web/check.py "$NIB" "$pid" "$WEB_PORT" "http://$OUTSIDE:$((WEB_PORT + 1))" "$TMP/outside.log" > "$TMP/web.log" 2>&1 \
       || { tail -5 "$TMP/web.log"; echo "FAIL: web"; exit 1; }
     echo "  ok ($(grep -c '^ok' "$TMP/web.log") checks)"
     agent_leg
@@ -210,8 +210,8 @@ if [ -z "$OUTSIDE" ] || [ "${OUTSIDE#127.}" != "$OUTSIDE" ]; then
 else
   WEB_PORT=${NIB_E2E_WEB_PORT:-8971}
   export XDG_CACHE_HOME="$TMP/cache"; TMP_WEB_MARK="$TMP/cache/nib/web"
-  python3 scripts/e2e-web/site.py inside "$WEB_PORT" "http://$OUTSIDE:$((WEB_PORT + 1))" & SITE1=$!
-  python3 scripts/e2e-web/site.py outside "$OUTSIDE" "$((WEB_PORT + 1))" "$TMP/outside.log" & SITE2=$!
+  python3 scripts/test/e2e-web/site.py inside "$WEB_PORT" "http://$OUTSIDE:$((WEB_PORT + 1))" & SITE1=$!
+  python3 scripts/test/e2e-web/site.py outside "$OUTSIDE" "$((WEB_PORT + 1))" "$TMP/outside.log" & SITE2=$!
   KIDS="$KIDS $SITE1 $SITE2"
   sleep 0.5
   if [ -n "${NIB_E2E_BROWSERS:-}" ]; then
@@ -224,13 +224,13 @@ else
   unset XDG_CACHE_HOME
 fi
 
-# Another machine's ports: a window "on another machine" (scripts/e2e-web/fake_ssh.py stands in
+# Another machine's ports: a window "on another machine" (scripts/test/e2e-web/fake_ssh.py stands in
 # for ssh, so the other machine is this one) forwards a port of it, shows a page through the
 # forward, forwards a ready server's port, and leaves nothing behind. What ssh itself does is
 # not checked here (NIB_E2E_SSH_HOST below does that, where there is a host).
 echo "e2e: forward"
 mkdir -p "$TMP/far" "$TMP/fbin" "$TMP/fssh"; echo '<title>Far</title><h1>hello from afar</h1>' > "$TMP/far/index.html"
-printf '#!/bin/sh\nexec python3 "%s/scripts/e2e-web/fake_ssh.py" "$@"\n' "$PWD" > "$TMP/fbin/ssh"; chmod +x "$TMP/fbin/ssh"
+printf '#!/bin/sh\nexec python3 "%s/scripts/test/e2e-web/fake_ssh.py" "$@"\n' "$PWD" > "$TMP/fbin/ssh"; chmod +x "$TMP/fbin/ssh"
 NIBD_BIN="$(cd "$(dirname "$NIB")" && pwd)/nibd"
 printf '[profiles.far]\nssh = "far.test"\nroot = "%s"\nnibd = "%s"\n[profiles.gpu]\nssh = "gpu.test"\nroot = "~"\n' "$TMP/far" "$NIBD_BIN" > "$TMP/config.toml"
 read -r F1 F2 <<< "$(python3 -c "

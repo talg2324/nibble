@@ -1,20 +1,20 @@
-# Release builds on Windows, organized by target, into dist\ (same layout as scripts/build.sh):
+# Release builds on Windows, organized by target, into dist\ (same layout as scripts/build/build.sh):
 #
 #   dist\<triple>\nib.exe, nibd.exe, BUILD_INFO   full client for this machine
 #   dist\<triple>\.skills\                        agent skills (copied from the repo's .skills\)
 #   dist\daemons\<triple>\nibd                    static Linux daemons for ssh/WSL remotes
 #
 # Usage:
-#   scripts\build.ps1                # client + Linux daemons (daemons skipped if targets missing)
-#   scripts\build.ps1 client         # this machine's client only
-#   scripts\build.ps1 daemons        # Linux daemons only
+#   scripts\build\build.ps1                # client + Linux daemons (daemons skipped if targets missing)
+#   scripts\build\build.ps1 client         # this machine's client only
+#   scripts\build\build.ps1 daemons        # Linux daemons only
 #
 # One-time setup for the Linux daemons:
 #   rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
 param([ValidateSet('all', 'client', 'daemons')][string]$What = 'all')
 
-. (Join-Path $PSScriptRoot 'nib-env.ps1')
+. (Join-Path $PSScriptRoot '..\dev\nib-env.ps1')
 Set-Location $NibRoot
 
 $hostTriple = ((rustc -vV) | Where-Object { $_ -like 'host:*' }) -replace '^host:\s*', ''

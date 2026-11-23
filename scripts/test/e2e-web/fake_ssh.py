@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A stand-in for `ssh` in scripts/e2e.sh's "forward" leg, where no ssh server is at hand: the
+"""A stand-in for `ssh` in scripts/test/e2e.sh's "forward" leg, where no ssh server is at hand: the
 "other machine" is this one. It does what nib asks of ssh and nothing else:
 
   ssh … HOST COMMAND             runs COMMAND with sh (nibd over stdio)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drives a nib window's web requests against scripts/e2e-web/site.py and checks what comes back.
+"""Drives a nib window's web requests against scripts/test/e2e-web/site.py and checks what comes back.
 
   check.py NIB PID INSIDE_PORT OUTSIDE_URL OUTSIDE_LOG
 

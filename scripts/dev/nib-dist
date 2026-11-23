@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Run the latest compiled release for this machine (dist/<host-triple>/nib, from scripts/build.sh).
+# Run the latest compiled release for this machine (dist/<host-triple>/nib, from scripts/build/build.sh).
 # Never builds; tells you if the build is older than the source.
 #
-#   ~/src/nibble/scripts/nib-dist some_file.py
+#   ~/src/nibble/scripts/dev/nib-dist some_file.py
 set -euo pipefail
 
 src="${BASH_SOURCE[0]}"
@@ -11,7 +11,7 @@ while [ -L "$src" ]; do
   src="$(readlink "$src")"
   [[ "$src" != /* ]] && src="$dir/$src"
 done
-ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+ROOT="$(cd -P "$(dirname "$src")/../.." && pwd)"
 
 case "$(uname -sm)" in
   "Darwin arm64") HOST=aarch64-apple-darwin ;;
@@ -23,13 +23,13 @@ case "$(uname -sm)" in
 esac
 
 BIN="$ROOT/dist/$HOST/nib"
-[[ -x "$BIN" || -x "$BIN.exe" ]] || { echo "nib-dist: no build for $HOST — run scripts/build.sh" >&2; exit 1; }
+[[ -x "$BIN" || -x "$BIN.exe" ]] || { echo "nib-dist: no build for $HOST — run scripts/build/build.sh" >&2; exit 1; }
 [[ -x "$BIN" ]] || BIN="$BIN.exe"
 
 built="$(sed -n 's/^commit //p' "$ROOT/dist/$HOST/BUILD_INFO" 2>/dev/null | cut -d' ' -f1)"
 head="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 if [[ -n "$built" && -n "$head" && "$built" != "$head" ]]; then
-  echo "nib-dist: note: build is from $built, source is at $head (scripts/build.sh to refresh)" >&2
+  echo "nib-dist: note: build is from $built, source is at $head (scripts/build/build.sh to refresh)" >&2
 fi
 
 export NIB_DAEMONS="${NIB_DAEMONS:-$ROOT/dist/daemons}"

@@ -652,7 +652,7 @@ A *small*, **fast** editor with ~~no~~ `remote` editing.
 > Edits happen on the client; files stay on the host.
 
 ```bash
-./scripts/nib README.md
+./scripts/dev/nib README.md
 ```
 "#,
         sample_word: "editor",

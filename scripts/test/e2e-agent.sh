@@ -3,10 +3,10 @@
 # with a bug, a real nib (headless) driven by `nib ctl`, a real Claude Code agent asked to fix it,
 # its "done" accepted as ⌘↵ would. Passes when the fix landed on the repo's branch as one commit
 # and nothing is left uncommitted or checked out beside it. Spends model tokens: run by hand.
-#   cargo build && scripts/e2e-agent.sh            NIB_E2E_RUNS=5 for a rate; NIB_E2E_MODEL=…
+#   cargo build && scripts/test/e2e-agent.sh            NIB_E2E_RUNS=5 for a rate; NIB_E2E_MODEL=…
 #   NIB_E2E_WPF=off checks the other way: the fix is left in the tree, and the summary says so.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 NIB=${NIB:-target/debug/nib}
 RUNS=${NIB_E2E_RUNS:-1}
 WPF=${NIB_E2E_WPF:-on}
