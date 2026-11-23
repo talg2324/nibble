@@ -323,8 +323,6 @@ jobs:
             # a user, with nib installed for them by the same installer.
             useradd -m tester
             cp -r . /home/tester/repo && chown -R tester /home/tester/repo
-            # Chrome alone first: if it cannot start here, its own words say why (nib hides them).
-            runuser -u tester -- google-chrome --headless=new --no-first-run --user-data-dir=/tmp/chrome-check --dump-dom about:blank 2>&1 | tail -15 || true
             # shellcheck disable=SC2016  # expanded by the user's shell, not here
             runuser -u tester -- env PRE="$PRE" TAG="$TAG" REL="$REL" LATEST="$LATEST" CI=1 NIB_E2E_ONLY="$NIB_E2E_ONLY" bash -c '
               set -e

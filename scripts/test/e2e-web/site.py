@@ -7,6 +7,15 @@
 Standard library only.
 """
 import http.server
+import socketserver
+
+
+class Server(http.server.ThreadingHTTPServer):
+    """Without http.server's reverse DNS lookup between bind() and listen() (see serve.py)."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 import sys
 
 INSIDE = """<!doctype html><title>Orders - Test App</title>
@@ -75,7 +84,7 @@ def inside(port, out):
             self.end_headers()
             self.wfile.write((body or "missing").replace("OUT", out).encode())
 
-    http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    Server(("127.0.0.1", port), Handler).serve_forever()
 
 
 def outside(host, port, log):
@@ -91,7 +100,7 @@ def outside(host, port, log):
             self.end_headers()
             self.wfile.write(b"<title>OUTSIDE</title>outside page")
 
-    http.server.ThreadingHTTPServer((host, port), Handler).serve_forever()
+    Server((host, port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

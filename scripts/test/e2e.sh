@@ -37,6 +37,8 @@ run_edit() {
 }
 
 # NIB_E2E_ONLY=web,forward runs only those legs (local, headless, apps, web, forward, bench).
+# Every test web server: python3 -m http.server without its slow reverse DNS lookup (see serve.py).
+SERVE="$PWD/scripts/test/e2e-web/serve.py"
 want() { [ -z "${NIB_E2E_ONLY:-}" ] || [[ ",$NIB_E2E_ONLY," == *",$1,"* ]]; }
 answers() { python3 -c "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), 1)" "$1" 2>/dev/null; }
 # On a failure: the servers' terminals, so the log says why (a command not found, a slow start).
@@ -105,30 +107,29 @@ SPID=$!
 KIDS="$KIDS $SPID"
 for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
 ctl wait 20
-python3 -m http.server "$P3" --bind 127.0.0.1 >/dev/null 2>&1 & HOLD=$!
+python3 $SERVE "$P3" --bind 127.0.0.1 >/dev/null 2>&1 & HOLD=$!
 KIDS="$KIDS $HOLD"
 for _ in $(seq 50); do answers "$P3" && break; sleep 0.1; done
 approved_apps "$SOCK" "{
-  \"pair\": { \"servers\": { \"one\": { \"cmd\": \"python3 -m http.server $P1 --bind 127.0.0.1\", \"port\": $P1 },
-                           \"two\": { \"cmd\": \"python3 -m http.server $P2 --bind 127.0.0.1\", \"port\": $P2, \"after\": [\"one\"] } } },
-  \"held\": { \"servers\": { \"held\": { \"cmd\": \"python3 -m http.server $P3 --bind 127.0.0.1\", \"port\": $P3 } } } }"
+  \"pair\": { \"servers\": { \"one\": { \"cmd\": \"python3 $SERVE $P1 --bind 127.0.0.1\", \"port\": $P1 },
+                           \"two\": { \"cmd\": \"python3 $SERVE $P2 --bind 127.0.0.1\", \"port\": $P2, \"after\": [\"one\"] } } },
+  \"held\": { \"servers\": { \"held\": { \"cmd\": \"python3 $SERVE $P3 --bind 127.0.0.1\", \"port\": $P3 } } } }"
 echo '{ "servers": { "s": { "cmd": "true", "after": ["nobody"] } } }' | { ! "$NIB" ctl -s "$SOCK" app set bad --json - >/dev/null 2>&1; } || { echo "FAIL: a server after one the app does not have was accepted"; exit 1; }
 # What nib ctl defines waits for the user: listed, not started, not approvable from here.
-echo "{ \"servers\": { \"s\": { \"cmd\": \"python3 -m http.server $P3 --bind 127.0.0.1\", \"port\": $P3 } } }" | ctl app set mine --json -
+echo "{ \"servers\": { \"s\": { \"cmd\": \"python3 $SERVE $P3 --bind 127.0.0.1\", \"port\": $P3 } } }" | ctl app set mine --json -
 ! "$NIB" ctl -s "$SOCK" app up mine >/dev/null 2>&1 || { echo "FAIL: nib ctl started an app the user did not approve"; exit 1; }
 ! "$NIB" ctl -s "$SOCK" raw '{"cmd":"app.approve","name":"mine","hash":"x"}' 2>/dev/null | grep -q '"ok": *true' || { echo "FAIL: nib ctl approved an app"; exit 1; }
 ctl app rm mine
 [ "$(srv)" = "held/held=stopped pair/one=stopped pair/two=stopped" ] || { echo "FAIL: apps defined: $(srv)"; exit 1; }
 ctl app up
-# Up to a minute: a fresh machine's first login shell and first python3 can be slow.
-for _ in $(seq 600); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+for _ in $(seq 150); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
 [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up: $(srv)"; show_srv; exit 1; }
 answers "$P1" && answers "$P2" || { echo "FAIL: a ready server's port does not answer"; exit 1; }
 python3 -c "import sys, urllib.request; sys.exit(0 if b'hello' in urllib.request.urlopen('http://127.0.0.1:$P1/index.html').read() else 1)" || { echo "FAIL: server one does not serve the project"; exit 1; }
-for _ in $(seq 300); do "$NIB" ctl -s "$SOCK" app log pair one | grep -qF 'GET /index.html' && break; sleep 0.1; done
+for _ in $(seq 50); do "$NIB" ctl -s "$SOCK" app log pair one | grep -qF 'GET /index.html' && break; sleep 0.1; done
 "$NIB" ctl -s "$SOCK" app log pair one --lines 5 | grep -qF 'GET /index.html' || { echo "FAIL: app log"; exit 1; }
 ctl app restart pair one
-for _ in $(seq 600); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+for _ in $(seq 150); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
 [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: server restarted: $(srv)"; show_srv; exit 1; }
 ctl app down
 [ "$(srv)" = "held/held=stopped pair/one=stopped pair/two=stopped" ] || { echo "FAIL: apps down: $(srv)"; exit 1; }
@@ -136,11 +137,11 @@ closed "$P1" && closed "$P2" || { echo "FAIL: a stopped server still listens"; e
 answers "$P3" || { echo "FAIL: stopping the apps stopped what held the taken port"; exit 1; }
 # Running again when the window quits: they go with it.
 ctl app up pair
-for _ in $(seq 600); do [ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+for _ in $(seq 150); do [ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
 [ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up again: $(srv)"; show_srv; exit 1; }
 ctl run quit; wait $SPID
 closed "$P1" && closed "$P2" || { echo "FAIL: a server outlived the window"; exit 1; }
-! pgrep -f -- "http.server ($P1|$P2) " >/dev/null || { echo "FAIL: a server process outlived the window"; exit 1; }
+! pgrep -f -- "serve.py ($P1|$P2) " >/dev/null || { echo "FAIL: a server process outlived the window"; exit 1; }
 kill $HOLD 2>/dev/null; wait $HOLD 2>/dev/null || true
 echo "  ok"
 
@@ -209,13 +210,13 @@ web_leg() {
     # a cache would keep the page for long, and the second open must find nothing listening.
     mkdir -p "$TMP/stale"; echo '<title>Stale</title>an old page' > "$TMP/stale/index.html"; touch -t 202001010000 "$TMP/stale/index.html"
     SP=$(python3 -c "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")
-    python3 -m http.server "$SP" --bind 127.0.0.1 --directory "$TMP/stale" >/dev/null 2>&1 & STALE=$!
+    python3 $SERVE "$SP" --bind 127.0.0.1 --directory "$TMP/stale" >/dev/null 2>&1 & STALE=$!
     KIDS="$KIDS $STALE"
-    for _ in $(seq 300); do answers "$SP" && break; sleep 0.1; done
+    for _ in $(seq 50); do answers "$SP" && break; sleep 0.1; done
     st=$("$NIB" ctl -s "$SOCK" web open "$SP" | python3 -c "import json, sys; v = json.load(sys.stdin); print(v.get('tab', '') if v.get('title') == 'Stale' else '')")
     [ -n "$st" ] || { echo "FAIL: the stale-page check's page did not open"; exit 1; }
     "$NIB" ctl -s "$SOCK" web close --tab "$st" >/dev/null
-    kill $STALE; closed "$SP" 300 || { echo "FAIL: the stale-page check's server did not stop"; exit 1; }
+    kill $STALE; closed "$SP" || { echo "FAIL: the stale-page check's server did not stop"; exit 1; }
     "$NIB" ctl -s "$SOCK" web open "$SP" > "$TMP/stale.out" 2>&1 || true
     grep -qF "nothing is listening" "$TMP/stale.out" || { cat "$TMP/stale.out"; echo "FAIL: a page whose server stopped was shown from the browser's cache"; exit 1; }
     echo "  ok (a stopped server's page is not shown from the cache)"
@@ -267,24 +268,32 @@ else
   python3 scripts/test/e2e-web/site.py outside "$OUTSIDE" "$((WEB_PORT + 1))" "$TMP/outside.log" & SITE2=$!
   KIDS="$KIDS $SITE1 $SITE2"
   sleep 0.5
-  # The address must answer this machine: some VMs (GitHub's macOS runners) drop connections to
-  # their own address, and a page whose image never comes never finishes loading. Refused: the
-  # site is not up yet, try again; no answer at all: it never will.
+  # The outside site must answer this machine at its address, or a page whose image never comes
+  # never finishes loading. Refused or no answer yet (macOS leaves a connection to a port that is
+  # bound but not listening yet unanswered): try again, for up to 30 s.
   if ! python3 - "$OUTSIDE" "$((WEB_PORT + 1))" <<'PY'
 import socket, sys, time
-for _ in range(60):
+until, last = time.time() + 30, None
+while time.time() < until:
     try:
         socket.create_connection((sys.argv[1], int(sys.argv[2])), 2).close()
         sys.exit(0)
-    except ConnectionRefusedError:
+    except OSError as e:
+        last = e
         time.sleep(0.5)
-    except OSError:
-        sys.exit(1)
-sys.exit(1)
+sys.exit(f"  {sys.argv[1]}:{sys.argv[2]}: no answer in 30 s ({last!r})")
 PY
   then
     # Asked for by name: the web leg's checks (the local-only rule) must run, not be skipped.
-    [ -z "${NIB_E2E_OUTSIDE:-}" ] || { echo "FAIL: NIB_E2E_OUTSIDE=$OUTSIDE does not answer this machine"; exit 1; }
+    if [ -n "${NIB_E2E_OUTSIDE:-}" ]; then
+      op=$((WEB_PORT + 1))
+      echo "--- $OUTSIDE resolves to:"; python3 -c "import socket, sys; print(sorted({a[4][0] for a in socket.getaddrinfo(sys.argv[1], int(sys.argv[2]), proto=socket.IPPROTO_TCP)}))" "$OUTSIDE" "$op" 2>&1
+      echo "--- every process on $op:"; sudo -n lsof -nP -iTCP:"$op" 2>&1 || lsof -nP -iTCP:"$op" 2>&1 || echo "(none)"
+      echo "--- sockets on $op:"; netstat -anv -p tcp 2>/dev/null | grep -E "Proto|[.:]$op " || echo "(none)"
+      echo "--- the test sites:"; ps -o pid,stat,etime,command -p "$SITE1,$SITE2" 2>&1
+      for u in "http://127.0.0.1:$op/" "http://$OUTSIDE:$op/"; do curl -s -m 5 -o /dev/null -w "$u  %{http_code}  %{remote_ip}  %{time_total}s\n" "$u" || echo "$u  failed (curl exit $?)"; done
+      echo "FAIL: NIB_E2E_OUTSIDE=$OUTSIDE does not answer this machine"; exit 1
+    fi
     echo "  skipped: this machine's network address ($OUTSIDE) does not answer it, so it cannot stand in for another machine"
   elif [ -n "${NIB_E2E_BROWSERS:-}" ]; then
     IFS=: read -ra BROWSERS <<< "$NIB_E2E_BROWSERS"
@@ -307,20 +316,19 @@ mkdir -p "$TMP/far" "$TMP/fbin" "$TMP/fssh"; echo '<title>Far</title><h1>hello f
 printf '#!/bin/sh\nexec python3 "%s/scripts/test/e2e-web/fake_ssh.py" "$@"\n' "$PWD" > "$TMP/fbin/ssh"; chmod +x "$TMP/fbin/ssh"
 NIBD_BIN="$(cd "$(dirname "$NIB")" && pwd)/nibd"
 printf '[profiles.far]\nssh = "far.test"\nroot = "%s"\nnibd = "%s"\n[profiles.gpu]\nssh = "gpu.test"\nroot = "~"\n' "$TMP/far" "$NIBD_BIN" > "$TMP/config.toml"
-# Two free ports in a row, F2 = F1 + 1: F1's first forward lands on F1 + 1 here (F1 is taken: the
-# other machine is this one), so a local address that showed one page is later asked for another
-# machine's port with nothing behind it. GitHub's runners hand out ports like this by chance.
+# Two free ports far apart: the other machine is this one, so F1 is taken here and its forwards
+# land on the next free ports after it (F1 + 1, F1 + 2). F2 must not be one of them, or asking for
+# "the other machine's F2, where nothing listens" would find one of those forwards answering.
 read -r F1 F2 <<< "$(python3 -c "
 import socket
+def free():
+    s = socket.socket(); s.bind(('127.0.0.1', 0)); return s, s.getsockname()[1]
+a, f1 = free()
 while True:
-    a, b = socket.socket(), socket.socket()
-    a.bind(('127.0.0.1', 0)); p = a.getsockname()[1]
-    try:
-        b.bind(('127.0.0.1', p + 1))
-    except OSError:
-        continue
-    print(p, p + 1); break")"
-python3 -m http.server "$F1" --bind 127.0.0.1 --directory "$TMP/far" >/dev/null 2>&1 & FAR=$!
+    b, f2 = free()
+    if abs(f2 - f1) > 50:
+        print(f1, f2); break")"
+python3 $SERVE "$F1" --bind 127.0.0.1 --directory "$TMP/far" >/dev/null 2>&1 & FAR=$!
 KIDS="$KIDS $FAR"
 for _ in $(seq 50); do answers "$F1" && break; sleep 0.1; done
 SOCK="$TMP/f.sock"
@@ -352,16 +360,16 @@ GOT=$(fwd forward add "gpu:$F1"); L2=${GOT##*=}
 grep -qF -- "-N -L 127.0.0.1:$L2:localhost:$F1" "$TMP/fssh/log" || { echo "FAIL: no ssh of its own for another connection"; exit 1; }
 [ -z "$(fwd forward rm "$L2")" ] && closed "$L2" || { echo "FAIL: forward rm (ssh of its own)"; exit 1; }
 # A ready server's port comes here; stopped, it goes.
-approved_apps "$SOCK" "{ \"far\": { \"page\": { \"server\": \"web\", \"path\": \"/\" }, \"servers\": { \"web\": { \"cmd\": \"python3 -m http.server $F2 --bind 127.0.0.1\", \"port\": $F2 } } } }"
+approved_apps "$SOCK" "{ \"far\": { \"page\": { \"server\": \"web\", \"path\": \"/\" }, \"servers\": { \"web\": { \"cmd\": \"python3 $SERVE $F2 --bind 127.0.0.1\", \"port\": $F2 } } } }"
 ctl app up
-for _ in $(seq 600); do GOT=$(fwd forward list); [ -n "$GOT" ] && break; sleep 0.1; done   # a slow first start, as above
+for _ in $(seq 150); do GOT=$(fwd forward list); [ -n "$GOT" ] && break; sleep 0.1; done
 L3=${GOT##*=}
 [ "$GOT" = "@far:$F2=$L3" ] || { echo "FAIL: a ready server's port was not forwarded: $GOT"; exit 1; }
 ctl app down
 for _ in $(seq 50); do [ -z "$(fwd forward list)" ] && break; sleep 0.1; done
 [ -z "$(fwd forward list)" ] && closed "$L3" || { echo "FAIL: a stopped server's forward stayed"; exit 1; }
-# The server itself is gone too before its port is asked for again below (slow on a fresh machine).
-closed "$F2" 300 || { echo "FAIL: a stopped server still listens on $F2"; exit 1; }
+# The server itself is gone too before its port is asked for again below.
+closed "$F2" || { echo "FAIL: a stopped server still listens on $F2"; exit 1; }
 # A page of the other machine, shown here through a forward made for it and gone with its tab.
 if "$NIB" ctl -s "$SOCK" state | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["web"]["browser"] else 1)'; then
   export XDG_CACHE_HOME="$TMP/cache"
