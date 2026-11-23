@@ -3966,7 +3966,12 @@ else:
         p.send("Which file?", &[]);
         let ask = loop {
             let msg = rx.recv_timeout(Duration::from_secs(5)).expect("resumed Codex question");
-            if let ServerMsg::Notify(ServerNotify::AiEvent { event: AiEvent::Ask(ask), .. }) = msg { break ask }
+            match msg {
+                ServerMsg::Notify(ServerNotify::AiEvent { event: AiEvent::Ask(ask), .. }) => break ask,
+                // The turn ended without asking: say why (the fake Codex's error), not a timeout.
+                ServerMsg::Notify(ServerNotify::AiEvent { event: AiEvent::TurnDone { error }, .. }) => panic!("the resumed Codex turn ended before its question: {error:?}"),
+                _ => {}
+            }
         };
         answer(&shared, 1, &ask.request, true, None, &["B".into()]);
         let done = loop {

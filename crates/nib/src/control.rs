@@ -540,6 +540,19 @@ SSH (saved connections are [profiles] in config.toml; the window switches in pla
                                    ~/…, or relative to the current root); tabs and terminals stay
   ssh cancel                       stop connecting";
 
+/// `text` and a newline on stdout. A reader that stopped reading (`| head`, `| grep -q`, a pager
+/// that quit) is not an error: what it wanted it has, so the answer's exit code stands. (Rust's
+/// `println!` panics there instead.)
+fn say(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = writeln!(out, "{text}").and_then(|()| out.flush()) {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            eprintln!("nib ctl: writing the answer: {e}");
+        }
+    }
+}
+
 /// `nib ctl ...`: returns the process exit code.
 pub fn ctl_main(args: &[String]) -> i32 {
     match ctl(args) {
@@ -571,7 +584,7 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         }
     }
     let print = |v: &Value| -> bool {
-        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        say(&serde_json::to_string_pretty(v).unwrap_or_default());
         v.get("ok").and_then(Value::as_bool).unwrap_or(false)
     };
     if a.as_slice() == ["list"] {
@@ -588,7 +601,7 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
     }
     let req = match a.as_slice() {
         [] | ["-h" | "--help" | "help"] => {
-            println!("{CTL_USAGE}");
+            say(CTL_USAGE);
             return Ok(true);
         }
         ["state"] => json!({ "cmd": "state" }),
