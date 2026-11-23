@@ -415,7 +415,7 @@ impl Owner {
         });
         let description = format!("nib ai run · {} · {what}", job.model());
         let owner = Owner { dir, me, step, show };
-        owner.send(mail::Report::Step(AiStep { id: owner.step.clone(), parent: None, kind: AiStepKind::Agent { description } }));
+        owner.send(mail::Report::Step(AiStep { id: owner.step.clone(), parent: None, kind: AiStepKind::Agent { description, prompt: prompt.to_string(), kind: Some("nib ai run".into()) } }));
         Some(owner)
     }
 

@@ -447,6 +447,11 @@ pub struct Panel {
     mail_count: u64,
     /// The mailbox messages shown in full (by that number); the rest are clipped.
     mail_open: std::collections::HashSet<u64>,
+    /// The shown agent's sub-agent whose thread the chat shows (its step id); `None`: the
+    /// whole chat.
+    thread: Option<String>,
+    /// The sub-agents' briefs and messages shown in full (by step id); the rest are folded.
+    unfolded: std::collections::HashSet<String>,
     /// The history tab (see `history`).
     history: history::History,
     /// A conversation being replayed in Follow: the chat, and the turn to go on from.
@@ -517,6 +522,8 @@ impl Default for Panel {
             mailbox: Vec::new(),
             mail_count: 0,
             mail_open: Default::default(),
+            thread: None,
+            unfolded: Default::default(),
             history: Default::default(),
             replay: None,
             agents: None,
@@ -541,6 +548,23 @@ impl Default for Panel {
             image_zoom_delay: zoom_delay(nib_editor::config::default_image_zoom_delay()),
             local_skills: Vec::new(),
         }
+    }
+}
+
+impl Panel {
+    /// The message box's agent has a sub-agent with step `id`.
+    fn has_sub(&self, id: &str) -> bool {
+        self.turns.iter().filter_map(|t| t.step.as_ref()).any(|s| s.id == id && matches!(s.kind, AiStepKind::Agent { .. }))
+    }
+
+    /// A message into the mailbox list; the oldest go past 200.
+    fn mail_push(&mut self, m: nib_proto::AiMail) {
+        self.mailbox.push(m);
+        self.mail_count += 1;
+        let extra = self.mailbox.len().saturating_sub(200);
+        self.mailbox.drain(..extra);
+        let first = self.mail_count - self.mailbox.len() as u64;
+        self.mail_open.retain(|&n| n >= first);
     }
 }
 
@@ -750,6 +774,13 @@ pub enum Msg {
     Front,
     /// Show this agent (its place in the list).
     Select(usize),
+    /// Show one sub-agent of this agent by itself: its thread (the agent's place, the
+    /// sub-agent's step id).
+    SelectSub(usize, String),
+    /// Back from a sub-agent's thread to the whole chat.
+    CloseThread,
+    /// A sub-agent's brief or message was clicked: show it in full, or fold it again.
+    Unfold(String),
     /// Another agent, next to the ones there are.
     NewAgent,
     /// End this agent's conversation.
@@ -1074,6 +1105,16 @@ impl App {
     }
 
     /// The session of the agent shown, once it is up.
+    /// The shown agent has a sub-agent with step `id` (`nib ctl ai sub`).
+    pub(super) fn ai_has_sub(&self, id: &str) -> bool {
+        self.ai.has_sub(id)
+    }
+
+    /// The shown agent's place in the list.
+    pub(super) fn ai_shown_index(&self) -> usize {
+        self.ai.cur
+    }
+
     pub(super) fn ai_shown_session(&self) -> Option<AiId> {
         match self.ai.session {
             Session::Ready(id) => Some(id),
@@ -1280,6 +1321,22 @@ impl App {
             Msg::MailOpen(n) => {
                 if !self.ai.mail_open.remove(&n) {
                     self.ai.mail_open.insert(n);
+                }
+            }
+            Msg::SelectSub(i, id) => {
+                self.ai_select(i);
+                if self.ai.cur == i {
+                    self.ai.thread = Some(id);
+                    return self.ai_scroll_to_end();
+                }
+            }
+            Msg::CloseThread => {
+                self.ai.thread = None;
+                return self.ai_scroll_to_end();
+            }
+            Msg::Unfold(id) => {
+                if !self.ai.unfolded.remove(&id) {
+                    self.ai.unfolded.insert(id);
                 }
             }
             Msg::CopyTurn(i) => {
@@ -1835,6 +1892,7 @@ impl App {
             "messages": ai.turns.iter().filter(|t| t.who != Who::Step).map(|t| json!({ "from": match t.who { Who::User => "user", Who::Assistant => "assistant", Who::Note | Who::Step => "nib", Who::Mail => "mail", Who::Done => "finished" }, "text": t.text })).collect::<Vec<_>>(),
             "steps": ai.turns.iter().filter_map(|t| t.step.as_ref()).map(stage::step_json).collect::<Vec<_>>(),
             "shown": ai.shown(),
+            "thread": ai.thread,
             "history": self.ai_history_json(),
             "follow": ai.follow.as_ref().map(|f| json!({ "chat": ai.chats.iter().position(|c| c.key == f.chat), "tab": f.tab, "queued": self.ai_follow_queued() })),
             "mode": ai.mode.name(),
@@ -1869,6 +1927,7 @@ impl App {
                 "frozen": c.frozen,
                 "turns": c.turns.len(),
                 "steps": c.turns.iter().filter(|t| t.step.is_some()).count(),
+                "subagents": stage::subagents(c).iter().map(|s| stage::sub_json(c, s)).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "input": ai.input,
             "caret": ai.input[..ai.caret()].chars().count(),
@@ -2176,6 +2235,10 @@ impl App {
                     _ => None,
                 };
                 let images = picture.iter().map(|p| (p.clone(), None)).collect();
+                // What an agent and its sub-agents say to each other goes in the mailbox too.
+                if let Some(m) = stage::sub_mail(ai, &s) {
+                    ai.mail_push(m);
+                }
                 ai.turns.push(Turn {
                     images,
                     step: Some(Step { id: s.id, parent: s.parent, acts: act::of(&s.kind, &root), kind: s.kind, started: Instant::now(), done: None, background: false }),
@@ -2214,12 +2277,7 @@ impl App {
                 ai.turns.push(Turn::new(Who::Mail, text));
                 // Once in the list for everyone: the sender's copy, or nib's own word.
                 if !m.incoming || m.from == "nib" {
-                    ai.mailbox.push(m);
-                    ai.mail_count += 1;
-                    let extra = ai.mailbox.len().saturating_sub(200);
-                    ai.mailbox.drain(..extra);
-                    let first = ai.mail_count - ai.mailbox.len() as u64;
-                    ai.mail_open.retain(|&n| n >= first);
+                    ai.mail_push(m);
                 }
             }
             AiEvent::Ask(a) => {
@@ -2351,6 +2409,8 @@ impl App {
             n => format!("{text}\n[{n} images]").trim().to_string(),
         };
         self.ai.turns.push(Turn::new(Who::User, shown));
+        // A message is to the agent: its whole chat again.
+        self.ai.thread = None;
         self.ai.busy = true;
         // Told to keep going: it isn't done any more.
         self.ai.finished = None;
@@ -2496,6 +2556,8 @@ impl App {
             Key::Esc if self.ai.ask.is_some() && self.ai.input.trim().is_empty() => self.ai_answer(false, None),
             Key::Esc if self.ai.ask.is_some() => return self.flash_info("Enter refuses with what you typed; empty the box for Esc to refuse without it"),
             Key::Enter if self.ai.input.is_empty() && self.ai.images.is_empty() && self.ai.ask.as_ref().is_some_and(|a| a.questions.is_empty()) && !held && !chord.alt && !chord.shift => self.ai_answer(true, None),
+            // In a sub-agent's thread: back to the whole chat.
+            Key::Esc if self.ai.thread.is_some() => return self.on_ai_msg(Msg::CloseThread),
             Key::Esc => self.ai_leave(),
             // With nothing typed, Tab walks the agents (with text it would be too easy to leave a
             // half-written message by accident; the menu's Tab completes, above).
@@ -3190,7 +3252,7 @@ mod tests {
     fn a_sub_agent_in_the_background_runs_past_the_turn_until_it_reports() {
         let mut a = chatting();
         say(&mut a, "go");
-        event(&mut a, 7, step("a1", AiStepKind::Agent { description: "Build servers".into() }));
+        event(&mut a, 7, step("a1", AiStepKind::Agent { description: "Build servers".into(), prompt: String::new(), kind: None }));
         event(&mut a, 7, AiEvent::Background { id: "a1".into() });
         event(&mut a, 7, AiEvent::Text("It runs.".into()));
         event(&mut a, 7, AiEvent::TurnDone { error: None });
@@ -3213,10 +3275,63 @@ mod tests {
         assert_eq!(stage::state_of(&a.ai).0, "idle");
         // The session going away ends one still at work.
         say(&mut a, "again");
-        event(&mut a, 7, step("a2", AiStepKind::Agent { description: "More".into() }));
+        event(&mut a, 7, step("a2", AiStepKind::Agent { description: "More".into(), prompt: String::new(), kind: None }));
         event(&mut a, 7, AiEvent::Background { id: "a2".into() });
         event(&mut a, 7, AiEvent::Exit { msg: None });
         assert_eq!(a.ai_state_json()["steps"][2]["running"], json!(false));
+    }
+
+    #[test]
+    fn sub_agents_have_rows_threads_and_their_messages_show() {
+        let mut a = chatting();
+        event(&mut a, 7, AiEvent::Name("edge-cases".into()));
+        say(&mut a, "go");
+        let agent = |id: &str, what: &str| step(id, AiStepKind::Agent { description: what.into(), prompt: format!("Brief for {what}"), kind: Some("general-purpose".into()) });
+        let under = |id: &str, parent: &str, kind: AiStepKind| AiEvent::Step(nib_proto::AiStep { id: id.into(), parent: Some(parent.into()), kind });
+        event(&mut a, 7, agent("a1", "Edge cases for calc.py"));
+        event(&mut a, 7, agent("a2", "Edge cases for greet.py"));
+        event(&mut a, 7, AiEvent::Background { id: "a2".into() });
+        event(&mut a, 7, under("r1", "a1", AiStepKind::Read { path: "/tmp/src/calc.py".into(), offset: None, limit: None }));
+        event(&mut a, 7, under("r2", "a2", AiStepKind::Read { path: "/tmp/src/greet.py".into(), offset: None, limit: None }));
+        event(&mut a, 7, done("r1", true, ""));
+        event(&mut a, 7, under("h1", "a1", AiStepKind::Message { to: None, text: "add(1, \"2\") raises".into() }));
+        event(&mut a, 7, done("h1", true, ""));
+        event(&mut a, 7, done("a1", true, "report delivered"));
+        // Woken again by a command of its own: at work, though its harness called it done.
+        event(&mut a, 7, under("c1", "a1", command("sleep 1")));
+        assert_eq!(a.ai_state_json()["chats"][0]["subagents"][0]["state"], "running");
+        event(&mut a, 7, done("c1", true, ""));
+        event(&mut a, 7, step("m1", AiStepKind::Message { to: Some("a2".into()), text: "Also check None.".into() }));
+
+        // Rows: both, with their state.
+        let s = a.ai_state_json();
+        let subs = &s["chats"][0]["subagents"];
+        assert_eq!(subs.as_array().map(Vec::len), Some(2));
+        assert_eq!((&subs[0]["state"], &subs[0]["kind"], &subs[0]["steps"]), (&json!("done"), &json!("general-purpose"), &json!(3)));
+        assert_eq!((&subs[1]["state"], &subs[1]["name"], &subs[1]["steps"]), (&json!("in the background"), &json!("edge-cases/edge-cases-for-greet"), &json!(2)));
+        assert_eq!(s["steps"][0]["what"]["prompt"], "Brief for Edge cases for calc.py");
+
+        // The mailbox has the briefs, the report and the message to the one in the background.
+        let mail: Vec<(String, String)> = a.ai.mailbox.iter().map(|m| (m.from.clone(), m.to.clone())).collect();
+        let (calc, greet) = ("edge-cases/edge-cases-for-calc".to_string(), "edge-cases/edge-cases-for-greet".to_string());
+        let me = "edge-cases".to_string();
+        assert_eq!(mail, [(me.clone(), calc.clone()), (me.clone(), greet.clone()), (calc, me.clone()), (me, greet)]);
+
+        // Its thread: only what is its.
+        let _ = a.update(Message::Ai(Msg::SelectSub(0, "a2".into())));
+        assert_eq!(a.ai_state_json()["thread"], "a2");
+        let shown: Vec<&str> = a.ai.turns.iter().filter_map(|t| t.step.as_ref()).filter(|x| stage::in_thread(&a.ai, x, "a2")).map(|x| x.id.as_str()).collect();
+        assert_eq!(shown, ["a2", "r2", "m1"]);
+        // Esc goes back to the whole chat, and so does a message to the agent.
+        key(&mut a, "escape");
+        assert_eq!(a.ai_state_json()["thread"], Value::Null);
+        let _ = a.update(Message::Ai(Msg::SelectSub(0, "a1".into())));
+        event(&mut a, 7, AiEvent::TurnDone { error: None });
+        say(&mut a, "thanks");
+        assert_eq!(a.ai_state_json()["thread"], Value::Null);
+        // Finished ones from before the user's last message go; the one still at work stays.
+        let subs = &a.ai_state_json()["chats"][0]["subagents"];
+        assert_eq!(subs.as_array().map(|v| v.iter().map(|s| s["id"].clone()).collect::<Vec<_>>()), Some(vec![json!("a2")]));
     }
 
     #[test]

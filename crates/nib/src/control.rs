@@ -618,6 +618,8 @@ fn ctl(args: &[String]) -> anyhow::Result<bool> {
         ["ai", "reopen", n] => json!({ "cmd": "ai.past", "do": "reopen", "index": n.parse::<usize>().context("ai reopen: which one (0 is the first listed)")? }),
         ["ai", "replay", n] => json!({ "cmd": "ai.past", "do": "replay", "index": n.parse::<usize>().context("ai replay: which one (0 is the first listed)")? }),
         ["ai", "forget", n] => json!({ "cmd": "ai.past", "do": "forget", "index": n.parse::<usize>().context("ai forget: which one (0 is the first listed)")? }),
+        ["ai", "sub"] => json!({ "cmd": "ai.sub" }),
+        ["ai", "sub", id] => json!({ "cmd": "ai.sub", "id": id }),
         ["ai", "follow"] => json!({ "cmd": "ai.follow", "on": true }),
         ["ai", "unfollow"] => json!({ "cmd": "ai.follow", "on": false }),
         ["open", path, "--line", line] => json!({ "cmd": "open", "path": path, "line": line.parse::<u32>().context("open --line: a line number")? }),

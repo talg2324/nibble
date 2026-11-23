@@ -11,9 +11,9 @@ from where you sit and nothing alike from where the user sits.
 | | Your own subagent | A nib agent |
 |---|---|---|
 | What it is | Your harness's helper (Claude Code's Agent / Task tool, and the like), inside your session | Another conversation in the window's **agents tab** |
-| What the user sees | One step in **your** chat (`agent`, with its tool calls under it). **No row in the agent list, nothing in the dashboard count** | Its own row, name, state, chat and steps |
+| What the user sees | A small row indented under **yours** in the agent list, and a step in your chat; clicking the row shows its thread (the brief you wrote it, its steps, what it reported). **Not an agent of its own: not in the dashboard count** | Its own row, name, state, chat and steps |
 | Where it works | Your folder, your branch: its edits are your edits | Its own branch and work tree, once it runs `nib-work start` |
-| Who it answers to | You. The user cannot write to it, steer it or stop it by itself | The user. It reports with `nib-mail done`; they review its work in the Review tab and accept it |
+| Who it answers to | You. The user reads what you tell it and what it reports, but cannot write to it, steer it or stop it by itself | The user. It reports with `nib-mail done`; they review its work in the Review tab and accept it |
 | How you talk to it | Your harness | `nib-mail` (the **nib-agent-mailbox** skill) |
 
 ## Which one the user means
@@ -35,9 +35,10 @@ only as a step in my chat)?"
 
 ## If you use your own subagent
 
-Say so in the same reply, in these terms: it runs inside your session, it shows as a step in
-your chat and not in the agent list, and its changes land where yours do. Never call it just
-"a subagent" and leave the user looking for a row that will not appear.
+Say so in the same reply, in these terms: it runs inside your session, it shows as a row
+indented under yours (not an agent of its own), the user can read its thread but not write to
+it, and its changes land where yours do. Its brief is shown to the user as you wrote it: write
+it as you would for them to read.
 
 ## Starting a nib agent
 

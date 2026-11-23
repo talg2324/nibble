@@ -218,6 +218,20 @@ impl App {
                 call.ok(json!({ "following": on }));
                 t
             }
+            "ai.sub" => {
+                // One sub-agent of the shown agent by itself (its step id), or the whole chat.
+                let Some(id) = call.req.get("id").and_then(Value::as_str).map(str::to_string) else {
+                    call.ok(json!({ "thread": null }));
+                    return self.handle(Message::Ai(super::ai::Msg::CloseThread));
+                };
+                if !self.ai_has_sub(&id) {
+                    call.err(format!("the shown agent has no sub-agent {id} (state: ai.chats[].subagents)"));
+                    return Task::none();
+                }
+                call.ok(json!({ "thread": id }));
+                let cur = self.ai_shown_index();
+                self.handle(Message::Ai(super::ai::Msg::SelectSub(cur, id)))
+            }
             "ai.wpf" => {
                 // Worktree-per-feature: set it (`on`), or flip it.
                 let on = call.req.get("on").and_then(Value::as_bool).unwrap_or(!self.ai.wpf);

@@ -1452,8 +1452,23 @@ pub enum AiStepKind {
     Skill { name: String },
     /// Searching file names or contents.
     Search { pattern: String, path: Option<String> },
-    /// Starting a sub-agent.
-    Agent { description: String },
+    /// Starting a sub-agent: what it is for, the brief its agent wrote it, and which kind of
+    /// sub-agent it is (Claude Code's `subagent_type`).
+    Agent {
+        description: String,
+        #[serde(default)]
+        prompt: String,
+        #[serde(default)]
+        kind: Option<String>,
+    },
+    /// A message between an agent and one of its sub-agents. Under a sub-agent (`parent`), with
+    /// no `to`: the sub-agent wrote to its agent (a report, or what it said). `to`: the agent
+    /// wrote to that sub-agent (its step id).
+    Message {
+        #[serde(default)]
+        to: Option<String>,
+        text: String,
+    },
     /// Any other tool: its name and its input as JSON.
     Other { tool: String, input: String },
 }

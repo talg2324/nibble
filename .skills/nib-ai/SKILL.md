@@ -184,6 +184,7 @@ steps show when each ends); Grok only reads for now.
 | `ai allow` / `ai deny [WORDS]` / `ai answer A…` | answer what the shown agent asked leave for (`state.ai.ask`: `tool`, `what`, `questions`); deny's words say what to do instead. Its questions: `ai answer` with one answer per question, each an option's number or label, or words (`ai deny` skips them). Only when the user asked |
 | `ai accept` / `ai keep` | the shown agent said its job is done (`nib-mail done`; `state.ai.chats[].finished`, `state.ai.accepting` while the dialog is up): accept, which ends the agent, or keep it. Only when the user asked |
 | `ai image FILE` | attach a picture to the message being written, as pasting one does (`state.ai.images`) |
+| `ai sub ID` / `ai sub` | show one sub-agent of the shown agent by itself (its thread: its brief, steps and messages; `ID` from `state.ai.chats[].subagents`), or the whole chat again (`state.ai.thread`) |
 | `ai follow` / `ai unfollow` | the editor follows the shown agent: its file comes forward, its edit is selected, the tab closes when it moves on (`state.ai.follow`) |
 | `ai skills` / `ai terminal` / `ai system` / `ai noside` | what the pane beside the steps shows (`state.ai.side`); `noside` hides it and gives the chat the width |
 | `ai wpf [on\|off]` | worktree-per-feature, the WPF switch in the agents header (`state.ai.worktree_per_feature`; no argument flips it; remembered in config.toml). On: agents change files only on a branch of their own (`nib-work`) that lands as one commit. Only when the user asked |

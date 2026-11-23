@@ -178,6 +178,7 @@ pub(super) fn state_of(c: &Chat) -> (String, Tone) {
         Some(AiStepKind::Skill { name }) => format!("loading {name}"),
         Some(AiStepKind::Search { .. }) => "searching".into(),
         Some(AiStepKind::Agent { .. }) => "running a sub-agent".into(),
+        Some(AiStepKind::Message { .. }) => "messaging a sub-agent".into(),
         Some(AiStepKind::Other { tool, .. }) => format!("using {tool}"),
     };
     (doing, Tone::Working)
@@ -200,6 +201,144 @@ fn step_clock(s: &Step) -> Option<(String, bool, &'static str)> {
     })
 }
 
+/// The sub-agents an agent's row shows: those started since the user last wrote, and any
+/// still at work, oldest first.
+pub(super) fn subagents(c: &Chat) -> Vec<&Step> {
+    let since = c.turns.iter().rposition(|t| t.who == Who::User).unwrap_or(0);
+    c.turns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| t.step.as_ref().map(|s| (i, s)))
+        .filter(|(i, s)| matches!(s.kind, AiStepKind::Agent { .. }) && (*i >= since || s.done.is_none()))
+        .map(|(_, s)| s)
+        .collect()
+}
+
+/// A step's ancestors' ids, nearest first (at most as many as the chat has steps).
+fn ancestors<'a>(c: &'a Chat, s: &'a Step) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut parent = s.parent.as_deref();
+    while let Some(p) = parent.filter(|_| out.len() < c.turns.len()) {
+        out.push(p);
+        parent = c.turns.iter().filter_map(|t| t.step.as_ref()).find(|s| s.id == p).and_then(|s| s.parent.as_deref());
+    }
+    out
+}
+
+/// Whether a step belongs to sub-agent `id`'s thread: the sub-agent itself, what it (or a
+/// sub-agent of its own) did, and what its agent wrote to it.
+pub(super) fn in_thread(c: &Chat, s: &Step, id: &str) -> bool {
+    s.id == id || matches!(&s.kind, AiStepKind::Message { to: Some(t), .. } if t == id) || ancestors(c, s).contains(&id)
+}
+
+/// A sub-agent's state, in a word. One its harness called done is at work again while a step
+/// of its own still runs (a sub-agent woken by its own background command).
+fn sub_state(c: &Chat, s: &Step) -> (&'static str, Tone) {
+    let busy = || c.turns.iter().filter_map(|t| t.step.as_ref()).any(|x| x.done.is_none() && x.id != s.id && ancestors(c, x).contains(&s.id.as_str()));
+    match &s.done {
+        Some(_) if busy() => ("running", Tone::Working),
+        None if s.background => ("in the background", Tone::Working),
+        None => ("running", Tone::Working),
+        Some(d) if d.ok => ("done", Tone::Idle),
+        Some(d) if d.output.is_empty() => ("stopped", Tone::Paused),
+        Some(_) => ("failed", Tone::Failed),
+    }
+}
+
+/// What a sub-agent is called in the mailbox: its agent's name, then its task in a few words.
+fn sub_name(agent: &str, description: &str) -> String {
+    let slug: Vec<String> = description
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(4)
+        .map(str::to_lowercase)
+        .collect();
+    if slug.is_empty() { format!("{agent}/helper") } else { format!("{agent}/{}", slug.join("-")) }
+}
+
+/// The description of the sub-agent with step `id`.
+fn sub_description<'a>(c: &'a Chat, id: &str) -> Option<&'a str> {
+    c.turns.iter().filter_map(|t| t.step.as_ref()).find(|s| s.id == id).and_then(|s| match &s.kind {
+        AiStepKind::Agent { description, .. } => Some(description.as_str()),
+        _ => None,
+    })
+}
+
+/// Who wrote a sub-agent message step and to whom (mailbox names); `None`: not one.
+fn sub_ends(c: &Chat, s: &Step) -> Option<(String, String)> {
+    sub_ends_of(c, &s.kind, s.parent.as_deref())
+}
+
+fn sub_ends_of(c: &Chat, kind: &AiStepKind, parent: Option<&str>) -> Option<(String, String)> {
+    let agent = agent_name(c).unwrap_or_else(|| "agent".into());
+    // A sub-agent's own name, and its agent's: a sub-agent of a sub-agent answers to that one.
+    let name = |id: &str| sub_name(&agent, sub_description(c, id).unwrap_or_default());
+    let caller = |id: &str| {
+        let up = c.turns.iter().filter_map(|t| t.step.as_ref()).find(|s| s.id == id).and_then(|s| s.parent.clone());
+        up.map_or_else(|| agent.clone(), |p| name(&p))
+    };
+    match kind {
+        AiStepKind::Message { to: Some(to), .. } => Some((parent.map_or_else(|| agent.clone(), name), name(to))),
+        AiStepKind::Message { to: None, .. } => parent.map(|p| (name(p), caller(p))),
+        _ => None,
+    }
+}
+
+/// What an agent and its sub-agents say to each other, for the mailbox list: a sub-agent's
+/// brief as it starts, a message either way.
+pub(super) fn sub_mail(c: &Chat, s: &nib_proto::AiStep) -> Option<nib_proto::AiMail> {
+    let agent = agent_name(c).unwrap_or_else(|| "agent".into());
+    let (from, to, text) = match &s.kind {
+        AiStepKind::Agent { description, prompt, .. } if !prompt.trim().is_empty() => {
+            let from = match s.parent.as_deref() {
+                Some(p) => sub_name(&agent, sub_description(c, p).unwrap_or_default()),
+                None => agent.clone(),
+            };
+            (from, sub_name(&agent, description), prompt.clone())
+        }
+        AiStepKind::Message { text, .. } => {
+            let (from, to) = sub_ends_of(c, &s.kind, s.parent.as_deref())?;
+            (from, to, text.clone())
+        }
+        _ => return None,
+    };
+    Some(nib_proto::AiMail { from, to, text, incoming: false })
+}
+
+/// A sub-agent for `nib ctl state`.
+pub(super) fn sub_json(c: &Chat, s: &Step) -> Value {
+    let AiStepKind::Agent { description, kind, .. } = &s.kind else { return Value::Null };
+    let steps = c.turns.iter().filter_map(|t| t.step.as_ref()).filter(|x| x.id != s.id && in_thread(c, x, &s.id)).count();
+    json!({
+        "id": s.id,
+        "parent": s.parent,
+        "description": description,
+        "kind": kind,
+        "name": sub_name(&agent_name(c).unwrap_or_else(|| "agent".into()), description),
+        "state": sub_state(c, s).0,
+        "steps": steps,
+        "clock": step_clock(s).map(|(c, _, _)| c),
+    })
+}
+
+/// Two lines of what a step is doing, for a row in the agent list.
+fn step_preview(s: &Step) -> String {
+    match &s.kind {
+        AiStepKind::Command { command, .. } => {
+            let (clock, down, note) = step_clock(s).unwrap_or_default();
+            format!("➜ {}\n{} {clock} {}", clip(first_line(command), 36), if down { "◷" } else { "…" }, if down { note } else { "" })
+        }
+        AiStepKind::Read { path, offset, .. } => format!("◎ {}{}", file_name(path), offset.map(|o| format!(":{o}")).unwrap_or_default()),
+        AiStepKind::Edit { path, new, .. } => format!("✎ {}\n{}", file_name(path), clip(first_line(new).trim(), 38)),
+        AiStepKind::Write { path, content } => format!("✎ {}\n{}", file_name(path), clip(first_line(content).trim(), 38)),
+        AiStepKind::Skill { name } => format!("skill {name}"),
+        AiStepKind::Search { pattern, .. } => format!("⌕ {}", clip(pattern, 36)),
+        AiStepKind::Agent { description, .. } => format!("sub-agent\n{}", clip(description, 38)),
+        AiStepKind::Message { text, .. } => format!("» {}", clip(first_line(text.trim()), 36)),
+        AiStepKind::Other { tool, .. } => tool.clone(),
+    }
+}
+
 /// A step for `nib ctl state`.
 pub(super) fn step_json(s: &Step) -> Value {
     let (kind, what) = match &s.kind {
@@ -212,7 +351,8 @@ pub(super) fn step_json(s: &Step) -> Value {
         AiStepKind::Write { path, content } => ("write", json!({ "path": path, "bytes": content.len() })),
         AiStepKind::Skill { name } => ("skill", json!({ "name": name })),
         AiStepKind::Search { pattern, path } => ("search", json!({ "pattern": pattern, "path": path })),
-        AiStepKind::Agent { description } => ("agent", json!({ "description": description })),
+        AiStepKind::Agent { description, prompt, kind } => ("agent", json!({ "description": description, "prompt": prompt, "kind": kind })),
+        AiStepKind::Message { to, text } => ("message", json!({ "to": to, "text": text })),
         AiStepKind::Other { tool, input } => ("other", json!({ "tool": tool, "input": input })),
     };
     json!({
@@ -248,6 +388,7 @@ impl App {
                 self.ai.accepting = false;
             }
             self.ai.cur = i;
+            self.ai.thread = None;
             self.ai.picking = false;
             self.ai.pull_focus = false;
             self.focus = Focus::Ai;
@@ -682,11 +823,154 @@ impl App {
                     .into()
             }
             AiStepKind::Search { pattern, path } => line("Search", clip(pattern, 60), path.as_deref().map(|p| self.ai_rel(p).to_string()).unwrap_or_default()),
-            AiStepKind::Agent { description } => line("Agent", clip(description, 80), String::new()),
+            AiStepKind::Agent { description, prompt, kind } => {
+                let head = line("Agent", clip(description, 80), kind.clone().unwrap_or_default());
+                match self.ai_sub_brief(s, prompt) {
+                    Some(brief) => column![head, brief].spacing(4).into(),
+                    None => head,
+                }
+            }
+            AiStepKind::Message { text, .. } => self.ai_sub_message(s, text),
             AiStepKind::Other { tool, input } => line(tool, clip(input, 80), String::new()),
         };
         // What a sub-agent does sits under it.
         container(body).padding(Padding { left: if s.parent.is_some() { 18.0 } else { 0.0 }, ..Padding::ZERO }).width(Length::Fill).into()
+    }
+
+    /// A message between an agent and its sub-agent: who to whom, then what it says, folded to
+    /// `lines` lines until clicked (`key`: what remembers it is open).
+    fn ai_sub_card<'a>(&self, key: String, from: String, to: String, body: &'a str, lines: usize) -> Element<'a, Message> {
+        let th = &self.theme;
+        let (fg, dim, accent, mono) = (th.foreground, th.dim, th.accent, self.face.font);
+        let body = body.trim();
+        let total = body.lines().count();
+        let long = total > lines || body.chars().count() > lines * 120;
+        let open = self.ai.unfolded.contains(&key);
+        let mut head = row![text(format!("{from} → {to}")).size(11).font(mono).color(accent), space::horizontal()].align_y(Alignment::Center);
+        if long {
+            head = head.push(text(if open { "less".to_string() } else { format!("{total} lines · more") }).size(10).color(dim));
+        }
+        let shown = if open || !long {
+            body.to_string()
+        } else {
+            let mut t: String = body.lines().take(lines).collect::<Vec<_>>().join("\n");
+            if t.chars().count() > lines * 120 {
+                t = clip(&t, lines * 120);
+            }
+            format!("{t} …")
+        };
+        let card = container(column![head, text(shown).size(12).color(fg)].spacing(3))
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style(move |_| container::Style { border: Border { color: Color { a: 0.6, ..accent }, width: 1.0, radius: 3.0.into() }, ..Default::default() });
+        if long {
+            mouse_area(card).on_press(Message::Ai(Msg::Unfold(key))).interaction(iced::mouse::Interaction::Pointer).into()
+        } else {
+            card.into()
+        }
+    }
+
+    /// The brief an agent wrote its sub-agent (a step of it), as a message, under the step.
+    fn ai_sub_brief<'a>(&self, s: &'a Step, prompt: &'a str) -> Option<Element<'a, Message>> {
+        if prompt.trim().is_empty() {
+            return None;
+        }
+        let m = sub_mail(&self.ai, &nib_proto::AiStep { id: s.id.clone(), parent: s.parent.clone(), kind: s.kind.clone() })?;
+        Some(self.ai_sub_card(format!("brief:{}", s.id), m.from, m.to, prompt, 3))
+    }
+
+    /// A message between the agent and a sub-agent (a step of it).
+    fn ai_sub_message<'a>(&self, s: &'a Step, body: &'a str) -> Element<'a, Message> {
+        let (from, to) = sub_ends(&self.ai, s).unwrap_or_else(|| ("sub-agent".into(), "agent".into()));
+        self.ai_sub_card(s.id.clone(), from, to, body, 8)
+    }
+
+    /// The sub-agents of agent `i`, indented under its row: each one's task, state and what it
+    /// is doing; a click shows its thread.
+    fn ai_sub_rows(&self, i: usize, c: &Chat) -> Option<Element<'_, Message>> {
+        let subs = subagents(c);
+        if subs.is_empty() {
+            return None;
+        }
+        let th = &self.theme;
+        let (fg, dim, mono, cur_bg, accent) = (th.foreground, th.dim, self.face.font, th.current_line, th.accent);
+        let none = text::Wrapping::None;
+        let mut col = column![].spacing(1);
+        for s in subs {
+            let AiStepKind::Agent { description, kind, .. } = &s.kind else { continue };
+            let depth = ancestors(c, s).len();
+            let (state, tone) = sub_state(c, s);
+            let color = self.ai_tone(tone);
+            // What it is doing now: its latest step still at work, else what it last said.
+            let mine = |x: &&Step| x.parent.as_deref() == Some(s.id.as_str());
+            let steps: Vec<&Step> = c.turns.iter().filter_map(|t| t.step.as_ref()).filter(mine).collect();
+            let doing = match steps.iter().rev().find(|x| x.done.is_none()) {
+                Some(x) => step_preview(x).replace('\n', "  "),
+                None => steps.iter().rev().find_map(|x| match &x.kind {
+                    AiStepKind::Message { to: None, text } => Some(format!("» {}", first_line(text.trim()))),
+                    _ => None,
+                }).unwrap_or_default(),
+            };
+            let mut status = row![text(state).size(10).color(color).wrapping(none), text(format!("· {} steps", steps.len())).size(10).color(dim).wrapping(none), space::horizontal()].spacing(4).align_y(Alignment::Center);
+            if let Some((clock, _, _)) = step_clock(s) {
+                status = status.push(text(clock).size(10).font(mono).color(dim));
+            }
+            let mut body = column![
+                row![svg(self.icons.network.clone()).width(10).height(10), text(clip(description, 30)).size(11).color(fg).wrapping(none), text(clip(kind.as_deref().unwrap_or_default(), 16)).size(9).color(dim).wrapping(none)]
+                    .spacing(5)
+                    .align_y(Alignment::Center),
+                status,
+            ]
+            .spacing(1);
+            if !doing.is_empty() {
+                body = body.push(container(text(clip(&doing, 40)).size(10).font(mono).color(dim).wrapping(none)).clip(true));
+            }
+            let on = i == self.ai.cur && self.ai.thread.as_deref() == Some(s.id.as_str());
+            let edge = if on { accent } else { Color::TRANSPARENT };
+            // A rule down its left: it belongs to the agent above.
+            let rule = container(space::horizontal().width(0)).width(2).height(Length::Fill).style(move |_| container::Style::default().background(Color { a: 0.5, ..color }));
+            let row = row![rule, container(body).padding([3, 8]).width(Length::Fill)].height(Length::Shrink);
+            let b = button(row)
+                .on_press(Message::Ai(Msg::SelectSub(i, s.id.clone())))
+                .padding(Padding { left: 16.0 + 12.0 * depth as f32, right: 6.0, top: 1.0, bottom: 1.0 })
+                .width(Length::Fill)
+                .style(move |_, _| button::Style { background: on.then(|| cur_bg.into()), border: Border { color: edge, width: 1.0, radius: 2.0.into() }, ..Default::default() });
+            col = col.push(b);
+        }
+        Some(col.padding(Padding { bottom: 4.0, ..Padding::ZERO }).into())
+    }
+
+    /// Above a sub-agent's thread: whose it is, and the way back to the whole chat.
+    fn ai_thread_bar(&self, id: &str) -> Element<'_, Message> {
+        let th = &self.theme;
+        let (fg, dim, accent, panel, divider) = (th.foreground, th.dim, th.accent, th.panel, th.divider);
+        let c: &Chat = &self.ai;
+        let step = c.turns.iter().filter_map(|t| t.step.as_ref()).find(|s| s.id == id);
+        let what = step.and_then(|s| match &s.kind {
+            AiStepKind::Agent { description, .. } => Some(description.clone()),
+            _ => None,
+        });
+        let (state, tone) = step.map(|s| sub_state(c, s)).unwrap_or(("gone", Tone::Idle));
+        let name = agent_name(c).unwrap_or_else(|| self.ai_name().to_string());
+        let back = button(text(format!("← all of {name}")).size(11).color(accent)).on_press(Message::Ai(Msg::CloseThread)).padding([2, 6]).style(move |_, _| button::Style {
+            border: Border { color: accent, width: 1.0, radius: 3.0.into() },
+            ..Default::default()
+        });
+        let bar = row![
+            back,
+            svg(self.icons.network.clone()).width(12).height(12),
+            text(format!("sub-agent: {}", what.unwrap_or_default())).size(12).color(fg),
+            text(state).size(11).color(self.ai_tone(tone)),
+            space::horizontal(),
+            text("esc: back · it can't be written to: messages go to its agent").size(10).color(dim),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        container(bar)
+            .padding([5, 10])
+            .width(Length::Fill)
+            .style(move |_| container::Style { background: Some(panel.into()), border: Border { color: divider, width: 1.0, radius: 2.0.into() }, ..Default::default() })
+            .into()
     }
 
     /// The lines an edit took out and put in (the first few of each).
@@ -714,19 +998,7 @@ impl App {
     /// Two lines of what an agent is looking at right now, for its row in the list.
     fn ai_preview(&self, c: &Chat) -> String {
         if let Some(s) = running(c) {
-            return match &s.kind {
-                AiStepKind::Command { command, .. } => {
-                    let (clock, down, note) = step_clock(s).unwrap_or_default();
-                    format!("➜ {}\n{} {clock} {}", clip(first_line(command), 36), if down { "◷" } else { "…" }, if down { note } else { "" })
-                }
-                AiStepKind::Read { path, offset, .. } => format!("◎ {}{}", file_name(path), offset.map(|o| format!(":{o}")).unwrap_or_default()),
-                AiStepKind::Edit { path, new, .. } => format!("✎ {}\n{}", file_name(path), clip(first_line(new).trim(), 38)),
-                AiStepKind::Write { path, content } => format!("✎ {}\n{}", file_name(path), clip(first_line(content).trim(), 38)),
-                AiStepKind::Skill { name } => format!("skill {name}"),
-                AiStepKind::Search { pattern, .. } => format!("⌕ {}", clip(pattern, 36)),
-                AiStepKind::Agent { description } => format!("sub-agent\n{}", clip(description, 38)),
-                AiStepKind::Other { tool, .. } => tool.clone(),
-            };
+            return step_preview(s);
         }
         if let Session::Failed(why) = &c.session {
             return clip(first_line(why), 76);
@@ -781,7 +1053,11 @@ impl App {
                 border: Border { color: edge, width: if done { 2.0 } else { 1.0 }, radius: 2.0.into() },
                 ..Default::default()
             });
-            list = list.push(b).push(self.hrule());
+            list = list.push(b);
+            if let Some(subs) = self.ai_sub_rows(i, c) {
+                list = list.push(subs);
+            }
+            list = list.push(self.hrule());
         }
         let mut new = row![text("+ new agent").size(11).color(dim), space::horizontal()].align_y(Alignment::Center);
         if let Some(k) = self.keymap.chords_for(Command::NewAgent).first() {
@@ -1305,13 +1581,23 @@ impl App {
         // The sub-agent the steps just shown were under: where another's (or the agent's own)
         // start, a line says whose they are, since they come mixed in with the agent's own work.
         let mut under: Option<&str> = None;
+        // One sub-agent's thread: only what is its, under a bar that leads back.
+        let thread = ai.thread.as_deref();
+        if let Some(id) = thread {
+            feed = feed.push(self.ai_thread_bar(id));
+        }
         for (i, t) in ai.turns.iter().enumerate() {
+            if let Some(id) = thread {
+                if !t.step.as_ref().is_some_and(|s| in_thread(ai, s, id)) {
+                    continue;
+                }
+            }
             let parent = t.step.as_ref().and_then(|s| s.parent.as_deref());
-            if t.who == Who::Step && parent != under {
+            if thread.is_none() && t.who == Who::Step && parent != under {
                 if let Some(p) = parent {
                     let helper = ai.turns.iter().filter_map(|t| t.step.as_ref()).find(|s| s.id == p);
                     let what = match helper.map(|h| &h.kind) {
-                        Some(AiStepKind::Agent { description }) => clip(description, 80),
+                        Some(AiStepKind::Agent { description, .. }) => clip(description, 80),
                         _ => "a sub-agent".into(),
                     };
                     let state = match helper.and_then(|h| h.done.as_ref()) {
@@ -1337,6 +1623,7 @@ impl App {
                 (_, Some(s)) => {
                     let icon = match s.kind {
                         AiStepKind::Agent { .. } => svg(self.icons.network.clone()).width(13).height(13).into(),
+                        AiStepKind::Message { .. } => svg(self.icons.network.clone()).width(13).height(13).into(),
                         AiStepKind::Skill { .. } => emoji("📚"),
                         _ => emoji("🔧"),
                     };
@@ -1498,6 +1785,8 @@ impl App {
             format!("Steer {name}: it reads this after its current step")
         } else if ai.busy {
             format!("{name} is replying…")
+        } else if ai.thread.is_some() {
+            format!("Message {name} (its sub-agent can't be written to)")
         } else if ai.turns.is_empty() {
             format!("Tell {name} what to do…")
         } else {
@@ -1714,7 +2003,8 @@ impl App {
             AiStepKind::Write { path, .. } => format!("writing {}", self.ai_rel(path)),
             AiStepKind::Skill { name } => format!("loading skill {name}"),
             AiStepKind::Search { pattern, .. } => format!("searching for {pattern}"),
-            AiStepKind::Agent { description } => format!("sub-agent: {description}"),
+            AiStepKind::Agent { description, .. } => format!("sub-agent: {description}"),
+            AiStepKind::Message { text, .. } => format!("message: {}", first_line(text)),
             AiStepKind::Other { tool, .. } => tool.clone(),
         }
     }

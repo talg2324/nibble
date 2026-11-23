@@ -1626,6 +1626,9 @@ struct Turn {
     /// The steps of sub-agents running in the background: their launch came back at once, and
     /// a `task_notification` ends them.
     background: HashSet<String>,
+    /// Each sub-agent's step, by the id Claude Code gives the sub-agent itself (`task_id`,
+    /// the `to` of a `SendMessage`).
+    tasks: HashMap<String, String>,
 }
 
 /// The sum of the token counts at `keys` in `usage` (`None` when it has none of them).
@@ -1666,6 +1669,9 @@ impl Turn {
             Some("system") if s(v, "subtype").as_deref() == Some("init") => {
                 s(v, "model").map(|model| vec![AiEvent::Started { model, effort: self.effort.clone() }]).unwrap_or_default()
             }
+            // A sub-agent's own stream: not the agent's reply, nor its context. What the
+            // sub-agent says comes whole, in its `assistant` message.
+            Some("stream_event") if s(v, "parent_tool_use_id").is_some() => vec![],
             Some("stream_event") => {
                 let Some(e) = v.get("event") else { return vec![] };
                 match e.get("type").and_then(Value::as_str) {
@@ -1707,18 +1713,58 @@ impl Turn {
             }
             // A finished assistant message: its text already came as deltas; its tool calls are
             // the steps.
+            // A sub-agent's text is what it says to its agent: a message under it.
             Some("assistant") => {
                 let parent = s(v, "parent_tool_use_id");
                 let blocks = v.pointer("/message/content").and_then(Value::as_array);
+                let mut n = 0;
                 blocks
                     .into_iter()
                     .flatten()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-                    .filter_map(|b| {
-                        let kind = claude_step(b.get("name")?.as_str()?, b.get("input").unwrap_or(&Value::Null));
-                        Some(AiEvent::Step(AiStep { id: s(b, "id")?, parent: parent.clone(), kind }))
+                    .filter_map(|b| match b.get("type").and_then(Value::as_str) {
+                        Some("tool_use") => {
+                            let name = b.get("name")?.as_str()?;
+                            let input = b.get("input").unwrap_or(&Value::Null);
+                            let kind = match name {
+                                // The agent writes to one of its sub-agents.
+                                "SendMessage" => {
+                                    let to = input.get("to").and_then(Value::as_str).unwrap_or_default();
+                                    match self.tasks.get(to) {
+                                        Some(step) => AiStepKind::Message { to: Some(step.clone()), text: s(input, "message").unwrap_or_default() },
+                                        None => claude_step(name, input),
+                                    }
+                                }
+                                _ => claude_step(name, input),
+                            };
+                            Some(AiEvent::Step(AiStep { id: s(b, "id")?, parent: parent.clone(), kind }))
+                        }
+                        Some("text") => {
+                            let under = parent.clone()?;
+                            let text = s(b, "text").filter(|t| !t.trim().is_empty())?;
+                            let id = format!("{}-say-{}-{n}", under, s(v, "uuid").unwrap_or_default());
+                            n += 1;
+                            Some(AiEvent::Step(AiStep { id, parent: Some(under), kind: AiStepKind::Message { to: None, text } }))
+                        }
+                        _ => None,
+                    })
+                    .flat_map(|e| {
+                        // What a sub-agent said is over once said: no result comes for it.
+                        let done = match &e {
+                            AiEvent::Step(AiStep { id, kind: AiStepKind::Message { to: None, .. }, .. }) if id.contains("-say-") => {
+                                Some(AiEvent::StepDone(AiStepDone { id: id.clone(), ok: true, output: String::new(), line: None }))
+                            }
+                            _ => None,
+                        };
+                        std::iter::once(e).chain(done)
                     })
                     .collect()
+            }
+            // A sub-agent started: what Claude Code calls it, for a `SendMessage` to it.
+            Some("system") if s(v, "subtype").as_deref() == Some("task_started") => {
+                if let (Some(task), Some(step)) = (s(v, "task_id"), s(v, "tool_use_id")) {
+                    self.tasks.insert(task, step);
+                }
+                vec![]
             }
             // Tool results come back as a user message.
             Some("user") => {
@@ -1988,7 +2034,7 @@ pub(crate) fn opencode_step(part: &Value, unnamed: impl FnOnce() -> String) -> O
         "write" => AiStepKind::Write { path: text("filePath"), content: text("content") },
         "grep" | "glob" | "list" => AiStepKind::Search { pattern: s("pattern").or_else(|| s("path")).unwrap_or_default(), path: s("path") },
         "skill" => AiStepKind::Skill { name: text("name") },
-        "task" => AiStepKind::Agent { description: text("description") },
+        "task" => AiStepKind::Agent { description: text("description"), prompt: text("prompt"), kind: s("subagent_type") },
         _ => AiStepKind::Other { tool: tool.to_string(), input: if input.is_null() { String::new() } else { input.to_string() } },
     };
     let id = part.get("callID").or_else(|| part.get("id")).and_then(Value::as_str).map(str::to_string).unwrap_or_else(unnamed);
@@ -2031,7 +2077,13 @@ fn claude_step(tool: &str, input: &Value) -> AiStepKind {
         "Write" => AiStepKind::Write { path: text("file_path"), content: text("content") },
         "Skill" => AiStepKind::Skill { name: text("skill") },
         "Grep" | "Glob" => AiStepKind::Search { pattern: text("pattern"), path: s("path") },
-        "Agent" | "Task" => AiStepKind::Agent { description: s("description").or_else(|| s("prompt")).unwrap_or_default() },
+        "Agent" | "Task" => AiStepKind::Agent {
+            description: s("description").or_else(|| s("prompt").map(|p| p.lines().next().unwrap_or_default().to_string())).unwrap_or_default(),
+            prompt: text("prompt"),
+            kind: s("subagent_type"),
+        },
+        // A sub-agent's report to its agent.
+        "SubagentHandback" => AiStepKind::Message { to: None, text: s("message").or_else(|| s("summary")).unwrap_or_default() },
         _ => AiStepKind::Other { tool: tool.to_string(), input: input.to_string() },
     }
 }
@@ -3526,6 +3578,46 @@ mod tests {
         read(&mut t, &launched.replace("a1", "a2"));
         let failed = read(&mut t, r#"{"type":"system","subtype":"task_notification","tool_use_id":"a2","status":"failed","summary":"no"}"#);
         assert_eq!(failed, [AiEvent::StepDone(AiStepDone { id: "a2".into(), ok: false, output: "no".into(), line: None })]);
+    }
+
+    #[test]
+    fn claude_sub_agents_keep_their_brief_and_what_they_say() {
+        let mut t = Turn::default();
+        // The brief and the kind are kept.
+        let start = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"a1","name":"Agent","input":{"description":"Summarize calc.py","subagent_type":"general-purpose","prompt":"Read calc.py and say what it does.","run_in_background":false}}]}}"#;
+        assert_eq!(
+            read(&mut t, start),
+            [AiEvent::Step(AiStep {
+                id: "a1".into(),
+                parent: None,
+                kind: AiStepKind::Agent { description: "Summarize calc.py".into(), prompt: "Read calc.py and say what it does.".into(), kind: Some("general-purpose".into()) }
+            })]
+        );
+        assert!(read(&mut t, r#"{"type":"system","subtype":"task_started","task_id":"x7","tool_use_id":"a1","description":"Summarize calc.py"}"#).is_empty());
+        // Its own stream is not the agent's reply, nor its context.
+        let delta = r#"{"type":"stream_event","parent_tool_use_id":"a1","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"inner"}}}"#;
+        assert!(read(&mut t, delta).is_empty());
+        let usage = r#"{"type":"stream_event","parent_tool_use_id":"a1","event":{"type":"message_start","message":{"usage":{"input_tokens":99999}}}}"#;
+        assert!(read(&mut t, usage).is_empty());
+        assert_eq!(t.context, None);
+        // Its report is a message to its agent.
+        let back = r#"{"type":"assistant","parent_tool_use_id":"a1","message":{"content":[{"type":"tool_use","id":"t2","name":"SubagentHandback","input":{"message":"calc.py adds and multiplies."}}]}}"#;
+        assert_eq!(
+            read(&mut t, back),
+            [AiEvent::Step(AiStep { id: "t2".into(), parent: Some("a1".into()), kind: AiStepKind::Message { to: None, text: "calc.py adds and multiplies.".into() } })]
+        );
+        // What it says in its own words too, and that is over at once.
+        let said = r#"{"type":"assistant","uuid":"u1","parent_tool_use_id":"a1","message":{"content":[{"type":"text","text":"Looking."}]}}"#;
+        let ev = read(&mut t, said);
+        assert!(matches!(&ev[..], [AiEvent::Step(AiStep { parent: Some(p), kind: AiStepKind::Message { to: None, text }, .. }), AiEvent::StepDone(AiStepDone { ok: true, .. })] if p == "a1" && text == "Looking."), "{ev:?}");
+        // The agent writing to it, by the name Claude Code gave it.
+        let send = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"t3","name":"SendMessage","input":{"to":"x7","message":"Now greet.py too."}}]}}"#;
+        assert_eq!(
+            read(&mut t, send),
+            [AiEvent::Step(AiStep { id: "t3".into(), parent: None, kind: AiStepKind::Message { to: Some("a1".into()), text: "Now greet.py too.".into() } })]
+        );
+        // To someone it doesn't know: an ordinary tool call.
+        assert!(matches!(&read(&mut t, &send.replace("x7", "zz"))[..], [AiEvent::Step(AiStep { kind: AiStepKind::Other { .. }, .. })]));
     }
 
     #[test]
