@@ -1,0 +1,7 @@
+# Static CRT on Windows, so nib.exe / nibd.exe run on a fresh machine with no VC++ redistributable
+# (D-041).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

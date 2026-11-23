@@ -1,0 +1,39 @@
+# Every push to main and every pull request: tests on Linux, a build on macOS and Windows.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cmd: cargo test --workspace --locked
+          - os: macos-latest
+            cmd: cargo build --workspace --locked
+          - os: windows-latest
+            cmd: cargo build --workspace --locked
+    steps:
+      - uses: actions/checkout@v5
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ${{ matrix.cmd }}
