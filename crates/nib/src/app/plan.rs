@@ -9,8 +9,9 @@
 use super::code::MarkdownViewer;
 use super::comment::{self, Comment, Comments};
 use super::Message;
+use iced::advanced::widget::{operate, operation, Id as WidgetId, Operation};
 use iced::widget::{column, container, markdown, mouse_area, row, text};
-use iced::{Border, Color, Element, Length, Padding};
+use iced::{Border, Color, Element, Length, Padding, Rectangle, Task, Vector};
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use serde_json::{json, Value};
 use std::ops::Range;
@@ -429,7 +430,9 @@ pub fn view<'a>(plan: &'a Plan, look: &Look, live: bool, on: impl Fn(PlanMsg) ->
             .width(Length::Fill)
             .style(move |_| container::Style { background: tint.map(Into::into), border: Border { radius: 3.0.into(), ..Default::default() }, ..Default::default() });
         let block: Element<'a, Message> = if live { mouse_area(block).on_press(on(PlanMsg::Row(i))).into() } else { block.into() };
-        col = col.push(container(block).padding(Padding { top: above, ..Padding::ZERO }));
+        let block = container(block).padding(Padding { top: above, ..Padding::ZERO });
+        // Named while live, so the keys can scroll it into view (`reveal`).
+        col = col.push(if live { block.id(row_id(i)) } else { block });
         // What is said about it, under its last line.
         let indent = |e: Element<'a, Message>| -> Element<'a, Message> { container(e).padding(Padding { left: 18.0 + r.depth.saturating_sub(1) as f32 * 22.0, top: 4.0, bottom: 4.0, right: 0.0 }).into() };
         for cm in plan.comments.ending_at(r.end_line) {
@@ -438,11 +441,103 @@ pub fn view<'a>(plan: &'a Plan, look: &Look, live: bool, on: impl Fn(PlanMsg) ->
             last_item = false;
         }
         if let Some(d) = draft.filter(|d| d.end_line == r.end_line) {
-            col = col.push(indent(comment::view::draft(d, c, on(PlanMsg::Save), on(PlanMsg::Cancel))));
+            col = col.push(container(indent(comment::view::draft(d, c, on(PlanMsg::Save), on(PlanMsg::Cancel)))).id(DRAFT_ID));
             last_item = false;
         }
     }
     col.into()
+}
+
+/// The name of a live plan's row `i` on screen.
+fn row_id(i: usize) -> WidgetId {
+    WidgetId::from(format!("plan-row-{i}"))
+}
+
+/// The name of the comment being written on a live plan.
+const DRAFT_ID: &str = "plan-draft";
+
+/// Scroll `scroll` (the scrollable the live plan is drawn in; `bottom`: anchored to its bottom)
+/// just far enough that the comment being written, or else the row the cursor is on, is in
+/// view. Nothing moves if it is in view already.
+pub fn reveal(plan: &Plan, scroll: &'static str, bottom: bool) -> Task<Message> {
+    let target = match (&plan.comments.draft, plan.sel) {
+        (Some(_), _) => WidgetId::from(DRAFT_ID),
+        (None, Some((_, at))) => row_id(at),
+        (None, None) => return Task::none(),
+    };
+    operate(Measure { scroll: WidgetId::from(scroll), target, bottom, view: None, found: None })
+}
+
+/// Room left above or below what is revealed.
+const MARGIN: f32 = 24.0;
+
+/// First pass of `reveal`: where the scrollable is scrolled to, and where the target is in it.
+struct Measure {
+    scroll: WidgetId,
+    target: WidgetId,
+    bottom: bool,
+    /// The scrollable's viewport and content, and how far down it is scrolled.
+    view: Option<(Rectangle, Rectangle, f32)>,
+    found: Option<Rectangle>,
+}
+
+impl<T: 'static> Operation<T> for Measure {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&WidgetId>, bounds: Rectangle) {
+        if id == Some(&self.target) {
+            self.found = Some(bounds);
+        }
+    }
+
+    fn scrollable(&mut self, id: Option<&WidgetId>, bounds: Rectangle, content: Rectangle, translation: Vector, _state: &mut dyn operation::Scrollable) {
+        if id == Some(&self.scroll) {
+            self.view = Some((bounds, content, translation.y));
+        }
+    }
+
+    fn finish(&self) -> operation::Outcome<T> {
+        let (Some((view, content, at)), Some(t)) = (self.view, self.found) else { return operation::Outcome::None };
+        let Some(y) = scrolled_to(view.height, content.height, at, t.y - content.y, t.height) else { return operation::Outcome::None };
+        // Anchored to the bottom, offsets count up from the end.
+        let y = if self.bottom { (content.height - view.height).max(0.0) - y } else { y };
+        operation::Outcome::Chain(Box::new(ScrollTo { scroll: self.scroll.clone(), y }))
+    }
+}
+
+/// How far down (from the top) to scroll a viewport `view` high over content `content` high,
+/// scrolled to `at` now, so that what spans `top..top + height` in it is in view with a margin:
+/// its top first, when it is higher than the viewport. `None`: it is in view already.
+fn scrolled_to(view: f32, content: f32, at: f32, top: f32, height: f32) -> Option<f32> {
+    let (top, end) = (top - MARGIN, top + height + MARGIN);
+    let y = if top < at {
+        top
+    } else if end > at + view {
+        (end - view).min(top)
+    } else {
+        return None;
+    };
+    Some(y.clamp(0.0, (content - view).max(0.0)))
+}
+
+/// Second pass of `reveal`: scroll there.
+struct ScrollTo {
+    scroll: WidgetId,
+    y: f32,
+}
+
+impl<T> Operation<T> for ScrollTo {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+        operate(self);
+    }
+
+    fn scrollable(&mut self, id: Option<&WidgetId>, _bounds: Rectangle, _content: Rectangle, _translation: Vector, state: &mut dyn operation::Scrollable) {
+        if id == Some(&self.scroll) {
+            state.scroll_to(operation::scrollable::AbsoluteOffset { x: None, y: Some(self.y) });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +545,21 @@ mod tests {
     use super::*;
 
     const PLAN: &str = "# Cache the fetches\n\nWhy: it is slow.\nVery slow.\n\n1. Add a cache\n   with a size cap\n   - keyed by URL\n2. Use it in `fetch()`\n\n```rust\nlet x = 1;\n```\n";
+
+    #[test]
+    fn reveal_scrolls_only_as_far_as_the_row_needs() {
+        // A 100-high view over 1000, at the top: a row in view stays put.
+        assert_eq!(scrolled_to(100.0, 1000.0, 0.0, 30.0, 20.0), None);
+        // One below the bottom: scrolled until it (and the margin) shows at the bottom.
+        assert_eq!(scrolled_to(100.0, 1000.0, 0.0, 150.0, 20.0), Some(150.0 + 20.0 + MARGIN - 100.0));
+        // One above the top: scrolled until it shows at the top.
+        assert_eq!(scrolled_to(100.0, 1000.0, 500.0, 400.0, 20.0), Some(400.0 - MARGIN));
+        // Taller than the view: its top shows.
+        assert_eq!(scrolled_to(100.0, 1000.0, 0.0, 300.0, 400.0), Some(300.0 - MARGIN));
+        // Never past either end.
+        assert_eq!(scrolled_to(100.0, 1000.0, 500.0, 5.0, 20.0), Some(0.0));
+        assert_eq!(scrolled_to(100.0, 1000.0, 0.0, 990.0, 10.0), Some(900.0));
+    }
 
     #[test]
     fn rows_are_blocks_and_every_list_item() {

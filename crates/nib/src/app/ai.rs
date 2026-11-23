@@ -24,7 +24,7 @@ mod stage;
 mod wait;
 
 use super::viewers::PreviewImage;
-use super::plan::{Outcome, Plan, PlanMsg};
+use super::plan::{self, Outcome, Plan, PlanMsg};
 use super::line_input::{History, LineInput};
 use super::{App, Focus, Message, Pending};
 use crate::links;
@@ -949,7 +949,8 @@ impl App {
                     _ => {}
                 },
             }
-            return Some(Task::none());
+            // The comment being written (or the row it was filed from) stays in view.
+            return Some(plan::reveal(p, TRANSCRIPT_ID, true));
         }
         match chord.key {
             // The arrows are the plan's while nothing is typed (with words, they move the caret).
@@ -961,7 +962,8 @@ impl App {
             Key::Enter if plain && !chord.shift && empty && p.has_feedback() => return Some(self.ai_revise()),
             _ => return None,
         }
-        Some(Task::none())
+        // The transcript follows the cursor (or the comment just opened).
+        Some(plan::reveal(p, TRANSCRIPT_ID, true))
     }
 
     /// Answers given from outside (`nib ctl ai answer`), one per question: an option's number
