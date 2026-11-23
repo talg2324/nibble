@@ -85,11 +85,7 @@ fn said(text: &str) -> Turn {
     } else {
         (markdown::Content::parse(&links::autolink(text)), Default::default())
     };
-    Turn { who: Who::Assistant, text: text.to_string(), md, math: formulas, step: None, images: Default::default() }
-}
-
-fn plain(who: Who, text: String) -> Turn {
-    Turn { who, text, md: markdown::Content::new(), math: Default::default(), step: None, images: Default::default() }
+    Turn { md, math: formulas, ..Turn::new(Who::Assistant, text.to_string()) }
 }
 
 /// A past conversation as a chat: everything that happened in it, nothing running.
@@ -97,11 +93,11 @@ fn revive(key: u64, past: AiPast, entries: Vec<AiPastEntry>, root: &str) -> Chat
     let mut turns: Vec<Turn> = Vec::new();
     for e in entries {
         match e {
-            AiPastEntry::User(t) => turns.push(plain(Who::User, t)),
+            AiPastEntry::User(t) => turns.push(Turn::new(Who::User, t)),
             AiPastEntry::Text(t) => turns.push(said(&t)),
-            AiPastEntry::Note(t) => turns.push(plain(Who::Note, t)),
-            AiPastEntry::Mail(m) => turns.push(plain(Who::Mail, if m.incoming { format!("from {}: {}", m.from, m.text) } else { format!("to {}: {}", m.to, m.text) })),
-            AiPastEntry::Step(s) => turns.push(Turn { step: Some(Step { id: s.id, parent: s.parent, acts: super::act::of(&s.kind, root), kind: s.kind, started: Instant::now(), done: None, background: false }), ..plain(Who::Step, String::new()) }),
+            AiPastEntry::Note(t) => turns.push(Turn::new(Who::Note, t)),
+            AiPastEntry::Mail(m) => turns.push(Turn::new(Who::Mail, if m.incoming { format!("from {}: {}", m.from, m.text) } else { format!("to {}: {}", m.to, m.text) })),
+            AiPastEntry::Step(s) => turns.push(Turn { step: Some(Step { id: s.id, parent: s.parent, acts: super::act::of(&s.kind, root), kind: s.kind, started: Instant::now(), done: None, background: false }), ..Turn::new(Who::Step, String::new()) }),
             AiPastEntry::StepDone { done, seconds } => {
                 if let Some(step) = turns.iter_mut().rev().filter_map(|t| t.step.as_mut()).find(|s| s.id == done.id) {
                     step.done = Some(StepEnd { ok: done.ok, output: done.output, line: done.line, took: Duration::from_secs_f32(seconds.max(0.0)) });

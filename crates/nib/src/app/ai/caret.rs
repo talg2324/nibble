@@ -79,22 +79,22 @@ impl Chat {
     }
 }
 
-pub(super) fn prev_char(s: &str, i: usize) -> usize {
+pub(in crate::app) fn prev_char(s: &str, i: usize) -> usize {
     s[..i].char_indices().next_back().map_or(0, |(j, _)| j)
 }
 
-pub(super) fn next_char(s: &str, i: usize) -> usize {
+pub(in crate::app) fn next_char(s: &str, i: usize) -> usize {
     s[i..].chars().next().map_or(i, |c| i + c.len_utf8())
 }
 
 /// The start of the word before `i` (spaces before it skipped), like Alt+Left in a text field.
-pub(super) fn word_left(s: &str, i: usize) -> usize {
+pub(in crate::app) fn word_left(s: &str, i: usize) -> usize {
     let t = s[..i].trim_end();
     t.rfind(char::is_whitespace).map_or(0, |j| j + t[j..].chars().next().map_or(1, char::len_utf8))
 }
 
 /// The end of the word after `i`.
-pub(super) fn word_right(s: &str, i: usize) -> usize {
+pub(in crate::app) fn word_right(s: &str, i: usize) -> usize {
     let rest = &s[i..];
     let skip = rest.len() - rest.trim_start().len();
     let t = &rest[skip..];

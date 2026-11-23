@@ -4,10 +4,11 @@
 //! rename box and the hover popup.
 
 use super::{async_sleep, App, Message, Pending, Tab};
+use super::line_input::LineInput;
 use crate::editor_view::ViewEvent;
 use super::viewers::PreviewImage;
 use crate::math;
-use iced::widget::{button, column, container, markdown, mouse_area, rich_text, row, scrollable, space, span, stack, text};
+use iced::widget::{button, column, container, markdown, mouse_area, rich_text, row, scrollable, space, stack, text};
 use iced::{mouse, Alignment, Border, Color, Element, Font, Length, Padding, Rectangle, Task};
 use nib_editor::document::char_at_visual_col;
 use nib_editor::keymap::{Key, KeyChord};
@@ -97,7 +98,7 @@ pub struct Rename {
     version: u64,
     pos: Pos,
     old: String,
-    text: String,
+    text: LineInput,
     /// Still showing the old name selected: the first keystroke replaces it.
     fresh: bool,
 }
@@ -236,7 +237,7 @@ impl App {
             (LspOp::PrepareRename, Response::RenameRange(r)) => match r {
                 None => self.flash_info("nothing to rename here"),
                 Some((pos, _, old)) => {
-                    let text = old.clone();
+                    let text = LineInput::from(old.as_str());
                     self.code.rename = Some(Rename { tab, version, pos, old, text, fresh: true });
                     Task::none()
                 }
@@ -563,33 +564,43 @@ impl App {
     }
 
     fn rename_key(&mut self, chord: KeyChord, text: Option<String>) -> Task<Message> {
+        let cmd = self.keymap.lookup(&chord);
         let Some(r) = &mut self.code.rename else { return Task::none() };
         match chord.key {
             Key::Esc => self.code.rename = None,
             Key::Enter => return self.rename_submit(),
-            Key::Backspace => {
-                if r.fresh || chord.alt || chord.ctrl || chord.logo {
-                    r.text.clear();
-                } else {
-                    r.text.pop();
-                }
+            _ if cmd == Some(Command::SelectAll) => r.fresh = true,
+            _ if cmd == Some(Command::Paste) => return iced::clipboard::read().map(Message::Pasted),
+            // The old name is selected: deleting takes all of it, a move lets go of the selection.
+            Key::Backspace | Key::Delete if r.fresh => {
+                r.text.clear();
                 r.fresh = false;
             }
-            Key::Left | Key::Right | Key::Home | Key::End => r.fresh = false,
-            Key::Char('a') if chord.ctrl || chord.logo => r.fresh = true,
-            _ if !(chord.ctrl || chord.logo) => {
-                let typed: String = text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
-                if !typed.is_empty() {
-                    if r.fresh {
-                        r.text.clear();
-                        r.fresh = false;
-                    }
-                    r.text.push_str(&typed);
-                }
+            Key::Left | Key::Right | Key::Home | Key::End if r.fresh => {
+                r.fresh = false;
+                r.text.key(&chord, None);
             }
-            _ => {}
+            _ => {
+                // Typing over the selected old name replaces it.
+                if r.fresh && !(chord.ctrl || chord.logo) && text.as_deref().is_some_and(|t| t.chars().any(|c| !c.is_control())) {
+                    r.text.clear();
+                    r.fresh = false;
+                }
+                r.text.key(&chord, text.as_deref());
+            }
         }
         Task::none()
+    }
+
+    /// A paste into the rename box, if it's open: in place of the old name while it's selected.
+    pub(super) fn rename_paste(&mut self, s: &str) -> bool {
+        let Some(r) = &mut self.code.rename else { return false };
+        if r.fresh {
+            r.text.clear();
+            r.fresh = false;
+        }
+        r.text.insert(s);
+        true
     }
 
     // -----------------------------------------------------------------------------------------
@@ -729,9 +740,9 @@ impl App {
         let th = &self.theme;
         let (accent, sel) = (th.accent, th.selection);
         // The caret is a glyph inside the text so it follows the last character when it wraps.
-        let name = span(r.text.as_str()).color(th.foreground);
-        let name = if r.fresh { name.background(sel) } else { name };
-        let typed: [iced::widget::text::Span<'_, (), Font>; 2] = [name, span("▏").color(accent)];
+        let [before, caret, after] = r.text.spans(th.foreground, accent);
+        let before = if r.fresh { before.background(sel) } else { before };
+        let typed = [before, caret, after];
         let field = container(rich_text(typed).font(self.face.font).size(self.face.size).width(Length::Fill))
             .padding([5, 8])
             .width(Length::Fixed(420.0))

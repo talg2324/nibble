@@ -14,7 +14,6 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 /// An agent's branch and where it is checked out.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -212,15 +211,11 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_in(dir: &Path, env: &[(&str, &Path)], args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = crate::git::cmd(dir)
         .args(args)
         .envs(env.iter().copied())
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_MERGE_AUTOEDIT", "no")
-        .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("could not run git: {e}"))?;
     let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
@@ -270,9 +265,8 @@ pub struct Ctx {
 
 /// `nibd work …`, run by an agent. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
-    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "help")) {
-        println!("{USAGE}");
-        return 0;
+    if let Some(code) = crate::cli::help(args, USAGE, false) {
+        return code;
     }
     let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let (Some(mailbox), Ok(agent), Some(root), Some(nibdir)) = (var("NIB_MAILBOX"), std::env::var("NIB_AGENT"), var("NIB_ROOT"), var("NIBDIR")) else {
@@ -283,13 +277,7 @@ pub fn cli(args: &[String]) -> i32 {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s).map(|_| s)
     };
-    let (out, code) = run(&Ctx { mailbox, agent, root, nibdir }, args, stdin);
-    if code == 0 {
-        println!("{out}");
-    } else {
-        eprintln!("{out}");
-    }
-    code
+    crate::cli::print(run(&Ctx { mailbox, agent, root, nibdir }, args, stdin))
 }
 
 /// `cli` for the agent `ctx` describes: what to print, and the exit code.
@@ -501,7 +489,7 @@ pub fn canonical_near(p: &Path) -> PathBuf {
 
 /// `git` in `dir`, its output as it is (a patch must keep its last newline).
 fn git_raw(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).stdin(Stdio::null()).output().map_err(|e| format!("could not run git: {e}"))?;
+    let out = crate::git::cmd(dir).args(args).output().map_err(|e| format!("could not run git: {e}"))?;
     if out.status.success() {
         Ok(out.stdout)
     } else {
@@ -547,6 +535,7 @@ fn start(ctx: &Ctx, name: &str, fix: bool) -> Result<Record, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn slugs() {

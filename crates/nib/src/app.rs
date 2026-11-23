@@ -8,6 +8,7 @@ mod drop;
 mod forward;
 mod git;
 mod palette;
+mod panel;
 mod pdf_tab;
 mod peek;
 mod plan;
@@ -18,6 +19,7 @@ mod settings;
 mod ssh;
 mod titlebar;
 mod tree;
+mod line_input;
 mod viewers;
 mod web;
 mod watch;
@@ -328,6 +330,9 @@ fn status_replies(data: &[u8], screen: &vt100::Screen) -> Vec<u8> {
 
 /// One line of a text box that doesn't wrap: when it's wider than the box, the box shows its end
 /// (where the caret is) instead of clipping it off.
+/// The tab bar's sideways scroll (`App::tab_bar_follow`).
+const TAB_STRIP_ID: &str = "tab-strip";
+
 fn tail_line<'a>(line: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     use iced::widget::scrollable;
     scrollable(line).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::hidden())).anchor_right().width(Length::Fill).into()
@@ -759,7 +764,9 @@ impl App {
             },
             _ => nib_proto::timing::label(&msg),
         };
+        let front = (self.tab_slot(), self.tab_slots());
         let task = self.handle(msg);
+        let task = if (self.tab_slot(), self.tab_slots()) == front { task } else { Task::batch([task, self.tab_bar_follow()]) };
         let web = self.web_follow();
         let task = Task::batch([task, web]);
         self.ai_sync();
@@ -852,6 +859,7 @@ impl App {
                 Task::none()
             }
             Message::Term(key, ev) => self.on_term(key, ev),
+            Message::Pasted(Some(s)) if self.rename_paste(&s) => Task::none(),
             Message::Pasted(s) => {
                 if let (Some(s), true) = (s, self.editing()) {
                     if let Some(t) = self.tab_mut() {
@@ -2259,7 +2267,7 @@ impl App {
                 .width(Length::Shrink)
                 .into()
         });
-        let mut bar = row![row(tabs)].align_y(iced::Alignment::Center);
+        let mut strip = row![row(tabs)].align_y(iced::Alignment::Center);
         // The agents tab: last, and always the same one.
         if self.ai.open {
             let active = self.ai.shown() && !self.ai_history_front();
@@ -2276,7 +2284,7 @@ impl App {
                 .on_press(Message::Ai(ai::Msg::Front))
                 .padding([5, 12])
                 .style(move |_, _| button::Style { background: held, ..Default::default() });
-            bar = bar.push(column![b, container(space()).height(2).width(Length::Fill).style(move |_| container::Style::default().background(underline))].width(Length::Shrink));
+            strip = strip.push(column![b, container(space()).height(2).width(Length::Fill).style(move |_| container::Style::default().background(underline))].width(Length::Shrink));
         }
         // The history tab, when open: after the agents.
         if self.ai.open && self.ai.history_open() {
@@ -2294,13 +2302,27 @@ impl App {
                 .on_press(Message::Ai(ai::Msg::History))
                 .padding([5, 12])
                 .style(move |_, _| button::Style { background: held, ..Default::default() });
-            bar = bar.push(column![b, container(space()).height(2).width(Length::Fill).style(move |_| container::Style::default().background(underline))].width(Length::Shrink));
+            strip = strip.push(column![b, container(space()).height(2).width(Length::Fill).style(move |_| container::Style::default().background(underline))].width(Length::Shrink));
         }
-        bar = bar.push(space::horizontal());
+        // More tabs than fit: they scroll sideways (trackpad, Shift+wheel), with no bar in the way,
+        // and the one in front is scrolled into view (`tab_bar_follow`).
+        use iced::widget::scrollable;
+        let strip = scrollable(strip).id(TAB_STRIP_ID).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::hidden())).width(Length::Fill);
+        let mut bar = row![strip].align_y(iced::Alignment::Center);
         if let Some(b) = self.preview_button() {
             bar = bar.push(b);
         }
         column![bar, self.hrule()].into()
+    }
+
+    /// Scroll the tab bar so the tab in front is in view. Tabs are of different widths, so it
+    /// goes by its place along the bar: exact for the first and last, close enough between.
+    fn tab_bar_follow(&self) -> Task<Message> {
+        use iced::advanced::widget::{operate, operation};
+        let n = self.tab_slots();
+        let x = if n < 2 { 0.0 } else { self.tab_slot().min(n - 1) as f32 / (n - 1) as f32 };
+        let to = operation::scrollable::RelativeOffset { x: Some(x), y: None };
+        operate(operation::scrollable::snap_to(iced::advanced::widget::Id::from(TAB_STRIP_ID), to))
     }
 
     fn hint<'a>(&self, key: &str, what: &'a str) -> Element<'a, Message> {

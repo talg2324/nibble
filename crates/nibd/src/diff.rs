@@ -5,7 +5,6 @@ use crate::ai::DiffTarget;
 use nib_proto::{AiId, DiffFile, DiffHunk, DiffLine, DiffLineKind, DiffScope, DiffSet, DiffStatus};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Most diff lines of one file, and of a whole diff, that an answer carries.
@@ -16,9 +15,8 @@ const ALL_LINES: usize = 60_000;
 /// instead of the repository's.
 fn git(dir: &Path, index: Option<&Path>, args: &[&str]) -> Option<Vec<u8>> {
     let guard = crate::git::guard(dir)?;
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off"]).args(&guard).args(args);
-    cmd.env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    let mut cmd = crate::git::cmd(dir);
+    cmd.args(&guard).args(args);
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }
@@ -85,20 +83,13 @@ pub type Changed = std::collections::HashMap<PathBuf, (String, u128, u64)>;
 pub fn changed(dir: &Path) -> Changed {
     let Some(top) = text(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from) else { return Changed::new() };
     let Some(out) = git(dir, None, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]) else { return Changed::new() };
-    let out = String::from_utf8_lossy(&out);
     let mut all = Changed::new();
-    let mut records = out.split('\0');
-    while let Some(rec) = records.next() {
-        let (Some(code), Some(path)) = (rec.get(..2), rec.get(3..)) else { continue };
-        if code.contains(['R', 'C']) {
-            // Followed by the path it came from.
-            records.next();
-        }
-        let path = top.join(path);
+    for c in crate::git::parse_status(&String::from_utf8_lossy(&out)) {
+        let path = top.join(&c.path);
         let (time, size) = std::fs::metadata(&path)
             .map(|m| (m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos()), m.len()))
             .unwrap_or((0, 0));
-        all.insert(path, (code.to_string(), time, size));
+        all.insert(path, (c.code, time, size));
     }
     all
 }
@@ -235,13 +226,10 @@ pub fn snapshot(dir: &Path, branch: &str) -> Option<String> {
     let shadow = ShadowIndex::new(&top)?;
     add(&top, &shadow.0, "-A")?;
     let tree = String::from_utf8_lossy(&git(&top, Some(&shadow.0), &["write-tree"])?).trim().to_string();
-    let made = Command::new("git")
-        .arg("-C")
-        .arg(&top)
+    let made = crate::git::cmd(&top)
         .args(["commit-tree", &tree, "-p", "HEAD", "-m", "nib: as reviewed"])
         // Whoever the user is, or nobody: this commit is nib's own bookkeeping.
         .envs([("GIT_AUTHOR_NAME", "nib"), ("GIT_AUTHOR_EMAIL", "nib@localhost"), ("GIT_COMMITTER_NAME", "nib"), ("GIT_COMMITTER_EMAIL", "nib@localhost")])
-        .stdin(Stdio::null())
         .output()
         .ok()?;
     let commit = String::from_utf8_lossy(&made.stdout).trim().to_string();
@@ -461,6 +449,7 @@ fn unquote(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use DiffLineKind::{Add, Context, Del};
 
     #[test]

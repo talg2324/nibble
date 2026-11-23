@@ -340,14 +340,7 @@ impl App {
         crate::forward::clear();
         // Answers about the old root would land in the new tree.
         self.pending.retain(|_, p| !matches!(p, Pending::Tree | Pending::TreeGit | Pending::TreeFs { .. } | Pending::Git { .. } | Pending::GitDetails));
-        let open = self.tree.open;
-        self.tree = Default::default();
-        self.tree.open = open;
-        self.git = None;
-        let open = self.git_ui.open;
-        self.git_ui = Default::default();
-        self.git_ui.open = open;
-        self.diff.reset();
+        self.reset_project_state();
         // The new language server knows no open documents yet.
         for t in &mut self.tabs {
             t.lsp_synced = None;
@@ -441,6 +434,19 @@ impl App {
         }
     }
 
+    /// Another project folder: the file tree, git and the diff start over (whether the panels
+    /// are open stays as it was).
+    fn reset_project_state(&mut self) {
+        let open = self.tree.open;
+        self.tree = Default::default();
+        self.tree.open = open;
+        self.git = None;
+        let open = self.git_ui.open;
+        self.git_ui = Default::default();
+        self.git_ui.open = open;
+        self.diff.reset();
+    }
+
     /// Everything that belongs to the machine the window was connected to.
     fn reset_machine_state(&mut self) {
         self.pending.clear();
@@ -455,14 +461,7 @@ impl App {
         crate::forward::clear();
         self.terms_visible = false;
         self.last_term = None;
-        let open = self.tree.open;
-        self.tree = Default::default();
-        self.tree.open = open;
-        self.git = None;
-        let open = self.git_ui.open;
-        self.git_ui = Default::default();
-        self.git_ui.open = open;
-        self.diff.reset();
+        self.reset_project_state();
         self.ai = self.ai.for_another_machine();
         self.code = Default::default();
         self.preview_tab = None;

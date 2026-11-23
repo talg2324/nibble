@@ -7,9 +7,10 @@
 //! its page there.
 
 use super::settings::raise;
+use super::line_input::LineInput;
 use super::{app_wide, App, Focus, Message};
 use crate::web::{self, Input, TabInfo, TabJob, View};
-use iced::widget::{button, column, container, image, mouse_area, row, scrollable, sensor, stack, text, Space};
+use iced::widget::{button, column, container, image, mouse_area, rich_text, row, scrollable, sensor, stack, text, Space};
 use iced::{mouse, Alignment, Border, Color, Element, Length, Padding, Point, Size, Task};
 use iced_runtime::core::image::Allocation;
 use nib_editor::keymap::{Key, KeyChord};
@@ -32,14 +33,14 @@ pub struct Tabs {
     asked: Option<(u32, View)>,
     /// Which option of an open list the keyboard is on; what is typed into a prompt.
     choice_at: usize,
-    answer: String,
+    answer: LineInput,
     /// Pictures shown so far (for `state`).
     pub frames: u64,
 }
 
 impl Default for Tabs {
     fn default() -> Self {
-        Self { pages: Vec::new(), mine: Vec::new(), shown: 0, picture: None, held: None, size: Size::ZERO, scale: 1.0, asked: None, choice_at: 0, answer: String::new(), frames: 0 }
+        Self { pages: Vec::new(), mine: Vec::new(), shown: 0, picture: None, held: None, size: Size::ZERO, scale: 1.0, asked: None, choice_at: 0, answer: LineInput::default(), frames: 0 }
     }
 }
 
@@ -251,7 +252,7 @@ impl App {
             }
             Msg::Seen => web::tab(TabJob::Seen(page)),
             Msg::Dialog(accept) => {
-                let text = Some(std::mem::take(&mut self.web.answer)).filter(|_| self.web_info(page).and_then(|p| p.dialog.as_ref()).is_some_and(|d| d["type"] == "prompt"));
+                let text = Some(std::mem::take(&mut self.web.answer).to_string()).filter(|_| self.web_info(page).and_then(|p| p.dialog.as_ref()).is_some_and(|d| d["type"] == "prompt"));
                 web::tab(TabJob::Dialog { page, accept, text });
             }
             Msg::Choose(index) => web::tab(TabJob::Choose { page, index }),
@@ -272,7 +273,7 @@ impl App {
         for p in &told.tabs {
             let before = self.web.pages.iter().find(|o| o.id == p.id);
             if p.dialog.is_some() && before.is_none_or(|o| o.dialog.is_none()) {
-                self.web.answer = p.dialog.as_ref().and_then(|d| d["default"].as_str()).unwrap_or("").to_owned();
+                self.web.answer.set(p.dialog.as_ref().and_then(|d| d["default"].as_str()).unwrap_or(""));
             }
             if p.choice.is_some() && before.is_none_or(|o| o.choice.is_none()) {
                 self.web.choice_at = p.choice.as_ref().and_then(|c| c.selected).unwrap_or(0);
@@ -328,15 +329,13 @@ impl App {
         if command.is_some_and(app_wide) {
             return None;
         }
-        let plain = !chord.ctrl && !chord.logo && !chord.alt;
         let info = self.web_info(page)?;
         if let Some(d) = &info.dialog {
             let prompt = d["type"] == "prompt";
             match chord.key {
                 Key::Enter => return Some(self.on_web_msg(Msg::Dialog(true))),
                 Key::Esc => return Some(self.on_web_msg(Msg::Dialog(false))),
-                Key::Backspace if prompt => drop(self.web.answer.pop()),
-                Key::Char(_) if prompt && plain => self.web.answer.push_str(text.as_deref().unwrap_or("")),
+                _ if prompt => drop(self.web.answer.key(&chord, text.as_deref())),
                 _ => {}
             }
             return Some(Task::none());
@@ -502,8 +501,8 @@ impl App {
             let kind = d["type"].as_str().unwrap_or("alert");
             let mut body = column![text(format!("{} says", info.name)).size(11).color(dim), text(d["message"].as_str().unwrap_or("").to_owned()).size(13).color(fg)].spacing(8);
             if kind == "prompt" {
-                let typed = format!("{}▏", self.web.answer);
-                body = body.push(container(text(typed).size(13).color(fg)).padding([4, 8]).width(Length::Fill).style(move |_| container::Style { border: Border { color: edge, width: 1.0, radius: 3.0.into() }, ..Default::default() }));
+                let typed = rich_text(self.web.answer.spans(fg, fg)).size(13);
+                body = body.push(container(typed).padding([4, 8]).width(Length::Fill).style(move |_| container::Style { border: Border { color: edge, width: 1.0, radius: 3.0.into() }, ..Default::default() }));
             }
             let mut answers = row![Space::new().width(Length::Fill)].spacing(8);
             if kind != "alert" {

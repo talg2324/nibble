@@ -61,11 +61,7 @@ fn config_dir() -> Result<PathBuf> {
 }
 
 fn cache_dir() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .ok_or_else(|| anyhow!("no cache location (HOME unset)"))?;
-    Ok(base.join("nib"))
+    Ok(nib_proto::path::nib_cache_dir())
 }
 
 /// Run a command; on failure, its output is the error.

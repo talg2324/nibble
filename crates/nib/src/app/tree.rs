@@ -14,7 +14,8 @@
 //! agents keep what they make. Same keys and file operations; no git. Tab cycles them.
 
 use super::{app_wide, App, Focus, Message, Pending};
-use iced::widget::{button, column, container, mouse_area, rich_text, row, space, span, text};
+use super::line_input::LineInput;
+use iced::widget::{button, column, container, mouse_area, rich_text, row, space, text};
 use iced::{mouse, Alignment, Border, Color, Element, Length, Padding, Task};
 use nib_editor::keymap::{Key, KeyChord};
 use nib_editor::Command;
@@ -98,13 +99,13 @@ enum Row {
 
 /// A line of text being typed.
 enum Input {
-    Rename { path: String, text: String },
+    Rename { path: String, text: LineInput },
     /// `dir`: the folder it goes in (empty: the root).
-    New { dir: String, folder: bool, text: String },
+    New { dir: String, folder: bool, text: LineInput },
 }
 
 impl Input {
-    fn text_mut(&mut self) -> &mut String {
+    fn text_mut(&mut self) -> &mut LineInput {
         match self {
             Input::Rename { text, .. } | Input::New { text, .. } => text,
         }
@@ -599,7 +600,7 @@ impl Tree {
             self.opened.insert(a.to_string());
         }
         self.selected.clear();
-        self.input = Some(Input::New { dir, folder, text: String::new() });
+        self.input = Some(Input::New { dir, folder, text: LineInput::default() });
         if let Some(at) = self.rows().iter().position(|r| matches!(r, Row::Input { .. })) {
             self.cur = at;
             self.anchor = at;
@@ -852,7 +853,7 @@ impl App {
             Act::Stage => return self.tree_stage(self.tree.targets()),
             Act::Rename => {
                 let Some(e) = self.tree.cursor_entry().filter(|e| !e.gone) else { return Task::none() };
-                let (path, text) = (e.path.clone(), e.name().to_string());
+                let (path, text) = (e.path.clone(), LineInput::from(e.name()));
                 self.tree.selected.clear();
                 self.tree.input = Some(Input::Rename { path, text });
             }
@@ -1007,15 +1008,11 @@ impl App {
         let held = chord.ctrl || chord.logo;
         let cmd = self.keymap.lookup(&chord);
         if let Some(input) = &mut self.tree.input {
-            let buf = input.text_mut();
             match chord.key {
                 Key::Esc => self.tree.input = None,
                 Key::Enter => return self.tree_input_done(),
                 _ if cmd == Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Tree(Msg::Pasted(s))),
-                Key::Backspace if held || chord.alt => buf.clear(),
-                Key::Backspace => drop(buf.pop()),
-                _ if !held => buf.extend(text.unwrap_or_default().chars().filter(|c| !c.is_control())),
-                _ => {}
+                _ => drop(input.text_mut().key(&chord, text.as_deref())),
             }
             return Task::none();
         }
@@ -1093,7 +1090,7 @@ impl App {
         match m {
             Msg::Pasted(s) => {
                 if let (Some(s), Some(input)) = (s, &mut self.tree.input) {
-                    input.text_mut().push_str(s.trim().split(['\n', '\r']).next().unwrap_or(""));
+                    input.text_mut().insert(s.trim().split(['\n', '\r']).next().unwrap_or(""));
                 }
                 return Task::none();
             }
@@ -1474,11 +1471,10 @@ impl App {
     }
 
     /// A one-line text box: what was typed, then the caret.
-    fn tree_field<'a>(&self, typed: &str, hint: &str) -> Element<'a, Message> {
+    fn tree_field<'a>(&self, typed: &LineInput, hint: &str) -> Element<'a, Message> {
         let th = &self.theme;
         let accent = th.accent;
-        // The caret is a glyph inside the text so it stays on the last character, never beside it.
-        let typed_caret: [iced::widget::text::Span<'a, (), iced::Font>; 2] = [span(typed.to_string()).color(th.foreground), span("▏").color(accent)];
+        let typed_caret = typed.spans(th.foreground, accent);
         let mut line = row![rich_text(typed_caret).size(12).font(self.face.font).wrapping(text::Wrapping::None)].align_y(Alignment::Center);
         if typed.is_empty() {
             line = line.push(text(format!(" {hint}")).size(11).color(th.dim).wrapping(text::Wrapping::None));
@@ -1747,7 +1743,7 @@ mod tests {
         a.focus = Focus::Tree;
         a.tree.go_to("src/main.rs");
         key(&mut a, "f2");
-        assert!(matches!(&a.tree.input, Some(Input::Rename { text, .. }) if text == "main.rs"));
+        assert!(matches!(&a.tree.input, Some(Input::Rename { text, .. }) if text.as_str() == "main.rs"));
         for _ in 0.."main.rs".len() {
             key(&mut a, "backspace");
         }

@@ -96,7 +96,7 @@ const OLLAMA_URL: &str = "https://ollama.com/install.sh";
 const OLLAMA_RUNNER: &str = "sh";
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    nib_proto::path::home_dir()
 }
 
 /// Where `agent` itself looks for skills in the user's home (it loads them without nib).
@@ -304,7 +304,7 @@ fn models(agent: AiAgent, exe: &Path, root: Option<&Path>) -> Vec<AiModel> {
                 .map(|id| {
                     // `provider/model`: whatever the user named the provider, the model is local
                     // if Ollama has its weights.
-                    let name = ollama::name(id.split_once('/').map_or(id, |(_, m)| m));
+                    let name = ollama::name_of(id);
                     let local = pulled.contains(&name);
                     AiModel { local, warm: local.then(|| loaded.contains(&name)), ..model(id, id) }
                 })
@@ -1138,20 +1138,18 @@ fn route(shared: &Shared, dir: &Path, letter: mail::Letter) {
         // To nib: an agent saying its job is done, or what a sub-agent it started is doing
         // (D-061). Shown in its own chat, delivered to nobody.
         if letter.to == mail::NIB {
-            let event = match serde_json::from_str::<nib_proto::AiFinished>(&letter.text) {
-                Ok(f) => Some(AiEvent::Finished(f)),
-                Err(_) => match serde_json::from_str::<mail::Report>(&letter.text) {
-                    Ok(mail::Report::Step(step)) => Some(AiEvent::Step(step)),
-                    Ok(mail::Report::StepDone(done)) => Some(AiEvent::StepDone(done)),
-                    Ok(mail::Report::Work) => {
-                        // Kept for when this conversation is reopened in another session.
-                        if let (Some(store), Some(m)) = (&s.store, s.meta.values().find(|m| m.id_name == letter.from)) {
-                            work::persist(dir, &letter.from, store, &m.rec.lock().unwrap().id());
-                        }
-                        Some(AiEvent::Work(work::state(dir, &letter.from)))
+            let event = match serde_json::from_str::<mail::Report>(&letter.text) {
+                Ok(mail::Report::Finished(f)) => Some(AiEvent::Finished(f)),
+                Ok(mail::Report::Step(step)) => Some(AiEvent::Step(step)),
+                Ok(mail::Report::StepDone(done)) => Some(AiEvent::StepDone(done)),
+                Ok(mail::Report::Work) => {
+                    // Kept for when this conversation is reopened in another session.
+                    if let (Some(store), Some(m)) = (&s.store, s.meta.values().find(|m| m.id_name == letter.from)) {
+                        work::persist(dir, &letter.from, store, &m.rec.lock().unwrap().id());
                     }
-                    Err(_) => None,
-                },
+                    Some(AiEvent::Work(work::state(dir, &letter.from)))
+                }
+                Err(_) => None,
             };
             if let (Some((id, m)), Some(event)) = (s.meta.iter().find(|(_, m)| m.name == letter.from || m.id_name == letter.from), event) {
                 m.rec.lock().unwrap().event(&event);
@@ -1380,7 +1378,7 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
             watch: watch.clone(),
             mail: Mutex::new(Vec::new()),
             exe,
-            local: agent == AiAgent::OpenCode && model.as_deref().is_some_and(|m| ollama::pulled().contains(&ollama_name(m))),
+            local: agent == AiAgent::OpenCode && model.as_deref().is_some_and(|m| ollama::pulled().contains(&ollama::name_of(m))),
             cost: Mutex::new(0.0),
             rollout: Mutex::new(None),
             model: model.clone(),
@@ -1472,7 +1470,7 @@ fn codex_roots(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
     roots.extend(var("NIB_SCRATCH"));
     roots.extend(var("NIBDIR"));
     roots.extend(var("NIB_MAILBOX"));
-    let git = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).stdin(Stdio::null()).output();
+    let git = crate::git::cmd(root).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).output();
     if let Ok(out) = git {
         let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if out.status.success() && !dir.is_empty() {
@@ -2435,7 +2433,7 @@ impl PerTurn {
             AiAgent::OpenCode => {
                 let mut cost = self.cost.lock().unwrap();
                 *cost += shot.cost;
-                let model = self.model.as_deref().map(ollama_name);
+                let model = self.model.as_deref().map(ollama::name_of);
                 Some(AiUsage {
                     context_tokens: shot.context,
                     // Ollama's own, for the model as loaded: what it really keeps.
@@ -2683,10 +2681,6 @@ impl PerTurn {
     }
 }
 
-/// OpenCode's model id (`ollama/qwen3:8b`) as Ollama names it.
-fn ollama_name(model: &str) -> String {
-    ollama::name(model.split_once('/').map_or(model, |(_, m)| m))
-}
 
 /// Codex's record of thread `id`: `sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl` under its
 /// home, in one of the last days' folders.

@@ -26,7 +26,7 @@ pub struct Places {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    nib_proto::path::home_dir()
 }
 
 pub(crate) fn xdg(var: &str, fallback: &[&str]) -> PathBuf {

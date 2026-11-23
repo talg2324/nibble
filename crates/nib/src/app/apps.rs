@@ -9,10 +9,12 @@
 //! opens a new chat with the request already written (and the nib-app skill named in it), for
 //! the user to finish. "Open address" shows a page of this machine nobody registered.
 
+use super::line_input::LineInput;
+use super::panel::MOD_PLUS;
 use super::{App, Focus, Message};
 use crate::control::Call;
-use iced::widget::{button, column, container, mouse_area, rich_text, row, scrollable, space, span, text};
-use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Task};
+use iced::widget::{button, column, container, mouse_area, row, space, text};
+use iced::{Alignment, Border, Element, Font, Length, Padding, Task};
 use nib_editor::keymap::{Key, KeyChord};
 use nib_editor::Command;
 use nib_proto::{AppDef, AppInfo, AppOp, AppPage, Response, RpcError, ServerDef, ServerState};
@@ -20,8 +22,6 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 const WIDTH: f32 = 460.0;
-/// The command key, as a hint shows it before another key.
-const MOD_PLUS: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
 
 /// What the user writes to an agent to have an app registered: the skill first, so its
 /// instructions go in front of the message whatever the assistant.
@@ -48,7 +48,7 @@ pub(super) struct Panel {
     /// Open on an app that waits for approval: its commands are shown; Run approves them.
     approving: Option<String>,
     /// "Open address": a port or a local address.
-    address: String,
+    address: LineInput,
     form: Option<Form>,
     /// The form was sent to the daemon: its answer closes the form, or says what is wrong.
     saving: bool,
@@ -59,8 +59,8 @@ pub(super) struct Panel {
 struct Form {
     /// Editing this app (`None`: a new one).
     orig: Option<String>,
-    name: String,
-    title: String,
+    name: LineInput,
+    title: LineInput,
     servers: Vec<FormServer>,
     /// The field with the keyboard (see `Form::fields`).
     sel: usize,
@@ -69,15 +69,15 @@ struct Form {
 
 #[derive(Debug, Clone, Default)]
 struct FormServer {
-    name: String,
-    cmd: String,
-    port: String,
+    name: LineInput,
+    cmd: LineInput,
+    port: LineInput,
     /// Non-empty on the one server that shows the app's page.
-    page: String,
-    after: String,
-    cwd: String,
+    page: LineInput,
+    after: LineInput,
+    cwd: LineInput,
     /// `K=V; K=V`
-    env: String,
+    env: LineInput,
 }
 
 /// A server's fields: label, placeholder.
@@ -96,7 +96,7 @@ impl Form {
         2 + self.servers.len() * SERVER_FIELDS.len()
     }
 
-    fn field_mut(&mut self, i: usize) -> Option<&mut String> {
+    fn field_mut(&mut self, i: usize) -> Option<&mut LineInput> {
         match i {
             0 => Some(&mut self.name),
             1 => Some(&mut self.title),
@@ -122,16 +122,16 @@ impl Form {
             .servers
             .iter()
             .map(|(n, d)| FormServer {
-                name: n.clone(),
-                cmd: d.cmd.clone(),
-                port: d.port.map(|p| p.to_string()).unwrap_or_default(),
-                page: a.def.page.as_ref().filter(|p| p.server == *n).map(|p| p.path.clone()).unwrap_or_default(),
-                after: d.after.join(","),
-                cwd: d.cwd.clone().unwrap_or_default(),
-                env: d.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "),
+                name: n.as_str().into(),
+                cmd: d.cmd.as_str().into(),
+                port: d.port.map(|p| p.to_string()).unwrap_or_default().into(),
+                page: a.def.page.as_ref().filter(|p| p.server == *n).map(|p| p.path.clone()).unwrap_or_default().into(),
+                after: d.after.join(",").into(),
+                cwd: d.cwd.clone().unwrap_or_default().into(),
+                env: d.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ").into(),
             })
             .collect();
-        Form { orig: Some(a.name.clone()), name: a.name.clone(), title: a.def.title.clone().unwrap_or_default(), servers, sel: 0, error: None }
+        Form { orig: Some(a.name.clone()), name: a.name.as_str().into(), title: a.def.title.clone().unwrap_or_default().into(), servers, sel: 0, error: None }
     }
 
     /// The app it describes. What only the daemon can check (names, ports, `after`) is left to
@@ -289,15 +289,16 @@ impl App {
                 self.apps.saving = false;
             }
             Msg::Pasted(s) => {
-                let line = s.unwrap_or_default().trim().split(['\n', '\r']).next().unwrap_or("").to_owned();
+                let s = s.unwrap_or_default();
+                let line = s.trim().split(['\n', '\r']).next().unwrap_or("");
                 match &mut self.apps.form {
                     Some(f) => {
                         let sel = f.sel;
                         if let Some(v) = f.field_mut(sel) {
-                            v.push_str(&line);
+                            v.insert(line);
                         }
                     }
-                    None => self.apps.address.push_str(&line),
+                    None => drop(self.apps.address.insert(line)),
                 }
             }
         }
@@ -532,13 +533,8 @@ impl App {
             Key::Esc if cur == Row::Address && !self.apps.address.is_empty() => self.apps.address.clear(),
             Key::Esc => self.apps_close(),
             _ if cur == Row::Address => match chord.key {
-                Key::Backspace if held || chord.alt => self.apps.address.clear(),
-                Key::Backspace => {
-                    self.apps.address.pop();
-                }
                 _ if paste => return iced::clipboard::read().map(|s| Message::Apps(Msg::Pasted(s))),
-                _ if !held => self.apps.address.extend(text.unwrap_or_default().chars().filter(|c| !c.is_control())),
-                _ => {}
+                _ => drop(self.apps.address.key(&chord, text.as_deref())),
             },
             Key::Right | Key::Left | Key::Char(' ') if plain && app.is_some() => {
                 let name = app.unwrap_or_default();
@@ -581,23 +577,12 @@ impl App {
             Key::Enter if f.sel + 1 == n => return self.apps_save(),
             Key::Enter => f.sel += 1,
             _ if paste => return iced::clipboard::read().map(|s| Message::Apps(Msg::Pasted(s))),
-            Key::Backspace => {
+            _ => {
                 let sel = f.sel;
                 if let Some(v) = f.field_mut(sel) {
-                    if held || chord.alt {
-                        v.clear();
-                    } else {
-                        v.pop();
-                    }
+                    v.key(&chord, text.as_deref());
                 }
             }
-            _ if !held => {
-                let sel = f.sel;
-                if let Some(v) = f.field_mut(sel) {
-                    v.extend(text.unwrap_or_default().chars().filter(|c| !c.is_control()));
-                }
-            }
-            _ => {}
         }
         Task::none()
     }
@@ -632,7 +617,7 @@ impl App {
         let mut body = column![].spacing(6);
         if let Some(f) = &ui.form {
             body = body.push(self.apps_form_view(f, focused));
-            return Some(self.apps_frame(header, body, focused));
+            return Some(self.panel_frame(header, body, focused, WIDTH, Message::Apps(Msg::Focus)));
         }
         if let Some(a) = ui.approving.as_deref().and_then(|n| self.serve.get(n)) {
             body = body.push(self.apps_approval(a, focused));
@@ -640,8 +625,8 @@ impl App {
 
         body = body.push(
             row![
-                self.apps_button("+ Add", Some(Message::Apps(Msg::Add)), is_sel(Row::Add)),
-                self.apps_button("✦ Register via AI chat", Some(Message::Apps(Msg::AskAi)), is_sel(Row::AskAi)),
+                self.panel_button("+ Add", Some(Message::Apps(Msg::Add)), is_sel(Row::Add)),
+                self.panel_button("✦ Register via AI chat", Some(Message::Apps(Msg::AskAi)), is_sel(Row::AskAi)),
             ]
             .spacing(8),
         );
@@ -658,8 +643,8 @@ impl App {
         body = body.push(text("Open address").size(11).color(dim));
         body = body.push(
             row![
-                mouse_area(self.apps_box(ui.address.clone(), "a port (8000) or localhost:8000/path", is_sel(Row::Address), focused)).on_press(Message::Apps(Msg::Click(at(Row::Address)))),
-                self.apps_button("Go", Some(Message::Apps(Msg::AddressGo)), false),
+                mouse_area(self.panel_box(&ui.address, "a port (8000) or localhost:8000/path", is_sel(Row::Address), focused)).on_press(Message::Apps(Msg::Click(at(Row::Address)))),
+                self.panel_button("Go", Some(Message::Apps(Msg::AddressGo)), false),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -672,7 +657,7 @@ impl App {
             hints = hints.push(self.hint("esc", "close"));
             body = body.push(space().height(4)).push(hints);
         }
-        Some(self.apps_frame(header, body, focused))
+        Some(self.panel_frame(header, body, focused, WIDTH, Message::Apps(Msg::Focus)))
     }
 
     /// One app: a dot in its state's colour, its title, its state and page; its buttons; then,
@@ -689,9 +674,9 @@ impl App {
         let name = a.name.clone();
         let running = a.running();
         let open_label = if running { "Show" } else { "Open" };
-        let mut buttons = row![self.apps_button(open_label, Some(Message::Apps(Msg::Open(name.clone()))), false)].spacing(6);
+        let mut buttons = row![self.panel_button(open_label, Some(Message::Apps(Msg::Open(name.clone()))), false)].spacing(6);
         if running {
-            buttons = buttons.push(self.apps_button("Stop", Some(Message::Apps(Msg::Stop(name.clone()))), false));
+            buttons = buttons.push(self.panel_button("Stop", Some(Message::Apps(Msg::Stop(name.clone()))), false));
         }
         let head = row![
             text(if running || state != ServerState::Stopped { "●" } else { "○" }).size(11).color(colour(state)).width(12),
@@ -716,7 +701,7 @@ impl App {
             c = c.push(
                 row![
                     text("Remove this app?").size(11).color(warn),
-                    self.apps_button("Remove", Some(Message::Apps(Msg::Remove(name.clone()))), true),
+                    self.panel_button("Remove", Some(Message::Apps(Msg::Remove(name.clone()))), true),
                     self.hint("d", "again to remove"),
                 ]
                 .spacing(8)
@@ -741,9 +726,9 @@ impl App {
             c = c.push(
                 row![
                     space().width(12),
-                    self.apps_button("Restart", Some(Message::Apps(Msg::Restart(name.clone()))), false),
-                    self.apps_button("Edit", Some(Message::Apps(Msg::Edit(name.clone()))), false),
-                    self.apps_button("Remove", Some(Message::Apps(Msg::Remove(name.clone()))), false),
+                    self.panel_button("Restart", Some(Message::Apps(Msg::Restart(name.clone()))), false),
+                    self.panel_button("Edit", Some(Message::Apps(Msg::Edit(name.clone()))), false),
+                    self.panel_button("Remove", Some(Message::Apps(Msg::Remove(name.clone()))), false),
                 ]
                 .spacing(6),
             );
@@ -782,8 +767,8 @@ impl App {
         }
         c = c.push(
             row![
-                self.apps_button("Run", Some(Message::Apps(Msg::Approve(a.name.clone(), a.hash.clone()))), focused),
-                self.apps_button("Cancel", Some(Message::Apps(Msg::CancelApprove)), false),
+                self.panel_button("Run", Some(Message::Apps(Msg::Approve(a.name.clone(), a.hash.clone()))), focused),
+                self.panel_button("Cancel", Some(Message::Apps(Msg::CancelApprove)), false),
                 self.hint("↵", "run"),
                 self.hint("esc", "cancel"),
             ]
@@ -805,9 +790,9 @@ impl App {
             None => "Add an app".to_string(),
         };
         let mut c = column![text(title).size(12).color(fg)].spacing(6);
-        let field = |i: usize, label: &'static str, value: &str, hint: &'static str| -> Element<'a, Message> {
+        let field = |i: usize, label: &'static str, value: &LineInput, hint: &'static str| -> Element<'a, Message> {
             let selected = f.sel == i;
-            let r = row![text(label).size(11).color(if selected { fg } else { dim }).width(64), self.apps_box(value.to_string(), hint, selected, focused)]
+            let r = row![text(label).size(11).color(if selected { fg } else { dim }).width(64), self.panel_box(value, hint, selected, focused)]
                 .spacing(8)
                 .align_y(Alignment::Center);
             mouse_area(r).on_press(Message::Apps(Msg::Field(i))).into()
@@ -832,68 +817,19 @@ impl App {
         }
         c = c.push(
             row![
-                self.apps_button("+ server", Some(Message::Apps(Msg::AddServer)), false),
-                self.apps_button(if self.apps.saving { "Saving…" } else { "Save" }, Some(Message::Apps(Msg::Save)), false),
-                self.apps_button("Cancel", Some(Message::Apps(Msg::CancelForm)), false),
+                self.panel_button("+ server", Some(Message::Apps(Msg::AddServer)), false),
+                self.panel_button(if self.apps.saving { "Saving…" } else { "Save" }, Some(Message::Apps(Msg::Save)), false),
+                self.panel_button("Cancel", Some(Message::Apps(Msg::CancelForm)), false),
             ]
             .spacing(8),
         );
-        c = c.push(self.apps_button("✦ Register via AI chat instead", Some(Message::Apps(Msg::AskAi)), false));
+        c = c.push(self.panel_button("✦ Register via AI chat instead", Some(Message::Apps(Msg::AskAi)), false));
         if focused {
             c = c.push(row![self.hint("↑↓", "field"), self.hint(&format!("{MOD_PLUS}S"), "save"), self.hint("esc", "cancel")].spacing(12));
         }
         c.into()
     }
 
-    /// The panel around `body`: scrolls, keyboard halo, click to focus.
-    fn apps_frame<'a>(&'a self, header: iced::widget::Row<'a, Message>, body: iced::widget::Column<'a, Message>, focused: bool) -> Element<'a, Message> {
-        let (accent, panel) = (self.theme.accent, self.theme.panel);
-        let body = scrollable(body.padding(Padding { left: 14.0, right: 14.0, top: 10.0, bottom: 12.0 })).style(crate::theme::scrollbar).height(Length::Fill);
-        let halo = if focused { accent } else { Color::TRANSPARENT };
-        let panel = container(column![header, self.hrule(), body]).padding(2).width(WIDTH).height(Length::Fill).style(move |_| container::Style {
-            background: Some(panel.into()),
-            border: Border { color: halo, width: 2.0, radius: 3.0.into() },
-            ..Default::default()
-        });
-        mouse_area(panel).on_press(Message::Apps(Msg::Focus)).into()
-    }
-
-    /// A one-line text box: `value`, or the dim `placeholder`; a caret when it has the keyboard.
-    fn apps_box(&self, value: String, placeholder: &str, selected: bool, focused: bool) -> Element<'_, Message> {
-        let th = &self.theme;
-        let (accent, dim, fg, divider) = (th.accent, th.dim, th.foreground, th.divider);
-        let active = selected && focused;
-        let caret = container(space()).width(2).height(15).style(move |_| container::Style::default().background(if active { accent } else { Color::TRANSPARENT }));
-        let shown: Element<'_, Message> = if value.is_empty() {
-            row![caret, text(placeholder.to_owned()).size(12).color(dim)].align_y(Alignment::Center).into()
-        } else {
-            let typed: [iced::widget::text::Span<'_, (), iced::Font>; 2] = [span(value).color(fg), span("▏").color(if active { accent } else { Color::TRANSPARENT })];
-            super::tail_line(rich_text(typed).size(12).wrapping(text::Wrapping::None))
-        };
-        container(shown)
-            .padding([5, 8])
-            .width(Length::Fill)
-            .clip(true)
-            .style(move |_| container::Style {
-                border: Border { color: if active { accent } else { divider }, width: 1.0, radius: 4.0.into() },
-                ..Default::default()
-            })
-            .into()
-    }
-
-    fn apps_button(&self, label: impl Into<String>, msg: Option<Message>, selected: bool) -> Element<'_, Message> {
-        let th = &self.theme;
-        let (accent, fg, sel_bg, divider) = (th.accent, th.foreground, th.selection, th.divider);
-        let mut b = button(text(label.into()).size(12).color(fg)).padding([3, 9]).style(move |_, st| button::Style {
-            background: (selected || matches!(st, button::Status::Hovered)).then(|| sel_bg.into()),
-            border: Border { color: if selected { accent } else { divider }, width: 1.0, radius: 4.0.into() },
-            ..Default::default()
-        });
-        if let Some(m) = msg {
-            b = b.on_press(m);
-        }
-        b.into()
-    }
 }
 
 #[cfg(test)]

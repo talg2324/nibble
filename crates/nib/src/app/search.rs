@@ -10,10 +10,11 @@
 //! Matching is smart case: case-insensitive unless the query has a capital.
 
 use super::{async_sleep, App, Focus, Message, Pending, Tab};
+use super::line_input::LineInput;
 use crate::control::Call;
 use crate::editor_view::Mark;
-use iced::widget::{button, column, container, rich_text, row, space, span, text};
-use iced::{Alignment, Border, Color, Element, Font, Length, Task};
+use iced::widget::{button, column, container, rich_text, row, space, text};
+use iced::{Alignment, Border, Color, Element, Length, Task};
 use nib_editor::keymap::{Key, KeyChord};
 use nib_editor::Command;
 use nib_proto::{Location, Request, Response, RpcError, SearchResults};
@@ -73,7 +74,7 @@ pub struct State {
     /// The box is showing: it has the keyboard.
     pub open: bool,
     scope: Scope,
-    query: String,
+    query: LineInput,
     target: Option<Target>,
     hits: Vec<Hit>,
     /// The tab's `Document::version` the hits were found in.
@@ -137,7 +138,7 @@ impl App {
             let r = t.doc.selection.primary();
             let picked = t.doc.text.slice(r.from()..r.to()).to_string();
             if !picked.is_empty() && !picked.contains('\n') {
-                self.search.query = picked;
+                self.search.query.set(picked);
             }
             self.search.origin = r.from();
         }
@@ -186,7 +187,7 @@ impl App {
 
     /// Find the query in the local target, and pick the first match from where the box opened.
     fn search_local(&mut self) {
-        let q = self.search.query.clone();
+        let q = self.search.query.to_string();
         let mut hits = Vec::new();
         match self.search.target {
             Some(Target::Tab(id)) => {
@@ -265,7 +266,7 @@ impl App {
     fn search_project_now(&mut self) -> Task<Message> {
         let seq = self.search.seq;
         self.search.searching = true;
-        let query = self.search.query.clone();
+        let query = self.search.query.to_string();
         self.request(Request::Search { query, max: MAX_LINES }, Pending::Search { seq })
     }
 
@@ -323,8 +324,8 @@ impl App {
             Msg::Scope(s) => self.search_set_scope(s),
             Msg::Pasted(Some(t)) if self.search.open => {
                 // One line: the box doesn't hold more.
-                let line = t.lines().next().unwrap_or("").to_string();
-                self.search.query.push_str(&line);
+                let line = t.lines().next().unwrap_or("");
+                self.search.query.insert(line);
                 self.search_changed()
             }
             Msg::Pasted(_) => Task::none(),
@@ -347,29 +348,22 @@ impl App {
             Key::Down => self.search.selected = (self.search.selected + 1).min(last),
             Key::PageUp if project => self.search.selected = self.search.selected.saturating_sub(ROWS),
             Key::PageDown if project => self.search.selected = (self.search.selected + ROWS).min(last),
-            Key::Backspace => {
-                if chord.alt || cmd {
-                    self.search.query.clear();
-                } else {
-                    self.search.query.pop();
-                }
-                return self.search_changed();
-            }
-            _ if cmd => match self.keymap.lookup(&chord) {
-                Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Search(Msg::Pasted(s))),
-                Some(Command::SelectAll) => {}
-                Some(Command::Find) => return self.search_toggle_scope(),
-                Some(c) => {
-                    self.search_close();
-                    return self.exec(c);
-                }
-                None => {}
-            },
             _ => {
-                let typed: String = text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
-                if !typed.is_empty() {
-                    self.search.query.push_str(&typed);
+                let edit = self.search.query.key(&chord, text.as_deref());
+                if edit.changed() {
                     return self.search_changed();
+                }
+                if !edit.handled() && cmd {
+                    match self.keymap.lookup(&chord) {
+                        Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Search(Msg::Pasted(s))),
+                        Some(Command::SelectAll) => {}
+                        Some(Command::Find) => return self.search_toggle_scope(),
+                        Some(c) => {
+                            self.search_close();
+                            return self.exec(c);
+                        }
+                        None => {}
+                    }
                 }
             }
         }
@@ -443,7 +437,7 @@ impl App {
             .padding([2, 10]);
 
         // The caret is a glyph inside the text, as in the rename box.
-        let typed: [iced::widget::text::Span<'_, (), Font>; 2] = [span(s.query.as_str()).color(fg), span("▏").color(accent)];
+        let typed = s.query.spans(fg, accent);
         let field = container(rich_text(typed).font(self.face.font).size(self.face.size).width(Length::Fill))
             .padding([5, 8])
             .width(Length::Fill)
@@ -527,7 +521,7 @@ impl App {
         json!({
             "open": s.open,
             "scope": scope,
-            "query": s.query,
+            "query": s.query.as_str(),
             "target": target,
             "matches": s.hits.len(),
             "current": (!s.hits.is_empty()).then_some(s.current + 1),
@@ -568,7 +562,7 @@ impl App {
                 };
                 self.search.scope = want;
                 if let Some(q) = call.str_arg("query") {
-                    self.search.query = q.to_string();
+                    self.search.query.set(q);
                 }
                 let changed = self.search_changed();
                 if want == Scope::Project && !self.search.query.trim().is_empty() {

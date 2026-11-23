@@ -415,11 +415,7 @@ fn home() -> PathBuf {
 }
 
 fn expand_home(p: &str) -> PathBuf {
-    match p.strip_prefix("~/") {
-        Some(rest) => home().join(rest),
-        None if p == "~" => home(),
-        None => PathBuf::from(p),
-    }
+    nib_proto::path::expand_home(p)
 }
 
 fn temp_file(what: &str) -> PathBuf {

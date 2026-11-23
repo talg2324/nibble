@@ -809,12 +809,12 @@ impl Servers {
     /// agent nib started is refused.
     fn agents(&mut self) {
         let dir = self.dir.clone();
-        let Ok(read) = fs::read_dir(dir.join("req")) else { return };
-        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
-        files.sort();
-        for file in files {
-            let req: Value = fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            let _ = fs::remove_file(&file);
+        let taken = crate::rpc::take(&dir);
+        if taken.is_empty() {
+            return;
+        }
+        for (name, req) in taken {
+            let req = req.unwrap_or_default();
             let args: Vec<String> = serde_json::from_value(req["args"].clone()).unwrap_or_default();
             let (out, code) = match crate::tokens::who(req["token"].as_str().unwrap_or_default()) {
                 Some(agent) => self.run(&args, &Who::Agent(agent)),
@@ -824,9 +824,10 @@ impl Servers {
                     ("nib-app: refused: the request does not come from an agent nib started (no valid $NIB_TOKEN)".to_string(), 1)
                 }
             };
-            let Some(name) = file.file_name() else { continue };
-            let _ = crate::fs_ops::write_whole(&dir.join("res").join(name), json!({ "out": out, "code": code }).to_string());
+            crate::rpc::answer(&dir, &name, &json!({ "out": out, "code": code }).to_string());
         }
+        // What nobody came for (a command that gave up, or was stopped).
+        crate::rpc::sweep(&dir);
     }
 
     /// The server of `app` that `log` means when none is named: its page's, else its first.
@@ -949,25 +950,12 @@ port-taken (something else already listens on its port: it was not started).";
 /// Leave `args` for the daemon, with this agent's token, and wait for its answer: what to
 /// print, and the exit code.
 fn ask(dir: &Path, token: &str, args: &[String]) -> (String, i32) {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let name = format!("{nanos:032}-{}-{}.json", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let body = json!({ "token": token, "args": args }).to_string();
-    let sent = crate::fs_ops::write_whole(&dir.join("req").join(&name), body);
-    if let Err(e) = sent {
-        return (format!("nib-app: {e}"), 1);
+    match crate::rpc::ask(dir, &body, Duration::from_secs(15)) {
+        Ok(Some(v)) => (v["out"].as_str().unwrap_or_default().to_string(), v["code"].as_i64().unwrap_or(1) as i32),
+        Ok(None) => ("nib-app: nib did not answer (is its window still open?)".to_string(), 1),
+        Err(e) => (format!("nib-app: {e}"), 1),
     }
-    let res = dir.join("res").join(&name);
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(15) {
-        if let Some(v) = fs::read(&res).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
-            let _ = fs::remove_file(&res);
-            return (v["out"].as_str().unwrap_or_default().to_string(), v["code"].as_i64().unwrap_or(1) as i32);
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let _ = fs::remove_file(dir.join("req").join(&name));
-    ("nib-app: nib did not answer (is its window still open?)".to_string(), 1)
 }
 
 /// What to add to the list after `open` / `up` / `restart` waited, given the last `settled`
@@ -1000,12 +988,10 @@ fn json_arg(args: &mut Vec<String>, stdin: impl FnOnce() -> std::io::Result<Stri
 
 /// `nibd app …`, run by an agent as `nib-app`. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
-    if matches!(args.first().map(String::as_str), None | Some("-h" | "--help" | "help")) {
-        println!("{USAGE}");
-        return if args.is_empty() { 2 } else { 0 };
+    if let Some(code) = crate::cli::help(args, USAGE, true) {
+        return code;
     }
-    let dir = std::env::var_os("NIB_MAILBOX").map(PathBuf::from).filter(|d| d.join("outbox").is_dir()).map(|d| d.join("app"));
-    let Some(dir) = dir.filter(|d| fs::create_dir_all(d.join("req")).is_ok() && fs::create_dir_all(d.join("res")).is_ok()) else {
+    let Some(dir) = crate::cli::rpc_dir("app") else {
         eprintln!("nib-app: only works inside an agent that nib started (NIB_MAILBOX is not set, or holds no outbox/)");
         return 2;
     };
@@ -1054,12 +1040,7 @@ pub fn cli(args: &[String]) -> i32 {
             }
         }
     }
-    if code == 0 {
-        println!("{out}");
-    } else {
-        eprintln!("{out}");
-    }
-    code
+    crate::cli::print((out, code))
 }
 
 #[cfg(test)]

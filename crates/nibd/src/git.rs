@@ -9,6 +9,22 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// `git -C dir`, as every git command nibd runs by itself starts: paths printed as they are (not
+/// quoted, so that they can be joined to the top of the work tree), no optional lock taken (it
+/// runs in the background, repeatedly, and must not get in the user's way), and nobody to answer
+/// a prompt. What the repository's config could make it run is turned off by [`guard`], which
+/// the caller adds.
+pub(crate) fn cmd(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["-c", "core.quotepath=off"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null());
+    cmd
+}
+
 /// What a repository's own config could make a background git command run, turned off: the
 /// `-c` options for every command nibd runs by itself (status, log, diff, the shadow index).
 ///
@@ -33,13 +49,9 @@ pub(crate) fn guard_env(dir: &Path, env: &[(&str, &Path)]) -> Option<Vec<String>
     // includes unless told, and `.git/config` may have one.
     let read = |scope: &'static str| {
         move || {
-            Command::new("git")
-                .arg("-C")
-                .arg(dir)
+            cmd(dir)
                 .args(["config", scope, "--includes", "--null", "--get-regexp", r"^filter\."])
                 .envs(env.iter().copied())
-                .env("GIT_OPTIONAL_LOCKS", "0")
-                .stdin(Stdio::null())
                 .stderr(Stdio::null())
                 .output()
                 .map(|o| o.stdout)
@@ -90,16 +102,7 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Option<String>> {
 
 /// [`git`] with a [`guard`] already found (one for several commands in a row).
 fn git_with(dir: &Path, guard: &[String], args: &[&str]) -> io::Result<Option<String>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(guard)
-        .args(args)
-        // Never take a lock or wait for a prompt: this runs in the background, repeatedly.
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .output()?;
+    let out = cmd(dir).args(guard).args(args).output()?;
     if !out.status.success() {
         // macOS ships a `git` stub that only asks to install the developer tools.
         if String::from_utf8_lossy(&out.stderr).contains("xcode-select") {
@@ -170,7 +173,7 @@ pub fn details(dir: &Path, log_limit: u32) -> (Vec<GitCommit>, Vec<GitChange>) {
 
 /// `git status --porcelain=v1 -z`: `XY path` records separated by NUL; a rename or copy is
 /// followed by one more record, the path it came from.
-fn parse_status(out: &str) -> Vec<GitChange> {
+pub(crate) fn parse_status(out: &str) -> Vec<GitChange> {
     let mut changes = Vec::new();
     let mut records = out.split('\0');
     while let Some(rec) = records.next() {

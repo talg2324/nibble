@@ -301,12 +301,7 @@ fn local_nibd() -> Result<PathBuf> {
 }
 
 pub(crate) fn cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("nib")
+    nib_proto::path::nib_cache_dir()
 }
 
 /// The log the daemon's (and ssh's) stderr is appended to for `target`.

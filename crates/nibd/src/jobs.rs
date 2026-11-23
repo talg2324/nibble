@@ -274,10 +274,8 @@ fn ollama_model(model: &str) -> String {
     if pulled.contains(&ollama::name(model)) {
         return model.to_string();
     }
-    match model.split_once('/') {
-        Some((_, rest)) if pulled.contains(&ollama::name(rest)) => rest.to_string(),
-        _ => model.to_string(),
-    }
+    let rest = ollama::model_of(model);
+    if rest != model && pulled.contains(&ollama::name(rest)) { rest.to_string() } else { model.to_string() }
 }
 
 /// One model call, straight to Ollama: greedy and seeded unless the job says otherwise.
@@ -489,7 +487,7 @@ fn agent_run(job: &Job, prompt: &str, owner: Option<&Owner>) -> Result<Map<Strin
         .arg(&cwd)
         .args(["--", prompt])
         .current_dir(&cwd);
-    let local = job.model().split_once('/').is_some_and(|(_, m)| ollama::pulled().contains(&ollama::name(m)));
+    let local = job.model().contains('/') && ollama::pulled().contains(&ollama::name_of(job.model()));
     if local {
         // A local model needs no internet: OpenCode mustn't wait on it either.
         ai::opencode_offline(&mut cmd);

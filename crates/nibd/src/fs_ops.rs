@@ -20,12 +20,7 @@ pub fn write_whole(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> 
 }
 
 pub fn expand_home(p: &str) -> PathBuf {
-    if p == "~" || p.starts_with("~/") || (cfg!(windows) && p.starts_with("~\\")) {
-        if let Some(home) = nib_proto::path::home_dir() {
-            return home.join(p[1..].trim_start_matches(['/', '\\']));
-        }
-    }
-    PathBuf::from(p)
+    nib_proto::path::expand_home(p)
 }
 
 pub fn hostname() -> String {

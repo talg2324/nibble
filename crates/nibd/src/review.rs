@@ -244,21 +244,14 @@ const USAGE: &str = "usage:
 
 /// `nibd review …`, run by an agent. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
-    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "help")) {
-        println!("{USAGE}");
-        return 0;
+    if let Some(code) = crate::cli::help(args, USAGE, false) {
+        return code;
     }
     let (Some(mailbox), Ok(agent)) = (std::env::var_os("NIB_MAILBOX").map(PathBuf::from), std::env::var("NIB_AGENT")) else {
         eprintln!("nib-review: only works inside an agent that nib started (NIB_MAILBOX and NIB_AGENT are not set)");
         return 2;
     };
-    let (out, code) = run(&mailbox, &agent, args);
-    if code == 0 {
-        println!("{out}");
-    } else {
-        eprintln!("{out}");
-    }
-    code
+    crate::cli::print(run(&mailbox, &agent, args))
 }
 
 /// `cli` for the agent with mailbox id `agent`: what to print, and the exit code.

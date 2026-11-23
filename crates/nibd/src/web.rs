@@ -22,15 +22,13 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// How often requests are looked for: when nothing was asked lately, and for a while after
 /// something was (an agent's requests come in runs: open, read, click, read).
 const IDLE: Duration = Duration::from_millis(30);
 const BUSY: Duration = Duration::from_millis(4);
 const BUSY_FOR: Duration = Duration::from_secs(3);
-/// An answer nobody came for is deleted after this long.
-const KEEP: Duration = Duration::from_secs(600);
 
 pub type Shared = Arc<Mutex<Relay>>;
 
@@ -62,21 +60,12 @@ pub fn new(mailbox: &Path, tx: Sender<ServerMsg>) -> Shared {
     shared
 }
 
-/// Whole or not at all (written beside, then renamed).
-fn write_whole(dir: &Path, name: &str, text: &str) {
-    let _ = crate::fs_ops::write_whole(&dir.join(name), text);
-}
-
 impl Relay {
     /// Pass the requests agents left to the window, oldest first. How many there were.
     fn pick_up(&mut self) -> usize {
-        let Ok(read) = fs::read_dir(self.dir.join("req")) else { return 0 };
-        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
-        files.sort();
-        for file in &files {
-            let mut req: Option<Value> = fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok());
-            let _ = fs::remove_file(file);
-            let Some(name) = file.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+        let taken = crate::rpc::take(&self.dir);
+        let n = taken.len();
+        for (name, mut req) in taken {
             // Only an agent nib started asks (its token says so), and the window never sees it.
             let token = req.as_mut().and_then(Value::as_object_mut).and_then(|o| o.remove("token"));
             let agent = token.as_ref().and_then(Value::as_str).and_then(crate::tokens::who);
@@ -87,7 +76,7 @@ impl Relay {
                 None => Some("not a request".to_string()),
             };
             if let Some(why) = refused {
-                write_whole(&self.dir.join("res"), &name, &json!({ "ok": false, "error": why }).to_string());
+                crate::rpc::answer(&self.dir, &name, &json!({ "ok": false, "error": why }).to_string());
                 continue;
             }
             let id = self.next;
@@ -95,22 +84,17 @@ impl Relay {
             self.waiting.insert(id, (name, Instant::now()));
             let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Web { id, req: req.unwrap_or_default().to_string() }));
         }
-        files.len()
+        n
     }
 
     /// The window answered request `id`.
     pub fn reply(&mut self, id: u64, reply: &str) {
-        let res = self.dir.join("res");
         if let Some((name, _)) = self.waiting.remove(&id) {
-            write_whole(&res, &name, reply);
+            crate::rpc::answer(&self.dir, &name, reply);
         }
         // What nobody came for (an agent that gave up, or was stopped).
-        self.waiting.retain(|_, (_, since)| since.elapsed() < KEEP);
-        for old in fs::read_dir(&res).into_iter().flatten().flatten() {
-            if old.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > KEEP)) {
-                let _ = fs::remove_file(old.path());
-            }
-        }
+        self.waiting.retain(|_, (_, since)| since.elapsed() < crate::rpc::KEEP);
+        crate::rpc::sweep(&self.dir);
     }
 }
 
@@ -192,28 +176,15 @@ fn next_shot() -> PathBuf {
 
 /// Leave `req` for the daemon, with this agent's token, and wait for the window's answer.
 fn ask(dir: &Path, token: &str, req: &Value) -> Value {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let name = format!("{nanos:032}-{}-{}.json", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let mut sent_req = req.clone();
     sent_req["token"] = json!(token);
-    let sent = crate::fs_ops::write_whole(&dir.join("req").join(&name), sent_req.to_string());
-    if let Err(e) = sent {
-        return json!({ "ok": false, "error": format!("nib-web: {e}") });
-    }
     // As long as the window itself would wait for the page, and a little more for the way.
     let limit = Duration::from_secs_f64(nib_proto::web::reply_secs(req).unwrap_or(30.0) + 5.0);
-    let res = dir.join("res").join(&name);
-    let started = Instant::now();
-    while started.elapsed() < limit {
-        if let Some(v) = fs::read(&res).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
-            let _ = fs::remove_file(&res);
-            return v;
-        }
-        thread::sleep(Duration::from_millis(if started.elapsed() < Duration::from_secs(2) { 4 } else { 25 }));
+    match crate::rpc::ask(dir, &sent_req.to_string(), limit) {
+        Ok(Some(v)) => v,
+        Ok(None) => json!({ "ok": false, "error": "nib did not answer (is its window still open?)" }),
+        Err(e) => json!({ "ok": false, "error": format!("nib-web: {e}") }),
     }
-    let _ = fs::remove_file(dir.join("req").join(&name));
-    json!({ "ok": false, "error": "nib did not answer (is its window still open?)" })
 }
 
 /// What `nib-web WORDS` asks the window, and where a picture is to be written: or the answer
@@ -250,13 +221,11 @@ fn save_shot(mut reply: Value, path: &Path) -> Value {
 
 /// `nibd web …`, run by an agent as `nib-web`. Returns the exit code; prints JSON to stdout.
 pub fn cli(args: &[String]) -> i32 {
-    let words: Vec<&str> = args.iter().map(String::as_str).collect();
-    if matches!(words.as_slice(), [] | ["-h" | "--help" | "help"]) {
-        println!("{USAGE}");
-        return if words.is_empty() { 2 } else { 0 };
+    if let Some(code) = crate::cli::help(args, USAGE, true) {
+        return code;
     }
-    let dir = std::env::var_os("NIB_MAILBOX").map(PathBuf::from).filter(|d| d.join("outbox").is_dir()).map(|d| d.join("web"));
-    let Some(dir) = dir.filter(|d| fs::create_dir_all(d.join("req")).is_ok() && fs::create_dir_all(d.join("res")).is_ok()) else {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Some(dir) = crate::cli::rpc_dir("web") else {
         eprintln!("nib-web: only works inside an agent that nib started (NIB_MAILBOX is not set)");
         return 2;
     };

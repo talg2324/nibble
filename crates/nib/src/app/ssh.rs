@@ -11,11 +11,13 @@
 //! offers "Trust and connect" — the only way to trust a key from nib, and not on the API.
 
 use super::connection::target_text;
+use super::line_input::LineInput;
+use super::panel::MOD_PLUS;
 use super::{App, Focus, Message, Pending};
 use crate::control::Call;
 use crate::ssh::{Probe, Stage};
 use crate::Launch;
-use iced::widget::{button, column, container, mouse_area, rich_text, row, scrollable, space, span, text};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Task};
 use nib_editor::config::check_profile_name;
 use nib_editor::keymap::{Key, KeyChord};
@@ -25,8 +27,6 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 const WIDTH: f32 = 440.0;
-/// The command key, as a hint shows it before another key.
-const MOD_PLUS: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
 const PLACEHOLDER: &str = "user@host or IP, then ↵ (asks for a password if it needs one)";
 
 /// What the keyboard walks, in the order the panel shows it.
@@ -58,7 +58,7 @@ enum AskKind {
 struct Ask {
     prompt: String,
     kind: AskKind,
-    input: String,
+    input: LineInput,
     call: Call,
 }
 
@@ -73,7 +73,7 @@ pub struct Panel {
     pub open: bool,
     return_to: Option<Focus>,
     /// The box: a host to connect to, and the list's filter.
-    input: String,
+    input: LineInput,
     sel: usize,
     profiles: Vec<(String, Profile)>,
     aliases: Vec<String>,
@@ -103,7 +103,7 @@ struct Browse {
     dir: String,
     /// Subfolders (and links, which may be folders).
     entries: Vec<(String, bool)>,
-    filter: String,
+    filter: LineInput,
     /// 0 = this folder, then the shown entries.
     sel: usize,
     loading: bool,
@@ -148,7 +148,7 @@ const EDIT_SHOWN: usize = 3;
 struct Edit {
     /// The saved connection being changed (None: saving a ~/.ssh/config host as one).
     orig: Option<String>,
-    fields: [String; 7],
+    fields: [LineInput; 7],
     sel: usize,
     /// The changes, shown before writing config.toml (y saves).
     confirm: Option<Vec<String>>,
@@ -157,7 +157,7 @@ struct Edit {
 
 impl Edit {
     fn new(orig: Option<String>, fields: [String; 7]) -> Edit {
-        Edit { orig, fields, sel: 1, confirm: None, error: None }
+        Edit { orig, fields: fields.map(LineInput::from), sel: 1, confirm: None, error: None }
     }
 
     /// How many fields the form shows.
@@ -278,15 +278,15 @@ impl App {
             }
             Msg::Pasted(s) => {
                 let Some(s) = s else { return Task::none() };
-                let line = s.trim().split(['\n', '\r']).next().unwrap_or("").to_owned();
+                let line = s.trim().split(['\n', '\r']).next().unwrap_or("");
                 if let Some(a) = &mut self.ssh.ask {
-                    a.input.push_str(&line);
+                    a.input.insert(line);
                 } else if let Some(e) = &mut self.ssh.edit {
-                    e.fields[e.sel].push_str(&line);
+                    e.fields[e.sel].insert(line);
                 } else if let Some(b) = &mut self.ssh.browse {
-                    b.filter.push_str(&line);
+                    b.filter.insert(line);
                 } else {
-                    self.ssh.input.push_str(&line);
+                    self.ssh.input.insert(line);
                     self.ssh.sel = 0;
                 }
             }
@@ -417,12 +417,8 @@ impl App {
                 Key::Esc => return self.ssh_answer(false),
                 Key::Char('y') if matches!(a.kind, AskKind::Confirm) && plain => return self.ssh_answer(true),
                 Key::Char('n') if matches!(a.kind, AskKind::Confirm) && plain => return self.ssh_answer(false),
-                Key::Backspace if held || chord.alt => a.input.clear(),
-                Key::Backspace => {
-                    a.input.pop();
-                }
                 _ if paste => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
-                _ if !held && matches!(a.kind, AskKind::Secret) => a.input.extend(text.unwrap_or_default().chars().filter(|c| !c.is_control())),
+                _ if matches!(a.kind, AskKind::Secret) => drop(a.input.key(&chord, text.as_deref())),
                 _ => {}
             }
             return Task::none();
@@ -458,28 +454,17 @@ impl App {
             Key::Delete if plain && matches!(cur, Row::Root(..)) => return self.ssh_ask_forget(cur),
             Key::Char('d') if plain && matches!(cur, Row::Root(..)) => return self.ssh_ask_forget(cur),
             Key::Char('e') if plain && matches!(cur, Row::Root(..) | Row::Alias(_)) => return self.ssh_edit_start(cur),
-            Key::Backspace if held || chord.alt => {
-                self.ssh.input.clear();
-                self.ssh.sel = 0;
-            }
-            Key::Backspace => {
-                self.ssh.input.pop();
-                self.ssh.error = None;
-                self.ssh.sel = 0;
-            }
             _ if paste => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
             // Typing anywhere goes into the box (and filters the list).
-            _ if !held => {
-                let t: String = text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
-                if !t.is_empty() {
-                    self.ssh.input.push_str(&t);
+            _ => {
+                let edit = self.ssh.input.key(&chord, text.as_deref());
+                if edit.changed() {
                     self.ssh.error = None;
                     self.ssh.sel = 0;
-                }
-            }
-            _ => {
-                if let Some(c) = self.keymap.lookup(&chord).filter(|c| super::app_wide(*c)) {
-                    return self.exec(c);
+                } else if !edit.handled() {
+                    if let Some(c) = self.keymap.lookup(&chord).filter(|c| super::app_wide(*c)) {
+                        return self.exec(c);
+                    }
                 }
             }
         }
@@ -784,22 +769,16 @@ impl App {
             // Back to the tree, the root as it was.
             Key::Esc => self.ssh.browse = None,
             Key::Backspace if b.filter.is_empty() => return self.ssh_browse_up(),
-            Key::Backspace if held || chord.alt => b.filter.clear(),
-            Key::Backspace => {
-                b.filter.pop();
-            }
             _ if paste => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
-            _ if !held => {
-                let t: String = text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
-                if !t.is_empty() {
-                    b.filter.push_str(&t);
+            _ => {
+                let edit = b.filter.key(&chord, text.as_deref());
+                if edit.changed() {
                     // The best match is what Enter takes.
                     b.sel = usize::from(!b.shown().is_empty());
-                }
-            }
-            _ => {
-                if let Some(c) = self.keymap.lookup(&chord).filter(|c| super::app_wide(*c)) {
-                    return self.exec(c);
+                } else if !edit.handled() {
+                    if let Some(c) = self.keymap.lookup(&chord).filter(|c| super::app_wide(*c)) {
+                        return self.exec(c);
+                    }
                 }
             }
         }
@@ -952,16 +931,12 @@ impl App {
             Key::Enter | Key::Down => e.sel = (e.sel + 1).min(last),
             Key::Tab if !chord.shift => e.sel = (e.sel + 1).min(last),
             Key::Up | Key::Tab => e.sel = e.sel.saturating_sub(1),
-            Key::Backspace if held || chord.alt => e.fields[e.sel].clear(),
-            Key::Backspace => {
-                e.fields[e.sel].pop();
-            }
             _ if cmd == Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
-            _ if !held => {
-                e.fields[e.sel].extend(text.unwrap_or_default().chars().filter(|c| !c.is_control()));
-                e.error = None;
+            _ => {
+                if e.fields[e.sel].key(&chord, text.as_deref()).changed() {
+                    e.error = None;
+                }
             }
-            _ => {}
         }
         Task::none()
     }
@@ -989,7 +964,7 @@ impl App {
         };
         let prompt = call.str_arg("prompt").unwrap_or("ssh asks:").trim().to_owned();
         self.ssh_ask_cancel("asked something else");
-        self.ssh.ask = Some(Ask { prompt, kind, input: String::new(), call });
+        self.ssh.ask = Some(Ask { prompt, kind, input: LineInput::default(), call });
         if !self.ssh.open {
             self.ssh_open();
         }
@@ -1000,7 +975,7 @@ impl App {
     fn ssh_answer(&mut self, yes: bool) -> Task<Message> {
         let Some(a) = self.ssh.ask.take() else { return Task::none() };
         match (a.kind, yes) {
-            (AskKind::Secret, true) => a.call.ok(json!({ "answer": a.input })),
+            (AskKind::Secret, true) => a.call.ok(json!({ "answer": a.input.as_str() })),
             (AskKind::Confirm, true) => a.call.ok(json!({ "answer": "yes" })),
             (AskKind::Notice, _) => a.call.ok(json!({})),
             (_, false) => a.call.err("cancelled"),
@@ -1240,11 +1215,11 @@ impl App {
 
         if let Some(e) = &ui.edit {
             body = body.push(self.ssh_edit_view(e, focused));
-            return Some(self.ssh_frame(header, body, focused));
+            return Some(self.panel_frame(header, body, focused, WIDTH, Message::Ssh(Msg::Focus)));
         }
 
         // The box.
-        body = body.push(mouse_area(self.ssh_box(ui.input.clone(), PLACEHOLDER, is_sel(Row::Input), focused)).on_press(click(Row::Input)));
+        body = body.push(mouse_area(self.panel_box(&ui.input, PLACEHOLDER, is_sel(Row::Input), focused)).on_press(click(Row::Input)));
         if let Some(e) = &ui.error {
             body = body.push(text(e.clone()).size(11).color(th.warn));
         }
@@ -1254,7 +1229,7 @@ impl App {
             let secs = c.started.elapsed().as_secs();
             let line = if secs >= 2 { format!("{}  ({secs}s)", c.status) } else { c.status.clone() };
             body = body.push(
-                row![text(line).size(12).color(accent), space::horizontal(), self.ssh_button("Cancel", Some(click(Row::Cancel)), is_sel(Row::Cancel))]
+                row![text(line).size(12).color(accent), space::horizontal(), self.panel_button("Cancel", Some(click(Row::Cancel)), is_sel(Row::Cancel))]
                     .align_y(Alignment::Center),
             );
             if let Some(f) = c.fraction {
@@ -1275,7 +1250,7 @@ impl App {
                 }
                 if at(Row::Trust).is_some() {
                     k = k.push(text("Compare it with the one the machine's owner gives you before trusting it.").size(11).color(dim));
-                    k = k.push(self.ssh_button(format!("Trust and connect to {}", l.label), Some(click(Row::Trust)), is_sel(Row::Trust)));
+                    k = k.push(self.panel_button(format!("Trust and connect to {}", l.label), Some(click(Row::Trust)), is_sel(Row::Trust)));
                 }
                 body = body.push(container(k).padding(10).width(Length::Fill).style(move |_| container::Style {
                     border: Border { color: dim, width: 1.0, radius: 4.0.into() },
@@ -1333,20 +1308,7 @@ impl App {
             body = body.push(space().height(4)).push(hints);
         }
 
-        Some(self.ssh_frame(header, body, focused))
-    }
-
-    /// The panel around `body`: scrolls, keyboard halo, click to focus.
-    fn ssh_frame<'a>(&'a self, header: iced::widget::Row<'a, Message>, body: iced::widget::Column<'a, Message>, focused: bool) -> Element<'a, Message> {
-        let (accent, panel) = (self.theme.accent, self.theme.panel);
-        let body = scrollable(body.padding(Padding { left: 14.0, right: 14.0, top: 10.0, bottom: 12.0 })).style(crate::theme::scrollbar).height(Length::Fill);
-        let halo = if focused { accent } else { Color::TRANSPARENT };
-        let panel = container(column![header, self.hrule(), body]).padding(2).width(WIDTH).height(Length::Fill).style(move |_| container::Style {
-            background: Some(panel.into()),
-            border: Border { color: halo, width: 2.0, radius: 3.0.into() },
-            ..Default::default()
-        });
-        mouse_area(panel).on_press(Message::Ssh(Msg::Focus)).into()
+        Some(self.panel_frame(header, body, focused, WIDTH, Message::Ssh(Msg::Focus)))
     }
 
     /// The folder browser, in the file tree's place.
@@ -1361,7 +1323,7 @@ impl App {
             row![container(text(short_path(&self.tilde(&b.dir), 32)).size(12).color(accent).wrapping(text::Wrapping::None)).width(Length::Fill).clip(true), up]
                 .align_y(Alignment::Center),
         );
-        c = c.push(self.ssh_box(b.filter.clone(), "type to filter", true, focused));
+        c = c.push(self.panel_box(&b.filter, "type to filter", true, focused));
         let item = |i: usize, label: String, color: Color| -> Element<'_, Message> {
             let selected = b.sel == i;
             let r = container(text(label).size(12).color(color).wrapping(text::Wrapping::None))
@@ -1390,7 +1352,7 @@ impl App {
             }
         }
         c = c.push(scrollable(list).style(crate::theme::scrollbar).height(Length::Fill));
-        let open = self.ssh_button("Open as project", Some(Message::Ssh(Msg::BrowseOpen)), false);
+        let open = self.panel_button("Open as project", Some(Message::Ssh(Msg::BrowseOpen)), false);
         c = c.push(open);
         if focused {
             c = c.push(row![self.hint("↵", "go in"), self.hint("←", "up")].spacing(10));
@@ -1409,7 +1371,7 @@ impl App {
         let mut c = column![text(title).size(12).color(fg)].spacing(6);
         for (i, (label, hint)) in EDIT_FIELDS.iter().enumerate().take(e.shown()) {
             let selected = e.sel == i && e.confirm.is_none();
-            let r = row![text(*label).size(11).color(if selected { fg } else { dim }).width(70), self.ssh_box(e.fields[i].clone(), hint, selected, focused)]
+            let r = row![text(*label).size(11).color(if selected { fg } else { dim }).width(70), self.panel_box(&e.fields[i], hint, selected, focused)]
                 .spacing(8)
                 .align_y(Alignment::Center);
             c = c.push(mouse_area(r).on_press(Message::Ssh(Msg::EditField(i))));
@@ -1425,8 +1387,8 @@ impl App {
                 }
                 w = w.push(
                     row![
-                        self.ssh_button("Save", Some(Message::Ssh(Msg::EditSave)), true),
-                        self.ssh_button("Keep editing", Some(Message::Ssh(Msg::EditField(e.sel))), false),
+                        self.panel_button("Save", Some(Message::Ssh(Msg::EditSave)), true),
+                        self.panel_button("Keep editing", Some(Message::Ssh(Msg::EditField(e.sel))), false),
                         self.hint("y", "save"),
                         self.hint("n", "back")
                     ]
@@ -1440,7 +1402,7 @@ impl App {
             }
             None => {
                 c = c.push(
-                    row![self.ssh_button("Save…", Some(Message::Ssh(Msg::EditSave)), false), self.ssh_button("Cancel", Some(Message::Ssh(Msg::EditCancel)), false)]
+                    row![self.panel_button("Save…", Some(Message::Ssh(Msg::EditSave)), false), self.panel_button("Cancel", Some(Message::Ssh(Msg::EditCancel)), false)]
                         .spacing(8),
                 );
                 if focused {
@@ -1463,8 +1425,7 @@ impl App {
         let mut q = column![text(a.prompt.clone()).size(12).color(fg)].spacing(8);
         match a.kind {
             AskKind::Secret => {
-                let dots: String = "●".repeat(a.input.chars().count());
-                q = q.push(self.ssh_box(dots, "", true, focused));
+                q = q.push(self.panel_box(&a.input.masked('●'), "", true, focused));
                 q = q.push(row![answer("Send", true), answer("Cancel", false)].spacing(8));
             }
             AskKind::Confirm => q = q.push(row![answer("Yes", true), answer("No", false)].spacing(8)),
@@ -1476,44 +1437,6 @@ impl App {
             .width(Length::Fill)
             .style(move |_| container::Style { border: Border { color: border, width: 1.0, radius: 4.0.into() }, ..Default::default() })
             .into()
-    }
-
-    /// A one-line text box: `value`, or the dim `placeholder`; a caret when it has the keyboard.
-    fn ssh_box(&self, value: String, placeholder: &str, selected: bool, focused: bool) -> Element<'_, Message> {
-        let th = &self.theme;
-        let (accent, dim, fg, divider) = (th.accent, th.dim, th.foreground, th.divider);
-        let active = selected && focused;
-        let caret = container(space()).width(2).height(15).style(move |_| container::Style::default().background(if active { accent } else { Color::TRANSPARENT }));
-        let shown: Element<'_, Message> = if value.is_empty() {
-            row![caret, text(placeholder.to_owned()).size(12).color(dim)].align_y(Alignment::Center).into()
-        } else {
-            // The caret is a glyph inside the text so it stays on the last character, never beside it.
-            let typed: [iced::widget::text::Span<'_, (), iced::Font>; 2] = [span(value).color(fg), span("▏").color(if active { accent } else { Color::TRANSPARENT })];
-            super::tail_line(rich_text(typed).size(12).wrapping(text::Wrapping::None))
-        };
-        container(shown)
-            .padding([6, 8])
-            .width(Length::Fill)
-            .clip(true)
-            .style(move |_| container::Style {
-                border: Border { color: if active { accent } else { divider }, width: 1.0, radius: 4.0.into() },
-                ..Default::default()
-            })
-            .into()
-    }
-
-    fn ssh_button(&self, label: impl Into<String>, msg: Option<Message>, selected: bool) -> Element<'_, Message> {
-        let th = &self.theme;
-        let (accent, fg, sel_bg, divider) = (th.accent, th.foreground, th.selection, th.divider);
-        let mut b = button(text(label.into()).size(12).color(fg)).padding([4, 10]).style(move |_, st| button::Style {
-            background: (selected || matches!(st, button::Status::Hovered)).then(|| sel_bg.into()),
-            border: Border { color: if selected { accent } else { divider }, width: 1.0, radius: 4.0.into() },
-            ..Default::default()
-        });
-        if let Some(m) = msg {
-            b = b.on_press(m);
-        }
-        b.into()
     }
 
     /// `● name  host  root`; continuation rows (more roots) leave name and host empty.
@@ -1690,7 +1613,7 @@ mod tests {
         a.ssh.sel = 1; // gpu · ~/seg
         type_str(&mut a, "e");
         assert!(a.ssh.edit.is_some(), "e on a connection edits it");
-        assert_eq!(a.ssh.input, "", "and doesn't type");
+        assert_eq!(a.ssh.input.as_str(), "", "and doesn't type");
         type_str(&mut a, "2"); // host: gpu-box2
         key(&mut a, "down");
         type_str(&mut a, "tal"); // user

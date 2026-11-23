@@ -145,15 +145,20 @@ fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// What a `nib ai run` sub-agent is doing, for its owner's chat (D-061): a letter to `nib` from
-/// the owner's id, shown as a step of the owner's (the run, with the sub-agent's tool calls
-/// nested in it), delivered to nobody.
+/// What an agent tells nib itself, for its own chat: a letter to `nib` from the agent's id,
+/// delivered to nobody.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Report {
+    /// What a `nib ai run` sub-agent is doing (D-061): shown as a step of the owner's (the run,
+    /// with the sub-agent's tool calls nested in it).
     Step(AiStep),
     StepDone(AiStepDone),
     /// The owner's plan or branch changed (`work`): read them again.
     Work,
+    /// Its job is done (`nib-mail done`). Written as the `AiFinished` itself, with no tag, as it
+    /// was before it was a report: last, so that it is tried only when no tag matched.
+    #[serde(untagged)]
+    Finished(AiFinished),
 }
 
 /// Where to report to and as whom, when this process runs inside an agent nib started:
@@ -321,9 +326,8 @@ const USAGE: &str = "usage:
 
 /// `nibd mail …`, run by an agent. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
-    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "help")) {
-        println!("{USAGE}");
-        return 0;
+    if let Some(code) = crate::cli::help(args, USAGE, false) {
+        return code;
     }
     // Empty is not set (as nib-work has it).
     let (Some(dir), Some(me)) = (std::env::var_os("NIB_MAILBOX").filter(|v| !v.is_empty()).map(PathBuf::from), std::env::var("NIB_AGENT").ok()) else {
@@ -331,13 +335,7 @@ pub fn cli(args: &[String]) -> i32 {
         return 2;
     };
     let root = std::env::var_os("NIB_ROOT").filter(|r| !r.is_empty()).map(PathBuf::from);
-    let (out, code) = run_in(&dir, &me, root.as_deref(), args);
-    if code == 0 {
-        println!("{out}");
-    } else {
-        eprintln!("{out}");
-    }
-    code
+    crate::cli::print(run_in(&dir, &me, root.as_deref(), args))
 }
 
 /// `cli`, for the agent `me` with its mailbox in `dir`: what to print, and the exit code.
@@ -440,7 +438,7 @@ pub fn run_in(dir: &Path, me: &str, root: Option<&Path>, args: &[String]) -> (St
                     1,
                 );
             }
-            let text = serde_json::to_string(&f).unwrap_or_default();
+            let text = serde_json::to_string(&Report::Finished(f)).unwrap_or_default();
             match post(dir, &Letter { from: my_name, to: NIB.to_string(), text, at: now() }) {
                 Ok(()) => ("the user has your summary: they accept it (and end this session) or tell you what is left. Stop here and wait.".to_string(), 0),
                 Err(e) => (format!("nibd mail: {e}"), 1),
@@ -558,7 +556,9 @@ mod tests {
         let out = collect(&d);
         assert_eq!((out[0].from.as_str(), out[0].to.as_str()), ("claude-1", NIB));
         let f: AiFinished = serde_json::from_str(&out[0].text).unwrap();
-        assert_eq!((f.asked.as_str(), f.found, f.did.as_str()), ("Make it green", None, "Made it green"));
+        assert_eq!((f.asked.as_str(), f.found.as_deref(), f.did.as_str()), ("Make it green", None, "Made it green"));
+        // Written as the `AiFinished` itself (as before it was a report), and read as one report.
+        assert_eq!(serde_json::from_str::<Report>(&out[0].text).unwrap(), Report::Finished(f));
         let _ = fs::remove_dir_all(d.parent().unwrap());
     }
 

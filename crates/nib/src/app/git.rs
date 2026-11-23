@@ -3,10 +3,10 @@
 //! the history at the bottom. Which files changed, and staging them, is the file tree's. The panel is driven with the arrow keys, Enter and Esc.
 
 use super::{async_sleep, App, Focus, Message, Pending};
+use super::line_input::LineInput;
 use iced::advanced::widget::{operate, operation, Id as WidgetId};
-use iced::widget::text::Span;
-use iced::widget::{button, column, container, rich_text, row, scrollable, space, span, text};
-use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Task};
+use iced::widget::{button, column, container, rich_text, row, scrollable, space, text};
+use iced::{Alignment, Border, Color, Element, Length, Padding, Task};
 use nib_editor::keymap::{Key, KeyChord};
 use nib_editor::{Command, Document};
 use nib_proto::{GitChange, GitCommit, GitInfo, GitOp, Request, Response, RpcError};
@@ -84,7 +84,7 @@ pub struct Panel {
     running: Option<Action>,
     last: Option<Ran>,
     /// The commit message being typed (the Commit box is open).
-    message: Option<String>,
+    message: Option<LineInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ impl App {
         let ui = &mut self.git_ui;
         ui.return_to = from.or(ui.return_to);
         ui.selected = ACTIONS.iter().position(|a| *a == Action::Commit).unwrap_or(0);
-        ui.message = Some(String::new());
+        ui.message = Some(LineInput::default());
         self.focus = Focus::Git;
         asked
     }
@@ -191,7 +191,7 @@ impl App {
             Msg::Pasted(s) => {
                 if let (Some(s), Some(m)) = (s, &mut self.git_ui.message) {
                     // One line: the box is for the subject.
-                    m.push_str(s.trim().split(['\n', '\r']).next().unwrap_or(""));
+                    m.insert(s.trim().split(['\n', '\r']).next().unwrap_or(""));
                 }
             }
         }
@@ -242,7 +242,7 @@ impl App {
         let op = match action {
             Action::Commit if self.git_ui.changes.is_empty() => return self.flash_info("nothing to commit"),
             Action::Commit => {
-                self.git_ui.message = Some(String::new());
+                self.git_ui.message = Some(LineInput::default());
                 return Task::none();
             }
             Action::Pull => GitOp::Pull,
@@ -330,15 +330,10 @@ impl App {
                     self.git_ui.message = None;
                     return self.git_run(Action::Commit, GitOp::Commit { message });
                 }
-                Key::Backspace if held || chord.alt => m.clear(),
-                Key::Backspace => {
-                    m.pop();
-                }
                 _ if self.keymap.lookup(&chord) == Some(Command::Paste) => {
                     return iced::clipboard::read().map(|s| Message::Git(Msg::Pasted(s)));
                 }
-                _ if !held => m.extend(text.unwrap_or_default().chars().filter(|c| !c.is_control())),
-                _ => {}
+                _ => drop(m.key(&chord, text.as_deref())),
             }
             return Task::none();
         }
@@ -471,7 +466,7 @@ impl App {
         let mut top = column![actions].spacing(8);
         if let Some(m) = &ui.message {
             // The caret is a glyph inside the text so it follows the last character when it wraps.
-            let typed: [Span<'_, (), Font>; 2] = [span(m.as_str()).color(fg), span("▏").color(accent)];
+            let typed = m.spans(fg, accent);
             let field = container(rich_text(typed).size(12).width(Length::Fill))
                 .padding([5, 8])
                 .width(Length::Fill)

@@ -13,6 +13,7 @@ mod ai;
 mod history;
 mod mail;
 mod attach;
+mod cli;
 mod diff;
 mod fs_ops;
 mod git;
@@ -21,6 +22,7 @@ mod lsp;
 mod ollama;
 mod places;
 mod pty;
+mod rpc;
 mod review;
 mod search;
 mod serve;
@@ -279,6 +281,11 @@ fn history_request(root: &std::path::Path, req: Request) -> Result<Response, Rpc
     }
 }
 
+/// The answer to a request that needs the project before Hello has named it.
+fn no_hello() -> RpcError {
+    RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")
+}
+
 struct State {
     root: Option<PathBuf>,
     /// Scratch and NIBDIR, made by Hello (None if they couldn't be).
@@ -313,74 +320,70 @@ fn resolve(root: Option<&PathBuf>, path: &str) -> PathBuf {
 impl State {
     /// `None` when the answer is sent later.
     fn handle(&mut self, id: ReqId, req: Request) -> Option<Result<Response, RpcError>> {
+        self.dispatch(id, req).transpose()
+    }
+
+    /// The project's root, or the error for a request that came before Hello.
+    fn root(&self) -> Result<PathBuf, RpcError> {
+        self.root.clone().ok_or_else(no_hello)
+    }
+
+    /// Answer request `id` with what `work` returns, on a thread of its own: for what takes long
+    /// (a model loading, git, the project walked), so that the reader thread never waits on it.
+    fn later(&self, id: ReqId, work: impl FnOnce() -> Result<Response, RpcError> + Send + 'static) -> Result<Option<Response>, RpcError> {
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(ServerMsg::Response { id, result: work() });
+        });
+        Ok(None)
+    }
+
+    /// [`State::handle`], with `?` for an error answered at once.
+    fn dispatch(&mut self, id: ReqId, req: Request) -> Result<Option<Response>, RpcError> {
         if let Request::Lsp { path, pos, op } = req {
             let path = self.resolve(&path);
-            let Some(lsp) = &mut self.lsp else {
-                return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
-            };
-            return lsp.request(id, path, pos, op).err().map(Err);
+            let Some(lsp) = &mut self.lsp else { return Err(no_hello()) };
+            return lsp.request(id, path, pos, op).map(|()| None);
         }
         if let Request::AiOpen { replace, agent, model, tools, mode, resume, effort, prompt } = req {
-            let Some(root) = self.root.clone() else {
-                return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
-            };
+            let root = self.root()?;
             // Asks the assistant whether it is signed in first, which takes a moment.
             let (ai, tx) = (self.ai.clone(), self.tx.clone());
             let (scratch, nibdir) = (self.places.as_ref().map(|p| p.scratch.clone()), self.places.as_ref().map(|p| p.nibdir.clone()));
-            thread::spawn(move || {
-                let result = ai::open(&ai, replace, agent, model, ai::Tuning { effort, prompt }, tools, mode, resume.as_deref(), &root, ai::Dirs { scratch: scratch.as_deref(), nibdir: nibdir.as_deref() }, tx.clone()).map(|id| Response::AiOpened { id });
-                let _ = tx.send(ServerMsg::Response { id, result });
+            return self.later(id, move || {
+                ai::open(&ai, replace, agent, model, ai::Tuning { effort, prompt }, tools, mode, resume.as_deref(), &root, ai::Dirs { scratch: scratch.as_deref(), nibdir: nibdir.as_deref() }, tx).map(|id| Response::AiOpened { id })
             });
-            return None;
         }
         if let Request::AiWarm { model, warm, gpu } = req {
-            let Some(root) = self.root.clone() else {
-                return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
-            };
-            // Loading a model and priming it can take minutes: off this thread.
-            let tx = self.tx.clone();
-            thread::spawn(move || {
-                let result = ollama::GpuSel::parse(gpu.as_deref())
+            let root = self.root()?;
+            // Loading a model and priming it can take minutes.
+            return self.later(id, move || {
+                ollama::GpuSel::parse(gpu.as_deref())
                     .and_then(|sel| ai::set_warm(&model, warm, &sel, &root))
                     .map(|_| Response::Ok)
-                    .map_err(|e| RpcError::new(ErrorKind::Io, e));
-                let _ = tx.send(ServerMsg::Response { id, result });
+                    .map_err(|e| RpcError::new(ErrorKind::Io, e))
             });
-            return None;
         }
         if let Request::AiJob { job } = req {
-            let Some(root) = self.root.clone() else {
-                return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
-            };
-            let tx = self.tx.clone();
-            thread::spawn(move || {
-                let result = jobs::run_job(&job, &root).to_string();
-                let _ = tx.send(ServerMsg::Response { id, result: Ok(Response::AiJobDone { result }) });
-            });
-            return None;
+            let root = self.root()?;
+            return self.later(id, move || Ok(Response::AiJobDone { result: jobs::run_job(&job, &root).to_string() }));
         }
         if let Request::AiBatch { jobs: file, out, concurrency, retries } = req {
-            let Some(root) = self.root.clone() else {
-                return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
-            };
-            let tx = self.tx.clone();
-            thread::spawn(move || {
-                let progress_tx = tx.clone();
+            let root = self.root()?;
+            let progress_tx = self.tx.clone();
+            return self.later(id, move || {
                 let progress = move |line: &serde_json::Value| {
                     let _ = progress_tx.send(ServerMsg::Notify(ServerNotify::AiProgress { req: id, line: line.to_string() }));
                 };
-                let result = jobs::run_batch(&file, &out, concurrency, retries, &root, progress)
+                jobs::run_batch(&file, &out, concurrency, retries, &root, progress)
                     .map(|s| Response::AiBatchDone { summary: s.to_string() })
-                    .map_err(|e| RpcError::new(ErrorKind::BadRequest, e));
-                let _ = tx.send(ServerMsg::Response { id, result });
+                    .map_err(|e| RpcError::new(ErrorKind::BadRequest, e))
             });
-            return None;
         }
         if matches!(req, Request::AiInstall { .. } | Request::AiPull { .. } | Request::AiDelete { .. }) {
-            // Installing and downloading take minutes: off this thread, with progress lines.
-            let tx = self.tx.clone();
-            thread::spawn(move || {
-                let progress_tx = tx.clone();
+            // Installing and downloading take minutes: with progress lines.
+            let progress_tx = self.tx.clone();
+            return self.later(id, move || {
                 let progress = move |line: serde_json::Value| {
                     let _ = progress_tx.send(ServerMsg::Notify(ServerNotify::AiProgress { req: id, line: line.to_string() }));
                 };
@@ -390,44 +393,26 @@ impl State {
                     Request::AiDelete { model } => ollama::delete(&model),
                     _ => unreachable!(),
                 };
-                let result = result.map(|_| Response::Ok).map_err(|e| RpcError::new(ErrorKind::Io, e));
-                let _ = tx.send(ServerMsg::Response { id, result });
+                result.map(|_| Response::Ok).map_err(|e| RpcError::new(ErrorKind::Io, e))
             });
-            return None;
         }
         if let Request::AiAgents = req {
-            let (root, tx) = (self.root.clone(), self.tx.clone());
-            thread::spawn(move || {
-                let _ = tx.send(ServerMsg::Response { id, result: Ok(Response::AiAgents(ai::agents(root.as_deref()))) });
-            });
-            return None;
+            let root = self.root.clone();
+            return self.later(id, move || Ok(Response::AiAgents(ai::agents(root.as_deref()))));
         }
         if let Request::Search { query, max } = req {
-            let Some(root) = self.root.clone() else {
-                return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
-            };
-            // Reads the whole project: off the reader thread.
-            let tx = self.tx.clone();
-            thread::spawn(move || {
-                let found = search::search(&root, &query, max as usize);
-                let _ = tx.send(ServerMsg::Response { id, result: Ok(Response::Search(found)) });
-            });
-            return None;
+            let root = self.root()?;
+            // Reads the whole project.
+            return self.later(id, move || Ok(Response::Search(search::search(&root, &query, max as usize))));
         }
         if matches!(req, Request::GitInfo | Request::GitDetails { .. } | Request::GitRun { .. } | Request::Diff { .. } | Request::WorkLand { .. } | Request::Review { .. } | Request::ReviewEdit { .. } | Request::Tree { .. }) {
-            let Some(root) = self.root.clone() else {
-                return Some(Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")));
-            };
+            let root = self.root()?;
             let tree_root = match &req {
-                Request::Tree { place, .. } => match self.place_dir(*place) {
-                    Ok(d) => d,
-                    Err(e) => return Some(Err(e)),
-                },
+                Request::Tree { place, .. } => self.place_dir(*place)?,
                 _ => root.clone(),
             };
             // `git` runs (a pull can take a while) or the project is walked: off the reader thread,
             // so input to terminals is never held up.
-            let tx = self.tx.clone();
             let ai = self.ai.clone();
             // Whose work an agents' diff shows, as it stands now.
             let targets = match &req {
@@ -436,8 +421,8 @@ impl State {
                 Request::Diff { scope: nib_proto::DiffScope::Since(id), .. } => ai::diff_since(&self.ai, *id).map(|t| vec![(*id, t)]).unwrap_or_default(),
                 _ => Vec::new(),
             };
-            thread::spawn(move || {
-                let resp = match req {
+            return self.later(id, move || {
+                Ok(match req {
                     Request::Tree { known, place, open } => {
                         Response::Tree(tree::snapshot(&tree_root, known, place == Place::Project, &open))
                     }
@@ -450,10 +435,7 @@ impl State {
                     Request::ReviewEdit { id: agent, op } => match ai::review_edit(&ai, agent, op) {
                         Ok((review, Some(message))) => Response::ReviewSent { review, message },
                         Ok((review, None)) => Response::Review(review),
-                        Err(e) => {
-                            let _ = tx.send(ServerMsg::Response { id, result: Err(RpcError::new(ErrorKind::BadRequest, e)) });
-                            return;
-                        }
+                        Err(e) => return Err(RpcError::new(ErrorKind::BadRequest, e)),
                     },
                     Request::WorkLand { id, message } => {
                         let (ok, output) = ai::land(&ai, id, &root, &message);
@@ -464,10 +446,8 @@ impl State {
                         Response::GitRan { ok, output }
                     }
                     _ => Response::Git(git::info(&root)),
-                };
-                let _ = tx.send(ServerMsg::Response { id, result: Ok(resp) });
+                })
             });
-            return None;
         }
         if matches!(req, Request::AiSkills { .. } | Request::AiHistory { .. } | Request::AiMailHistory { .. } | Request::AiHistoryLoad { .. } | Request::AiHistoryDelete { .. }) {
             if let Some(root) = self.root.clone() {
@@ -476,20 +456,17 @@ impl State {
                     let _ = tx.send(ServerMsg::Response { id, result: history_request(&root, req) });
                 });
                 if self.history.send(job).is_ok() {
-                    return None;
+                    return Ok(None);
                 }
-                return Some(Err(RpcError::new(ErrorKind::Io, "history worker gone")));
+                return Err(RpcError::new(ErrorKind::Io, "history worker gone"));
             }
         }
-        Some(self.handle_now(req))
+        self.handle_now(req).map(Some)
     }
 
     fn handle_now(&mut self, req: Request) -> Result<Response, RpcError> {
         if self.root.is_none() && !matches!(req, Request::Hello { .. } | Request::Shutdown) {
-            return Err(RpcError::new(
-                ErrorKind::BadRequest,
-                "Hello must be the first request",
-            ));
+            return Err(no_hello());
         }
         match req {
             Request::Hello { protocol, root, lsp, .. } => {
@@ -596,7 +573,7 @@ impl State {
             Request::AiHistoryDelete { id } => match self.root.as_deref().map(|r| history::delete(r, &id)) {
                 Some(Ok(())) => Ok(Response::Ok),
                 Some(Err(e)) => Err(RpcError::new(ErrorKind::Io, format!("deleting the conversation: {e}"))),
-                None => Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")),
+                None => Err(no_hello()),
             },
             Request::PtyOpen { cwd, cmd, cols, rows } => {
                 let cwd = self.resolve(&cwd);
@@ -623,7 +600,7 @@ impl State {
             }
             Request::App { op, user } => match &self.serve {
                 Some(serve) => serve.lock().unwrap().request(op, user).map(Response::Apps),
-                None => Err(RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")),
+                None => Err(no_hello()),
             },
             Request::Shutdown => Ok(Response::Ok),
         }
@@ -637,7 +614,7 @@ impl State {
     fn place_dir(&self, place: Place) -> Result<PathBuf, RpcError> {
         let missing = || RpcError::new(ErrorKind::NotFound, "no scratch / NIBDIR on this machine (see the daemon log)");
         match place {
-            Place::Project => self.root.clone().ok_or_else(|| RpcError::new(ErrorKind::BadRequest, "Hello must be the first request")),
+            Place::Project => self.root(),
             Place::Scratch => self.places.as_ref().map(|p| p.scratch.clone()).ok_or_else(missing),
             Place::Nibdir => self.places.as_ref().map(|p| p.nibdir.clone()).ok_or_else(missing),
         }

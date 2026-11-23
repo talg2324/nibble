@@ -14,7 +14,7 @@
 //! The message field takes `/` commands and `@` attachments (see `compose`).
 
 mod act;
-mod caret;
+pub(super) mod caret;
 mod compose;
 mod follow;
 mod history;
@@ -25,6 +25,7 @@ mod wait;
 
 use super::viewers::PreviewImage;
 use super::plan::{Outcome, Plan, PlanMsg};
+use super::line_input::LineInput;
 use super::{App, Focus, Message, Pending};
 use crate::links;
 use crate::math;
@@ -79,6 +80,13 @@ struct Turn {
     /// `None`: asked for, not here (yet), or not readable.
     images: HashMap<String, Option<PreviewImage>>,
     step: Option<Step>,
+}
+
+impl Turn {
+    /// A turn shown as written: no Markdown parsed, no step.
+    fn new(who: Who, text: String) -> Turn {
+        Turn { who, text, md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None }
+    }
 }
 
 /// One thing an agent did or is doing: a tool call of its harness.
@@ -242,10 +250,19 @@ impl Side {
     }
 }
 
+/// The tool an agent hands a plan over with, to approve (Claude Code's).
+const PLAN_TOOL: &str = "ExitPlanMode";
+
+/// Where a plan asked about is kept in `Chat::plans`: under the step that carried it, or the
+/// request when there is no step.
+fn plan_key(ask: &AiAsk) -> &String {
+    ask.step.as_ref().unwrap_or(&ask.request)
+}
+
 /// The plan in a step that hands one over to approve.
 fn plan_of(kind: &AiStepKind) -> Option<String> {
     let AiStepKind::Other { tool, input } = kind else { return None };
-    if tool != "ExitPlanMode" {
+    if tool != PLAN_TOOL {
         return None;
     }
     serde_json::from_str::<Value>(input).ok()?.get("plan")?.as_str().map(str::to_string)
@@ -274,8 +291,7 @@ impl Chat {
 
     /// The key of the plan it asks to have approved, if that is what it asks.
     pub(super) fn asked_plan(&self) -> Option<&String> {
-        let a = self.ask.as_ref().filter(|a| a.tool == "ExitPlanMode")?;
-        let key = a.step.as_ref().unwrap_or(&a.request);
+        let key = plan_key(self.ask.as_ref().filter(|a| a.tool == PLAN_TOOL)?);
         self.plans.contains_key(key).then_some(key)
     }
 
@@ -357,6 +373,11 @@ fn read_clipboard() -> Clip {
         }
     }
     windows_clipboard_image().map_or(Clip::Nothing, Clip::Image)
+}
+
+/// Read the clipboard for a paste in the panel; the answer is `Msg::Clip`.
+fn paste() -> Task<Message> {
+    Task::perform(async { read_clipboard() }, |c| Message::Ai(Msg::Clip(c)))
 }
 
 /// On WSL, the picture on the Windows clipboard (a Snipping Tool / Win+Shift+S snip): WSLg
@@ -448,7 +469,7 @@ pub struct Panel {
     /// Local models being loaded / unloaded (`AiWarm` is on its way).
     warming: std::collections::HashSet<String>,
     /// The Ollama model typed in the dropdown's pull field.
-    pull_input: String,
+    pull_input: LineInput,
     /// Keys go to the pull field (it was clicked), not the message.
     pull_focus: bool,
     /// The model pulling now (`AiPull` is on its way).
@@ -502,7 +523,7 @@ impl Default for Panel {
             setup: None,
             update: None,
             warming: Default::default(),
-            pull_input: String::new(),
+            pull_input: LineInput::default(),
             pull_focus: false,
             pulling: None,
             confirm_delete: None,
@@ -714,7 +735,6 @@ pub enum Msg {
     Focus,
     /// Choice `i` of the `/` / `@` menu was clicked.
     Suggest(usize),
-    Pasted(Option<String>),
     /// A picture file dropped on the chat, decoded (`drop.rs`).
     DroppedPic(Result<Pic, String>),
     /// A file or folder dropped on the chat: its `@` name and, for a file, its contents.
@@ -761,7 +781,8 @@ pub enum Msg {
     Accept(bool),
     /// Put that question away and show the agent's work in the diff tab.
     AcceptDiff,
-    /// Paste was pressed in the message box: what the clipboard held.
+    /// Paste was pressed in the panel (the message box, the pull field, a plan comment): what
+    /// the clipboard held.
     Clip(Clip),
     /// Take picture `i` off the message being written.
     DropImage(usize),
@@ -826,27 +847,29 @@ impl App {
     fn ai_send_answer(&mut self, allow: bool, message: Option<String>, answers: Vec<String>) {
         let (Some(ask), Session::Ready(id)) = (self.ai.ask.take(), &self.ai.session) else { return };
         let id = *id;
-        let plan = ask.tool == "ExitPlanMode";
+        let plan = ask.tool == PLAN_TOOL;
+        // Said no with no words: declined; with words: sent back to be revised.
+        let outcome = match (allow, &message) {
+            (true, _) => Outcome::Approved,
+            (false, None) => Outcome::Declined,
+            (false, Some(_)) => Outcome::Revise,
+        };
         let message = match message {
             None if !ask.questions.is_empty() => Some("The user chose not to answer.".to_string()),
             None if plan && !allow => Some("The user declined this plan. Don't carry it out, and don't hand in another one unasked: stop and wait for what they say next.".to_string()),
             m => m,
         };
         // The plan stays in the feed, folded, with what became of it and the comments sent.
-        if let Some(p) = plan.then(|| self.ai.plans.get_mut(ask.step.as_ref().unwrap_or(&ask.request))).flatten() {
+        if let Some(p) = plan.then(|| self.ai.plans.get_mut(plan_key(&ask))).flatten() {
             p.comments.cancel();
             p.sel = None;
             p.open = false;
-            p.outcome = Some(match (allow, &message) {
-                (true, _) => Outcome::Approved,
-                (false, Some(m)) if m.starts_with("The user declined") => Outcome::Declined,
-                (false, _) => Outcome::Revise,
-            });
+            p.outcome = Some(outcome);
         }
         if !answers.is_empty() {
             let one = ask.questions.len() == 1;
             let text = ask.questions.iter().zip(&answers).map(|(q, a)| if one { a.clone() } else { format!("{} → {a}", q.question) }).collect::<Vec<_>>().join("\n");
-            self.ai.turns.push(Turn { who: Who::User, md: markdown::Content::new(), text, math: Default::default(), images: Default::default(), step: None });
+            self.ai.turns.push(Turn::new(Who::User, text));
         }
         #[cfg(test)]
         self.ai.answered.push((allow, answers.clone()));
@@ -878,7 +901,7 @@ impl App {
         self.ai.input.clear();
         self.ai.back = 0;
         self.ai.anchor = None;
-        self.ai.turns.push(Turn { who: Who::User, md: markdown::Content::new(), text: said, math: Default::default(), images: Default::default(), step: None });
+        self.ai.turns.push(Turn::new(Who::User, said));
         self.ai_answer(false, Some(message));
         self.ai_scroll_to_end()
     }
@@ -915,7 +938,7 @@ impl App {
                 Key::Backspace => d.backspace(),
                 _ if vertical.is_some() && chord.shift && plain => p.step(vertical.unwrap(), true),
                 _ => match command {
-                    Some(Command::Paste) => return Some(iced::clipboard::read().map(|s| Message::Ai(Msg::Pasted(s)))),
+                    Some(Command::Paste) => return Some(paste()),
                     Some(c) if super::app_wide(c) => return Some(self.exec(c)),
                     _ if !held => d.insert(&text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect::<String>()),
                     _ => {}
@@ -1081,7 +1104,7 @@ impl App {
         c.finished = None;
         c.accepting = false;
         c.busy = true;
-        c.turns.push(Turn { who: Who::User, text: text.clone(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+        c.turns.push(Turn::new(Who::User, text.clone()));
         self.notify(ClientNotify::AiSend { id, text, attach: Vec::new(), images: Vec::new() });
     }
 
@@ -1142,7 +1165,7 @@ impl App {
                 self.focus = Focus::Ai;
             }
             Msg::Pull => {
-                let model = self.ai.pull_input.clone();
+                let model = self.ai.pull_input.to_string();
                 return self.ai_pull(model);
             }
             Msg::Delete(model) => return self.ai_delete(model),
@@ -1228,9 +1251,18 @@ impl App {
             Msg::Accept(yes) => return self.ai_accept(yes),
             Msg::AcceptDiff => return self.ai_accept_diff(),
             Msg::Clip(Clip::Text(s)) => {
-                self.ai.insert(&s.replace("\r\n", "\n"));
-                return self.ai_follow_caret();
+                let s = s.replace("\r\n", "\n");
+                if self.ai.pull_focus && self.ai.picking {
+                    self.ai.pull_input.insert(s.trim());
+                } else if let Some(d) = self.ai.asked_plan_mut().and_then(|p| p.comments.draft.as_mut()) {
+                    d.insert(&s);
+                } else {
+                    self.ai.insert(&s);
+                    return self.ai_follow_caret();
+                }
             }
+            // A picture goes on the message, not into the pull field or a comment.
+            Msg::Clip(Clip::Image(_)) if self.ai.pull_focus && self.ai.picking || self.ai.asked_plan().is_some_and(|k| self.ai.plans[k].comments.draft.is_some()) => {}
             Msg::Clip(Clip::Image(pic)) => {
                 self.focus = Focus::Ai;
                 self.ai.images.push(pic);
@@ -1276,17 +1308,6 @@ impl App {
             Msg::DropImage(i) => {
                 if i < self.ai.images.len() {
                     self.ai.images.remove(i);
-                }
-            }
-            Msg::Pasted(s) => {
-                if let Some(s) = s {
-                    if self.ai.pull_focus && self.ai.picking {
-                        self.ai.pull_input.push_str(s.trim());
-                    } else if let Some(d) = self.ai.asked_plan_mut().and_then(|p| p.comments.draft.as_mut()) {
-                        d.insert(&s);
-                    } else {
-                        self.ai.insert(&s.replace("\r\n", "\n"));
-                    }
                 }
             }
         }
@@ -1583,7 +1604,7 @@ impl App {
         // A cleared conversation is a new one, not the past one it was reopened from.
         ai.past = None;
         if let Some(q) = ai.queued.clone() {
-            ai.turns.push(Turn { who: Who::User, text: q.clone(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+            ai.turns.push(Turn::new(Who::User, q.clone()));
         }
         ai.busy = ai.queued.is_some();
         ai.reset_conversation();
@@ -2103,7 +2124,7 @@ impl App {
                 // A message sent while it worked (a steer) gets its own reply after the turn's end.
                 ai.busy = true;
                 if !ai.turns.last().is_some_and(|t| t.who == Who::Assistant) {
-                    ai.turns.push(Turn { who: Who::Assistant, text: String::new(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+                    ai.turns.push(Turn::new(Who::Assistant, String::new()));
                 }
                 let turn = ai.turns.last_mut().expect("pushed above");
                 turn.text.push_str(&t);
@@ -2144,12 +2165,9 @@ impl App {
                 };
                 let images = picture.iter().map(|p| (p.clone(), None)).collect();
                 ai.turns.push(Turn {
-                    who: Who::Step,
-                    text: String::new(),
-                    md: markdown::Content::new(),
-                    math: Default::default(),
                     images,
                     step: Some(Step { id: s.id, parent: s.parent, acts: act::of(&s.kind, &root), kind: s.kind, started: Instant::now(), done: None, background: false }),
+                    ..Turn::new(Who::Step, String::new())
                 });
                 if let Some(step) = self.ai.chats[self.ai.cur].turns.last().and_then(|t| t.step.as_ref()).map(step_copy) {
                     self.ai_follow_step(&step);
@@ -2181,7 +2199,7 @@ impl App {
             AiEvent::Work(w) => return self.diff_work(id, w),
             AiEvent::Mail(m) => {
                 let text = if m.incoming { format!("from {}: {}", m.from, m.text) } else { format!("to {}: {}", m.to, m.text) };
-                ai.turns.push(Turn { who: Who::Mail, text, md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+                ai.turns.push(Turn::new(Who::Mail, text));
                 // Once in the list for everyone: the sender's copy, or nib's own word.
                 if !m.incoming || m.from == "nib" {
                     ai.mailbox.push(m);
@@ -2196,8 +2214,8 @@ impl App {
                 ai.busy = true;
                 ai.form = question::Form::new(&a.questions);
                 // A plan: kept under its step, and fresh (the step's copy may be clipped).
-                if a.tool == "ExitPlanMode" {
-                    let key = a.step.clone().unwrap_or_else(|| a.request.clone());
+                if a.tool == PLAN_TOOL {
+                    let key = plan_key(&a).clone();
                     if ai.plans.get(&key).is_none_or(|p| p.text != a.what || p.outcome.is_some()) {
                         ai.plans.insert(key, Plan::new(&a.what));
                     }
@@ -2210,7 +2228,7 @@ impl App {
                 }
             }
             AiEvent::Finished(f) => {
-                ai.turns.push(Turn { who: Who::Done, text: f.text(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+                ai.turns.push(Turn::new(Who::Done, f.text()));
                 ai.finished = Some(f);
             }
             AiEvent::Mode(m) => {
@@ -2288,7 +2306,7 @@ impl App {
         }
         if self.ai.ask.is_some() {
             self.ai.input.clear();
-            self.ai.turns.push(Turn { who: Who::User, md: markdown::Content::new(), text: text.clone(), math: Default::default(), images: Default::default(), step: None });
+            self.ai.turns.push(Turn::new(Who::User, text.clone()));
             self.ai_answer(false, Some(text));
             return self.ai_scroll_to_end();
         }
@@ -2320,7 +2338,7 @@ impl App {
             1 => format!("{text}\n[1 image]").trim().to_string(),
             n => format!("{text}\n[{n} images]").trim().to_string(),
         };
-        self.ai.turns.push(Turn { who: Who::User, md: markdown::Content::new(), text: shown, math: Default::default(), images: Default::default(), step: None });
+        self.ai.turns.push(Turn::new(Who::User, shown));
         self.ai.busy = true;
         // Told to keep going: it isn't done any more.
         self.ai.finished = None;
@@ -2423,16 +2441,16 @@ impl App {
             match chord.key {
                 Key::Esc => self.ai.pull_focus = false,
                 Key::Enter => return self.on_ai_msg(Msg::Pull),
-                Key::Backspace if held || chord.alt => self.ai.pull_input.clear(),
-                Key::Backspace => {
-                    self.ai.pull_input.pop();
+                _ => {
+                    // Model names have no spaces.
+                    let typed: Option<String> = text.map(|t| t.chars().filter(|c| !c.is_whitespace()).collect());
+                    match self.keymap.lookup(&chord) {
+                        Some(Command::Paste) => return paste(),
+                        _ if self.ai.pull_input.key(&chord, typed.as_deref()).handled() => {}
+                        Some(c) if super::app_wide(c) => return self.exec(c),
+                        _ => {}
+                    }
                 }
-                _ => match self.keymap.lookup(&chord) {
-                    Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Ai(Msg::Pasted(s))),
-                    Some(c) if super::app_wide(c) => return self.exec(c),
-                    _ if !held => self.ai.pull_input.extend(text.unwrap_or_default().chars().filter(|c| !c.is_control() && !c.is_whitespace())),
-                    _ => {}
-                },
             }
             return Task::none();
         }
@@ -2536,7 +2554,7 @@ impl App {
                         self.ai.delete_selection();
                         return iced::clipboard::write(t);
                     }
-                    Some(Command::Paste) => return Task::perform(async { read_clipboard() }, |c| Message::Ai(Msg::Clip(c))),
+                    Some(Command::Paste) => return paste(),
                     Some(c) if super::app_wide(c) => return self.exec(c),
                     _ if !held => {
                         let typed: String = text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
@@ -2910,10 +2928,10 @@ impl App {
         .align_y(Alignment::Center);
 
         let focused = ai.pull_focus;
-        let shown = match (ai.pull_input.is_empty(), focused) {
-            (true, false) => text("qwen3:8b").size(12).color(dim),
-            (_, true) => text(format!("{}▏", ai.pull_input)).size(12).color(fg),
-            (false, false) => text(ai.pull_input.clone()).size(12).color(fg),
+        let shown: Element<'_, Message> = match (ai.pull_input.is_empty(), focused) {
+            (true, false) => text("qwen3:8b").size(12).color(dim).into(),
+            (_, true) => iced::widget::rich_text(ai.pull_input.spans(fg, fg)).size(12).into(),
+            (false, false) => text(ai.pull_input.to_string()).size(12).color(fg).into(),
         };
         let field = button(shown).width(Length::Fill).padding([4, 8]).on_press(Message::Ai(Msg::PullFocus)).style(
             move |_: &iced::Theme, status: button::Status| button::Style {
@@ -3464,8 +3482,8 @@ mod tests {
         let input = json!({ "plan": PLAN }).to_string();
         let ask_plan = |a: &mut App, n: u32| {
             let id = format!("t{n}");
-            event(a, 7, step(&id, AiStepKind::Other { tool: "ExitPlanMode".into(), input: input.clone() }));
-            event(a, 7, AiEvent::Ask(AiAsk { request: format!("r{n}"), step: Some(id), tool: "ExitPlanMode".into(), what: PLAN.into(), questions: vec![] }));
+            event(a, 7, step(&id, AiStepKind::Other { tool: PLAN_TOOL.into(), input: input.clone() }));
+            event(a, 7, AiEvent::Ask(AiAsk { request: format!("r{n}"), step: Some(id), tool: PLAN_TOOL.into(), what: PLAN.into(), questions: vec![] }));
         };
         // A: Enter approves.
         ask_plan(&mut a, 1);

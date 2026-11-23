@@ -21,7 +21,7 @@ const LOAD: Duration = Duration::from_secs(600);
 const START: Duration = Duration::from_secs(20);
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    nib_proto::path::home_dir()
 }
 
 /// Where Ollama keeps its models: `$OLLAMA_MODELS`, the user's, or a Linux service install's.
@@ -108,6 +108,22 @@ fn manifests_in(dirs: &[PathBuf]) -> HashMap<String, PathBuf> {
 pub fn name(model: &str) -> String {
     let tagged = model.rsplit('/').next().is_some_and(|last| last.contains(':'));
     if tagged { model.to_string() } else { format!("{model}:latest") }
+}
+
+/// The model of an OpenCode model id (`provider/model`: `ollama/qwen3:8b`), as Ollama is asked
+/// for it: whatever the user named the provider, it is dropped. What starts with a registry's
+/// host (`hf.co/user/model:q4`, a name Ollama takes as it is) or has no `/` is given back whole.
+pub fn model_of(id: &str) -> &str {
+    let id = id.trim();
+    match id.split_once('/') {
+        Some((first, rest)) if !first.contains(['.', ':']) => rest,
+        _ => id,
+    }
+}
+
+/// [`name`] of [`model_of`]: the name Ollama lists an OpenCode model id's weights under.
+pub fn name_of(id: &str) -> String {
+    name(model_of(id))
 }
 
 /// Which GPUs a local model runs on. Ollama picks its GPUs when its server starts, so each
@@ -330,7 +346,8 @@ fn http_lines(addr: SocketAddr, method: &str, path: &str, body: &str, idle: Dura
     Ok((status, if status == 200 { String::new() } else { String::from_utf8_lossy(&all).into_owned() }))
 }
 
-/// A model name as `ollama pull` takes it: OpenCode's `ollama/` in front is dropped.
+/// A model name as `ollama pull` takes it: OpenCode's `ollama/` in front is dropped. Only that
+/// provider, unlike [`model_of`]: here `someone/tiny` is a model of Ollama's, not a provider's.
 fn bare(model: &str) -> &str {
     model.trim().strip_prefix("ollama/").unwrap_or(model.trim())
 }
@@ -649,6 +666,20 @@ mod tests {
         assert_eq!((size("llama4:latest"), size("someone/tiny:q4"), size("qwen3.8:27b-mlx")), (Some(111), Some(101), Some(0)));
         assert_eq!(disk, 111);
         assert_eq!(name("qwen3.8:27b-mlx"), "qwen3.8:27b-mlx");
+    }
+
+    #[test]
+    fn model_names() {
+        assert_eq!(name_of("ollama/qwen3:8b"), "qwen3:8b");
+        assert_eq!(name_of("qwen3:8b"), "qwen3:8b");
+        assert_eq!(name_of("qwen3"), "qwen3:latest");
+        assert_eq!(name_of("ollama/qwen3"), "qwen3:latest");
+        assert_eq!(name_of("hf.co/user/model:q4"), "hf.co/user/model:q4");
+        assert_eq!(name_of("ollama/hf.co/user/model:q4"), "hf.co/user/model:q4");
+        assert_eq!(name_of("hf.co/user/model"), "hf.co/user/model:latest");
+        assert_eq!(model_of("mine/qwen3:8b"), "qwen3:8b");
+        assert_eq!(bare(" ollama/qwen3:8b "), "qwen3:8b");
+        assert_eq!(bare("someone/tiny:q4"), "someone/tiny:q4");
     }
 
     #[test]

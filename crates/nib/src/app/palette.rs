@@ -2,9 +2,10 @@
 //! keys beside it; typing narrows the list, Enter runs the one chosen. The way to reach the
 //! commands with no key, and to learn the keys of the others.
 
+use super::line_input::LineInput;
 use super::{App, Message};
-use iced::widget::{button, column, container, rich_text, row, space, span, text};
-use iced::{Alignment, Border, Color, Element, Font, Length, Task};
+use iced::widget::{button, column, container, rich_text, row, space, text};
+use iced::{Alignment, Border, Color, Element, Length, Task};
 use nib_editor::keymap::{Key, KeyChord};
 use nib_editor::Command;
 
@@ -13,7 +14,7 @@ const ROWS: usize = 12;
 
 #[derive(Debug, Default)]
 pub struct Palette {
-    query: String,
+    query: LineInput,
     sel: usize,
 }
 
@@ -57,7 +58,6 @@ impl App {
     }
 
     pub(super) fn palette_key(&mut self, chord: KeyChord, text: Option<String>) -> Task<Message> {
-        let held = chord.ctrl || chord.logo;
         let n = self.palette_items().len();
         let Some(p) = self.palette.as_mut() else { return Task::none() };
         match chord.key {
@@ -72,24 +72,13 @@ impl App {
                     return self.on_palette_msg(Msg::Run(c));
                 }
             }
-            Key::Backspace if held || chord.alt => {
-                p.query.clear();
-                p.sel = 0;
-            }
-            Key::Backspace => {
-                p.query.pop();
-                p.sel = 0;
-            }
             // Its own key again closes it.
             _ if self.keymap.lookup(&chord) == Some(Command::CommandPalette) => self.palette = None,
-            _ if !held => {
-                let typed: String = text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
-                if !typed.is_empty() {
-                    p.query.push_str(&typed);
+            _ => {
+                if p.query.key(&chord, text.as_deref()).changed() {
                     p.sel = 0;
                 }
             }
-            _ => {}
         }
         Task::none()
     }
@@ -103,7 +92,7 @@ impl App {
             .spacing(8)
             .align_y(Alignment::Center)
             .padding([2, 10]);
-        let typed: [iced::widget::text::Span<'_, (), Font>; 2] = [span(p.query.as_str()).color(fg), span("▏").color(accent)];
+        let typed = p.query.spans(fg, accent);
         let field = container(rich_text(typed).font(self.face.font).size(self.face.size).width(Length::Fill))
             .padding([5, 8])
             .width(Length::Fill)

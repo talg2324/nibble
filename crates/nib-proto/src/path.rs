@@ -49,6 +49,30 @@ pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
 }
 
+/// `~` and `~/x` (`~\x` on Windows) in the user's home; anything else as it is.
+pub fn expand_home(p: &str) -> PathBuf {
+    if p == "~" || p.starts_with("~/") || (cfg!(windows) && p.starts_with("~\\")) {
+        if let Some(home) = home_dir() {
+            return home.join(p[1..].trim_start_matches(['/', '\\']));
+        }
+    }
+    PathBuf::from(p)
+}
+
+/// nib's cache folder on this machine (logs, the GPU choice, grammars being built, the web
+/// tab's browser profile): `$XDG_CACHE_HOME/nib`, `~/.cache/nib`, `%LOCALAPPDATA%\nib`, else
+/// the temp folder's `nib`. (nibd's own places, `nibd::places`, are its business.)
+pub fn nib_cache_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        // `HOME` only (not `USERPROFILE`): on Windows the cache is in `%LOCALAPPDATA%`.
+        .or_else(|| std::env::var_os("HOME").filter(|h| !h.is_empty()).map(|h| PathBuf::from(h).join(".cache")))
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("nib")
+}
+
 /// Absolute in either style: `/x`, `C:/x`, `C:\x`, `\\server\share`.
 pub fn is_abs(p: &str) -> bool {
     let b = p.as_bytes();

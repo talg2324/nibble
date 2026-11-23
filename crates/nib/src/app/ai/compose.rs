@@ -553,7 +553,7 @@ impl App {
 
     /// A note in the transcript (not from either side): a compaction.
     pub(super) fn ai_note(&mut self, text: String) {
-        self.ai.turns.push(Turn { who: Who::Note, text, md: iced::widget::markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+        self.ai.turns.push(Turn::new(Who::Note, text));
     }
 }
 

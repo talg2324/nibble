@@ -462,7 +462,7 @@ impl App {
                 // It couldn't be frozen and was interrupted instead.
                 if !marked {
                     c.busy = true;
-                    c.turns.push(Turn { who: Who::Note, text: "Paused by you; told to continue.".into(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
+                    c.turns.push(Turn::new(Who::Note, "Paused by you; told to continue.".into()));
                     self.notify(ClientNotify::AiSend { id, text: "continue".into(), attach: Vec::new(), images: Vec::new() });
                 }
                 continue;
@@ -1399,7 +1399,7 @@ impl App {
         } else if let Some(ask) = &ai.ask {
             let warn = th.warn;
             let title = match ask.tool.as_str() {
-                "ExitPlanMode" => "Plan to approve".to_string(),
+                super::PLAN_TOOL => "Plan to approve".to_string(),
                 tool => format!("{} wants to use {tool}", self.ai_name()),
             };
             let mut card = column![text(title).size(12).color(warn), text(ask.what.as_str()).size(12).font(self.face.font).color(fg)].spacing(6);
