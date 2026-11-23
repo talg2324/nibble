@@ -386,6 +386,7 @@ fn app_wide(c: Command) -> bool {
                 | FontReset
                 | OpenSettings
                 | KeyboardShortcuts
+                | OpenLanguages
                 | ToggleBeginnerMode
                 | ToggleFullscreen
                 | TogglePreview
@@ -525,6 +526,8 @@ pub struct Init {
     pub beginner_mode: bool,
     /// `[editor] blame`.
     pub blame: bool,
+    /// Open Settings → Languages on startup (`[editor] languages_offered` not set yet).
+    pub offer_languages: bool,
     pub theme_cfg: ThemeConfig,
     pub launch: crate::Launch,
     pub bench: bool,
@@ -555,6 +558,7 @@ impl App {
             line_height,
             beginner_mode,
             blame,
+            offer_languages,
             theme_cfg,
             launch,
             bench,
@@ -636,6 +640,9 @@ impl App {
             palette: None,
         };
         app.seed_window(&window);
+        if offer_languages && !headless {
+            app.offer_languages();
+        }
         let mut t = Task::none();
         for w in warnings {
             t = app.flash_warn(w);
@@ -1815,6 +1822,7 @@ impl App {
             }
             OpenSettings => return self.open_settings(settings::Page::Appearance),
             KeyboardShortcuts => return self.open_settings(settings::Page::Shortcuts),
+            OpenLanguages => return self.open_settings(settings::Page::Languages),
             ToggleBeginnerMode => return self.toggle_beginner(!self.beginner),
             ToggleFullscreen => return self.set_fullscreen(!self.settings.window.fullscreen),
             NextTab | PrevTab => {
@@ -2576,6 +2584,7 @@ mod tests {
             line_height: 1.4,
             beginner_mode: false,
             blame: true,
+            offer_languages: false,
             theme_cfg: Default::default(),
             lsp: vec![],
             ai: Default::default(),

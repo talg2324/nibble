@@ -6,6 +6,9 @@
 #                                                   .skills/, LICENSE, README.md
 #   scripts/package.sh daemon <triple> <version>   dist/daemons/<triple>/  -> nibd-<version>-<triple>.tar.gz:
 #                                                   nibd, BUILD_INFO, LICENSE
+#   scripts/package.sh grammars <triple> <version> dist/grammars/<triple>/ -> nib-grammars-<version>-<triple>.tar.gz
+#                                                   (all platforms): what `nib grammar build` wrote;
+#                                                   `nib grammar add` downloads it
 #
 # Each archive holds one top folder named like the archive. The Linux daemons are not in the client
 # archives: the installer fetches them when the user wants SSH / WSL remotes, into
@@ -21,14 +24,15 @@ done
 ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
 cd "$ROOT"
 
-[[ $# -eq 3 ]] || { sed -n '2,13p' "$0"; exit 1; }
+[[ $# -eq 3 ]] || { sed -n '2,16p' "$0"; exit 1; }
 what="$1" triple="$2" version="$3"
 ext=""; [[ "$triple" == *windows* ]] && ext=".exe"
 
 case "$what" in
   client) from="dist/$triple"; name="nibble-$version-$triple"; files=("nib$ext" "nibd$ext" BUILD_INFO .skills) ;;
   daemon) from="dist/daemons/$triple"; name="nibd-$version-$triple"; files=(nibd BUILD_INFO) ;;
-  *) sed -n '2,13p' "$0"; exit 1 ;;
+  grammars) from="dist/grammars/$triple"; name="nib-grammars-$version-$triple"; files=(manifest.toml grammars queries) ;;
+  *) sed -n '2,16p' "$0"; exit 1 ;;
 esac
 
 stage="dist/release/stage/$name"
@@ -37,11 +41,11 @@ for f in "${files[@]}"; do
   [[ -e "$from/$f" ]] || { echo "package: $from/$f is missing (run scripts/build.sh first)" >&2; exit 1; }
   cp -R "$from/$f" "$stage/"
 done
-cp LICENSE "$stage/"
+[[ "$what" != grammars ]] && cp LICENSE "$stage/"
 [[ "$what" == client ]] && cp README.md "$stage/"
 
 cd dist/release/stage
-if [[ "$triple" == *windows* ]]; then
+if [[ "$triple" == *windows* && "$what" != grammars ]]; then
   out="$name.zip"; rm -f "../$out"
   if command -v 7z >/dev/null; then 7z a -tzip -bso0 "../$out" "$name"; else zip -qr "../$out" "$name"; fi
 else

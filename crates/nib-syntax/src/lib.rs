@@ -144,9 +144,6 @@ macro_rules! q {
 /// Queries compiled into the binary.
 fn embedded(lang: &str, file: &str) -> Option<&'static str> {
     Some(match (lang, file) {
-        ("python", "highlights.scm") => q!("python", "highlights.scm"),
-        ("python", "injections.scm") => q!("python", "injections.scm"),
-        ("python", "locals.scm") => q!("python", "locals.scm"),
         ("bash", "highlights.scm") => q!("bash", "highlights.scm"),
         ("bash", "injections.scm") => q!("bash", "injections.scm"),
         ("json", "highlights.scm") => q!("json", "highlights.scm"),
@@ -205,7 +202,7 @@ fn resolve_scope(capture: &str) -> Option<Highlight> {
 /// Whether an injections query can never inject anything here: every language it names is a
 /// fixed `#set! injection.language "X"` that no language in `known` answers to. tree-house runs
 /// the query over the whole file on every edit and then drops each match whose language it can't
-/// find, so such a query costs time and colours nothing (Python's only injects `comment`).
+/// find, so such a query costs time and colours nothing (Bash's injects only `comment`, `awk` and `regex`).
 fn injects_nothing(query: &str, known: &dyn Fn(&str) -> bool) -> bool {
     // Languages picked from the text (a Markdown fence's tag, a file name, a shebang) or the
     // same language again: can't be ruled out.
@@ -248,17 +245,9 @@ struct Builtin {
 }
 
 /// The languages compiled into nib.
-pub const BUILTIN_LANGUAGES: &[&str] = &["python", "bash", "json", "yaml", "toml", "markdown", "html"];
+pub const BUILTIN_LANGUAGES: &[&str] = &["bash", "json", "yaml", "toml", "markdown", "html"];
 
 const BUILTINS: &[Builtin] = &[
-    Builtin {
-        name: "python",
-        grammar: tree_sitter_python::LANGUAGE,
-        aliases: &["py", "python3"],
-        extensions: &["py", "pyi", "pyw"],
-        filenames: &[],
-        shebangs: &["python", "python3", "uv"],
-    },
     Builtin {
         name: "bash",
         grammar: tree_sitter_bash::LANGUAGE,
@@ -579,13 +568,6 @@ pub struct LanguageInfo {
 
 pub const LANGUAGES: &[LanguageInfo] = &[
     LanguageInfo {
-        name: "python",
-        sample_path: "sample.py",
-        sample: "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Circle:\n    \"\"\"A circle in the plane.\"\"\"\n    radius: float = 1.0\n\n    def area(self) -> float:\n        # πr²\n        return math.pi * self.radius ** 2\n\n\nfor r in range(3):\n    if r and r % 2 == 0:\n        print(f\"r={r}\", Circle(r).area(), None, True)\n",
-        sample_word: "area",
-        highlights: &[q!("python", "highlights.scm")],
-    },
-    LanguageInfo {
         name: "bash",
         sample_path: "sample.sh",
         sample: "#!/usr/bin/env bash\nset -euo pipefail\n\n# Back up every log file\nreadonly DEST=\"${HOME}/backup\"\n\nbackup() {\n    local src=$1\n    cp -- \"$src\" \"$DEST/\" && echo \"copied $src\"\n}\n\nfor f in /var/log/*.log; do\n    if [[ -f $f ]]; then\n        backup \"$f\" || exit 1\n    fi\ndone\n",
@@ -792,33 +774,6 @@ mod tests {
     }
 
     #[test]
-    fn python_highlights() {
-        let src =
-            "import os\n\ndef f(x: int) -> str:\n    \"\"\"doc\"\"\"\n    return str(x + 1)  # c\n";
-        let rope = Rope::from(src);
-        let reg = registry();
-        let lang = reg.detect(Path::new("a.py"), rope.slice(..)).unwrap();
-        assert_eq!(reg.name(lang), "python");
-        let syn = Syntax::new(&rope, lang).unwrap();
-        assert!(scopes_at(src, "import", &syn, &rope)
-            .unwrap()
-            .starts_with("keyword"));
-        assert!(scopes_at(src, "def", &syn, &rope)
-            .unwrap()
-            .starts_with("keyword"));
-        assert_eq!(scopes_at(src, "f(x", &syn, &rope), Some("function"));
-        assert!(scopes_at(src, "int", &syn, &rope)
-            .unwrap()
-            .starts_with("type"));
-        assert!(scopes_at(src, "# c", &syn, &rope)
-            .unwrap()
-            .starts_with("comment"));
-        assert!(scopes_at(src, "1)", &syn, &rope)
-            .unwrap()
-            .starts_with("constant.numeric"));
-    }
-
-    #[test]
     fn bash_and_shebang() {
         let src = "#!/usr/bin/env bash\nfor i in 1 2; do echo \"$i\"; done\n";
         let rope = Rope::from(src);
@@ -899,16 +854,15 @@ mod tests {
         check(
             "README.md",
             "markdown",
-            "# Title\n\nSome **bold** and `code` and [text](http://x).\n\n```sh\nfor i in 1; do :; done\n```\n\n```python\ndef f(): pass\n```\n",
+            "# Title\n\nSome **bold** and `code` and [text](http://x).\n\n```sh\nfor i in 1; do :; done\n```\n",
             &[
                 ("Title", "markup.heading"),
                 ("bold", "markup.bold"),
                 ("code", "markup.raw"),
                 ("text", "markup.link.text"),
                 ("http", "markup.link.url"),
-                // Fenced blocks are highlighted by the injected language, including via an alias.
+                // Fenced blocks are highlighted by the injected language, via an alias (`sh`).
                 ("for", "keyword"),
-                ("def", "keyword"),
             ],
         );
     }
@@ -925,12 +879,12 @@ mod tests {
 
     #[test]
     fn incremental_matches_full_reparse() {
-        let src = "x = 1\ny = 'a'\n";
+        let src = "x=1\ny='a'\n";
         let mut rope = Rope::from(src);
-        let lang = registry().by_name("python").unwrap();
+        let lang = registry().by_name("bash").unwrap();
         let mut syn = Syntax::new(&rope, lang).unwrap();
         let old = rope.clone();
-        let tx = Transaction::insert(&rope, &Selection::point(6), "def g():\n    pass\n".into());
+        let tx = Transaction::insert(&rope, &Selection::point(4), "g() {\n    :\n}\n".into());
         tx.apply(&mut rope);
         syn.update(&old, &rope, tx.changes()).unwrap();
         let fresh = Syntax::new(&rope, lang).unwrap();
@@ -940,10 +894,6 @@ mod tests {
 
     #[test]
     fn language_scopes() {
-        let py = LANGUAGES.iter().find(|l| l.name == "python").unwrap().scopes();
-        for s in ["keyword", "string", "comment", "function", "constant.numeric"] {
-            assert!(py.contains(&s), "python missing {s}: {py:?}");
-        }
         let sh = LANGUAGES.iter().find(|l| l.name == "bash").unwrap().scopes();
         assert!(sh.contains(&"comment") && sh.contains(&"string"), "{sh:?}");
         // Every bundled language has a registry entry with the same name, its sample is detected

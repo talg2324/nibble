@@ -4,7 +4,7 @@
 //! Location: `$NIB_CONFIG`, else `$XDG_CONFIG_HOME/nib/config.toml`,
 //! else `~/.config/nib/config.toml` (also on macOS), `%APPDATA%\nib\config.toml` on Windows.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -35,9 +35,9 @@ pub struct Config {
 }
 
 /// `[languages.<name>]`: a language whose grammar is a shared library in `grammars/` beside
-/// config.toml, with queries in `queries/<name>/`. A built-in name (python, bash, json, yaml,
-/// toml, markdown, html) replaces the built-in.
-#[derive(Debug, Default, Clone, Deserialize)]
+/// config.toml, with queries in `queries/<name>/`. A built-in name (bash, json, yaml, toml,
+/// markdown, html) replaces the built-in.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageEntry {
     /// `grammars/<grammar>.{dylib,so,dll}` and its `tree_sitter_<grammar>` symbol. Default: the name.
@@ -189,6 +189,9 @@ pub struct EditorConfig {
     /// selection's last line.
     #[serde(default = "default_true")]
     pub blame: bool,
+    /// Settings → Languages was shown once on startup (set when it closes).
+    #[serde(default)]
+    pub languages_offered: bool,
 }
 
 fn default_true() -> bool {
@@ -221,6 +224,7 @@ impl Default for EditorConfig {
             line_height: default_line_height(),
             beginner_mode: false,
             blame: true,
+            languages_offered: false,
         }
     }
 }
@@ -700,6 +704,14 @@ impl Config {
                 }
             }
             langs.insert(name, toml_edit::Item::Table(t));
+            Ok(())
+        })
+    }
+
+    /// `[editor] languages_offered = true`: the first-run Languages page was shown.
+    pub fn mark_languages_offered() -> anyhow::Result<PathBuf> {
+        Self::edit(|doc| {
+            table(doc, "editor")["languages_offered"] = toml_edit::value(true);
             Ok(())
         })
     }

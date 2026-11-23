@@ -1,6 +1,7 @@
 # A tag vX.Y on a commit of main publishes GitHub Release vX.Y with:
 #   nibble-vX.Y-<triple>.tar.gz / .zip   the client (nib + nibd + .skills) for macOS, Linux, Windows
 #   nibd-vX.Y-<musl triple>.tar.gz       the static Linux daemon for SSH / WSL remotes (any distro)
+#   nib-grammars-vX.Y-<triple>.tar.gz    prebuilt grammars `nib grammar add` downloads (no compiler)
 #   install.sh, install.ps1              when the tagged commit has scripts/install.{sh,ps1}
 #   SHA256SUMS
 # The tag must match the workspace version in Cargo.toml (v0.4 <-> 0.4.0).
@@ -100,6 +101,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/build.sh client
       - run: scripts/package.sh client ${{ matrix.target }} ${{ needs.check.outputs.version }}
+      # The languages nib offers on first run, compiled for this platform (Windows: clang, which
+      # the runner has).
+      - run: |
+          nib="dist/${{ matrix.target }}/nib"; [[ -f "$nib.exe" ]] && nib="$nib.exe"
+          "$nib" grammar build "dist/grammars/${{ matrix.target }}"
+      - run: scripts/package.sh grammars ${{ matrix.target }} ${{ needs.check.outputs.version }}
       - uses: actions/upload-artifact@v4
         with:
           name: nibble-${{ matrix.target }}

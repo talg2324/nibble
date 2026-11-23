@@ -116,6 +116,7 @@ commands! {
     OpenFolder      => "open_folder",       "File",      "Open a folder as the project (browse this machine)";
     OpenSettings    => "open_settings",     "Settings",  "Settings: Appearance";
     KeyboardShortcuts => "keyboard_shortcuts", "Settings", "Settings: Keyboard shortcuts";
+    OpenLanguages   => "open_languages",    "Settings",  "Settings: Languages (add syntax highlighting)";
     ToggleBeginnerMode => "toggle_beginner_mode", "Settings", "Beginner mode (shortcut cheat sheet)";
     ToggleFullscreen => "toggle_fullscreen",  "Window",    "Fullscreen";
 }

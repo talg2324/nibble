@@ -1,30 +1,52 @@
 //! `nib grammar`: add languages to nib without rebuilding it.
 //!
-//! `nib grammar add rust` looks the language up in Helix's `languages.toml` at the tag nib's
-//! queries come from (`nib_syntax::HELIX_TAG`), fetches its grammar at the pinned commit,
-//! compiles it with the system C compiler into `<config dir>/grammars/`, copies Helix's queries
-//! for it into `<config dir>/queries/`, checks that the two load together, and only then writes
-//! `[languages.rust]` into config.toml. Sources are cached in `~/.cache/nib/`.
+//! `nib grammar add rust` first looks for rust in the grammar bundle of nib's own release
+//! (`nib-grammars-<version>-<triple>.tar.gz`, built by CI with `nib grammar build`, checked
+//! against the release's `SHA256SUMS`, cached in `~/.cache/nib/`): no compiler or git needed.
+//! A language the bundle doesn't have, or no bundle (a dev build, offline), is built from
+//! source: the language is looked up in Helix's `languages.toml` at the tag nib's queries come
+//! from (`nib_syntax::HELIX_TAG`), its grammar fetched at the pinned commit and compiled with the
+//! system C compiler. Either way the grammar goes into `<config dir>/grammars/`, its queries
+//! into `<config dir>/queries/`, the two are checked to load together, and only then is
+//! `[languages.rust]` written into config.toml.
 
 use anyhow::{anyhow, bail, Context, Result};
 use nib_editor::config::LanguageEntry;
 use nib_editor::Config;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const USAGE: &str = "\
-usage: nib grammar add LANGUAGE...     fetch, compile and turn on languages (rust, go, javascript, …)
+usage: nib grammar add [--from-source | --from DIR] LANGUAGE...
+                                       turn on languages (rust, go, javascript, …): from nib's
+                                       prebuilt bundle when it has them, else compiled from source
        nib grammar rm LANGUAGE...      turn them off and delete their files (also: remove)
        nib grammar list [--available]  languages nib highlights; --available: all it can add
+       nib grammar build DIR [LANGUAGE...]
+                                       compile a bundle into DIR (what releases ship; default:
+                                       the languages nib offers on first run)
 
-Grammars are compiled with `cc` (or $CC; C++ scanners with `c++` / $CXX) and need git.
-Changes apply to nib windows opened afterwards.";
+--from DIR uses an unpacked bundle instead of downloading one. Compiling needs git and `cc`
+(or $CC; C++ scanners `c++` / $CXX; on Windows `clang`). Changes apply to nib windows opened
+afterwards.";
+
+/// Languages nib offers to add on first run (Settings → Languages). Each release prebuilds these.
+pub const OFFERED: &[&str] = &["python", "rust", "go", "zig", "java", "javascript"];
+
+/// Where releases live; `NIB_GRAMMARS_URL` replaces it (a mirror, or a test server).
+const RELEASES: &str = "https://github.com/talg2324/nibble/releases/download";
 
 pub fn grammar_main(args: &[String]) -> i32 {
     let r = match args.first().map(String::as_str) {
-        Some("add") if args.len() > 1 => add_all(&args[1..]),
+        Some("add") if args.len() > 1 => add_cmd(&args[1..]),
         Some("rm" | "remove") if args.len() > 1 => remove_all(&args[1..]),
         Some("list") => list(args.get(1).is_some_and(|a| a == "--available")),
+        Some("build") if args.len() > 1 => {
+            let offered: Vec<String> = OFFERED.iter().map(|s| s.to_string()).collect();
+            build(Path::new(&args[1]), if args.len() > 2 { &args[2..] } else { &offered })
+        }
         _ => {
             eprintln!("{USAGE}");
             return 2;
@@ -37,6 +59,23 @@ pub fn grammar_main(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn add_cmd(args: &[String]) -> Result<()> {
+    let mut source = Source::Release;
+    let mut langs = vec![];
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--from-source" => source = Source::Compile,
+            "--from" => source = Source::Dir(it.next().context("--from needs a directory")?.into()),
+            _ => langs.push(a.clone()),
+        }
+    }
+    if langs.is_empty() {
+        bail!("no language given");
+    }
+    add_all(&langs, &source)
 }
 
 /// The `[languages]` entries as nib-syntax takes them.
@@ -83,7 +122,7 @@ fn run(cmd: &mut Command) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 
 /// `languages.toml` and `runtime/queries/` of Helix at `HELIX_TAG` (a sparse clone, ~5 MB).
-fn helix() -> Result<PathBuf> {
+fn helix_dir() -> Result<PathBuf> {
     let dir = cache_dir()?.join(format!("helix-{}", nib_syntax::HELIX_TAG));
     if dir.join("languages.toml").is_file() && dir.join("runtime/queries").is_dir() {
         return Ok(dir);
@@ -163,16 +202,45 @@ fn file_types(l: &toml::Table) -> (Vec<String>, Vec<String>) {
 // add
 // ---------------------------------------------------------------------------------------------
 
-fn add_all(langs: &[String]) -> Result<()> {
-    if cfg!(windows) {
-        bail!("compiling grammars isn't supported on Windows yet");
-    }
-    let helix = helix()?;
-    let catalog = Catalog::load(&helix)?;
+enum Source {
+    /// The bundle of nib's release, downloaded; compile what it lacks.
+    Release,
+    /// An unpacked bundle; compile what it lacks.
+    Dir(PathBuf),
+    /// Compile everything.
+    Compile,
+}
+
+fn add_all(langs: &[String], source: &Source) -> Result<()> {
     let dir = config_dir()?;
+    let bundle = match source {
+        Source::Compile => None,
+        Source::Dir(d) => Some(Bundle::open(d)?),
+        Source::Release => match Bundle::download() {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("no prebuilt grammars ({e:#}); compiling instead");
+                None
+            }
+        },
+    };
+    // Helix's catalog only when something has to be compiled (it needs git).
+    let mut helix: Option<(PathBuf, Catalog)> = None;
     let mut failed = 0;
     for want in langs {
-        match add(&catalog, &helix, &dir, want) {
+        let r = match bundle.as_ref().and_then(|b| b.find(want).map(|n| (b, n))) {
+            Some((b, name)) => b.install(&dir, &name),
+            None => (|| {
+                if helix.is_none() {
+                    let h = helix_dir()?;
+                    let c = Catalog::load(&h)?;
+                    helix = Some((h, c));
+                }
+                let (h, c) = helix.as_ref().unwrap();
+                add(c, h, &dir, want)
+            })(),
+        };
+        match r {
             Ok(msg) => println!("{msg}"),
             Err(e) => {
                 eprintln!("{want}: {e:#}");
@@ -187,7 +255,15 @@ fn add_all(langs: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn add(catalog: &Catalog, helix: &Path, dir: &Path, want: &str) -> Result<String> {
+/// What compiling `want` from source produced in `dir`: its name, entry and query dirs.
+struct Built {
+    name: String,
+    entry: LanguageEntry,
+    queries: Vec<String>,
+}
+
+/// Fetch and compile `want`'s grammar into `dir/grammars/`, copy its queries into `dir/queries/`.
+fn compile_language(catalog: &Catalog, helix: &Path, dir: &Path, want: &str) -> Result<Built> {
     let lang = catalog
         .language(want)
         .ok_or_else(|| anyhow!("not a language nib knows; see `nib grammar list --available`"))?;
@@ -205,34 +281,181 @@ fn add(catalog: &Catalog, helix: &Path, dir: &Path, want: &str) -> Result<String
 
     let src = fetch(&grammar, git, rev)?;
     let src = subpath.map_or(src.clone(), |p| src.join(p)).join("src");
-    let lib = nib_syntax::grammar_path(dir, &grammar);
-    compile(&grammar, &src, &lib)?;
-    let copied = copy_queries(helix, dir, &name)?;
-
+    compile(&grammar, &src, &nib_syntax::grammar_path(dir, &grammar))?;
+    let queries = copy_queries(helix, dir, &name)?;
     let (extensions, filenames) = file_types(lang);
     let entry = LanguageEntry {
-        grammar: Some(grammar.clone()),
+        grammar: Some(grammar),
         extensions,
         filenames,
         shebangs: strs(lang.get("shebangs")),
         aliases: vec![],
     };
-    let rt = nib_syntax::RuntimeLanguage {
-        name: name.clone(),
-        grammar: grammar.clone(),
-        extensions: entry.extensions.clone(),
-        filenames: entry.filenames.clone(),
-        shebangs: entry.shebangs.clone(),
-        aliases: vec![],
-    };
-    nib_syntax::check_runtime(dir, &rt).context("the compiled grammar doesn't load with its queries")?;
-    let cfg = Config::save_language(&name, &entry)?;
+    Ok(Built { name, entry, queries })
+}
+
+fn runtime_language(name: &str, l: &LanguageEntry) -> nib_syntax::RuntimeLanguage {
+    nib_syntax::RuntimeLanguage {
+        name: name.to_string(),
+        grammar: l.grammar.clone().unwrap_or_else(|| name.to_string()),
+        extensions: l.extensions.clone(),
+        filenames: l.filenames.clone(),
+        shebangs: l.shebangs.clone(),
+        aliases: l.aliases.clone(),
+    }
+}
+
+/// Check that the grammar loads with its queries, then write `[languages.<name>]`.
+fn turn_on(dir: &Path, name: &str, entry: &LanguageEntry, queries: &[String], how: &str) -> Result<String> {
+    nib_syntax::check_runtime(dir, &runtime_language(name, entry)).context("the grammar doesn't load with its queries")?;
+    let cfg = Config::save_language(name, entry)?;
+    let lib = nib_syntax::grammar_path(dir, entry.grammar.as_deref().unwrap_or(name));
     Ok(format!(
-        "added {name}: {} + queries/{} → [languages.{name}] in {}",
+        "added {name} ({how}): {} + queries/{} → [languages.{name}] in {}",
         lib.strip_prefix(dir).unwrap_or(&lib).display(),
-        copied.join(", queries/"),
+        queries.join(", queries/"),
         cfg.display()
     ))
+}
+
+fn add(catalog: &Catalog, helix: &Path, dir: &Path, want: &str) -> Result<String> {
+    let b = compile_language(catalog, helix, dir, want)?;
+    turn_on(dir, &b.name, &b.entry, &b.queries, "compiled")
+}
+
+// ---------------------------------------------------------------------------------------------
+// prebuilt bundles
+// ---------------------------------------------------------------------------------------------
+
+/// `manifest.toml` of a bundle: `[languages.<name>]` as in config.toml, plus the query dirs.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Manifest {
+    languages: BTreeMap<String, ManifestEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ManifestEntry {
+    entry: LanguageEntry,
+    /// `queries/<dir>` to copy: the language's own and those it inherits.
+    queries: Vec<String>,
+}
+
+/// `nib grammar build DIR LANG...`: compile into DIR and write its manifest (CI, for releases).
+fn build(out: &Path, langs: &[String]) -> Result<()> {
+    std::fs::create_dir_all(out)?;
+    let helix = helix_dir()?;
+    let catalog = Catalog::load(&helix)?;
+    let mut manifest = Manifest::default();
+    for want in langs {
+        let b = compile_language(&catalog, &helix, out, want).with_context(|| want.clone())?;
+        nib_syntax::check_runtime(out, &runtime_language(&b.name, &b.entry))
+            .with_context(|| format!("{}: the grammar doesn't load with its queries", b.name))?;
+        println!("built {}", b.name);
+        manifest.languages.insert(b.name, ManifestEntry { entry: b.entry, queries: b.queries });
+    }
+    std::fs::write(out.join("manifest.toml"), toml::to_string(&manifest)?)?;
+    Ok(())
+}
+
+/// The release triple this nib was built for, as in the archive names.
+fn triple() -> Option<&'static str> {
+    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        _ => return None,
+    })
+}
+
+/// nib's release tag: workspace 0.4.0 <-> v0.4.
+fn release_tag() -> String {
+    let v = env!("CARGO_PKG_VERSION");
+    format!("v{}", v.strip_suffix(".0").unwrap_or(v))
+}
+
+struct Bundle {
+    dir: PathBuf,
+    manifest: Manifest,
+}
+
+impl Bundle {
+    fn open(dir: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(dir.join("manifest.toml"))
+            .with_context(|| format!("{} is not a grammar bundle (no manifest.toml)", dir.display()))?;
+        Ok(Self { dir: dir.to_path_buf(), manifest: toml::from_str(&text).context("manifest.toml")? })
+    }
+
+    /// The release's bundle for this machine, downloaded and unpacked once into the cache.
+    fn download() -> Result<Self> {
+        let triple = triple().ok_or_else(|| anyhow!("releases have none for this platform"))?;
+        let tag = release_tag();
+        let name = format!("nib-grammars-{tag}-{triple}");
+        let cache = cache_dir()?.join(&name);
+        if let Ok(b) = Self::open(&cache.join(&name)) {
+            return Ok(b);
+        }
+        let base = std::env::var("NIB_GRAMMARS_URL").unwrap_or_else(|_| format!("{RELEASES}/{tag}"));
+        let tmp = cache_dir()?.join(format!("{name}.part"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp)?;
+        let archive = tmp.join(format!("{name}.tar.gz"));
+        eprintln!("downloading {name}…");
+        curl(&format!("{base}/{name}.tar.gz"), &archive)?;
+        curl(&format!("{base}/SHA256SUMS"), &tmp.join("SHA256SUMS"))?;
+        let sums = std::fs::read_to_string(tmp.join("SHA256SUMS"))?;
+        let want = sums
+            .lines()
+            .find_map(|l| l.split_once(char::is_whitespace).filter(|(_, f)| f.trim().trim_start_matches('*') == format!("{name}.tar.gz")))
+            .map(|(h, _)| h.to_ascii_lowercase())
+            .ok_or_else(|| anyhow!("{name}.tar.gz is not in the release's SHA256SUMS"))?;
+        let got = hex(&Sha256::digest(std::fs::read(&archive)?));
+        if got != want {
+            bail!("{name}.tar.gz doesn't match SHA256SUMS ({got} ≠ {want})");
+        }
+        run(Command::new("tar").arg("-xzf").arg(&archive).arg("-C").arg(&tmp))?;
+        let _ = std::fs::remove_file(&archive);
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::rename(&tmp, &cache)?;
+        Self::open(&cache.join(&name))
+    }
+
+    /// The bundle's name for `want`: by name, else by an extension it claims (`js`).
+    fn find(&self, want: &str) -> Option<String> {
+        let want = want.to_ascii_lowercase();
+        if self.manifest.languages.contains_key(&want) {
+            return Some(want);
+        }
+        self.manifest.languages.iter().find(|(_, l)| l.entry.extensions.contains(&want)).map(|(n, _)| n.clone())
+    }
+
+    fn install(&self, dir: &Path, name: &str) -> Result<String> {
+        let l = &self.manifest.languages[name];
+        let grammar = l.entry.grammar.as_deref().unwrap_or(name);
+        let (from, to) = (nib_syntax::grammar_path(&self.dir, grammar), nib_syntax::grammar_path(dir, grammar));
+        std::fs::create_dir_all(to.parent().unwrap())?;
+        // Replaced by a rename, so nib windows that have the old one loaded keep working.
+        let tmp = to.with_extension("tmp");
+        std::fs::copy(&from, &tmp).with_context(|| format!("copying {}", from.display()))?;
+        std::fs::rename(&tmp, &to)?;
+        for q in &l.queries {
+            let (from, to) = (self.dir.join("queries").join(q), dir.join("queries").join(q));
+            std::fs::create_dir_all(&to)?;
+            for e in std::fs::read_dir(&from)? {
+                let p = e?.path();
+                std::fs::copy(&p, to.join(p.file_name().unwrap()))?;
+            }
+        }
+        turn_on(dir, name, &l.entry, &l.queries, "prebuilt")
+    }
+}
+
+fn curl(url: &str, out: &Path) -> Result<()> {
+    run(Command::new("curl").args(["-fsSL", "--retry", "2", "-o"]).arg(out).arg(url))
+        .with_context(|| format!("downloading {url}"))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The grammar's repository at `rev`, cached.
@@ -265,8 +488,9 @@ fn compile(grammar: &str, src: &Path, out: &Path) -> Result<()> {
     let build = cache_dir()?.join("build").join(grammar);
     let _ = std::fs::remove_dir_all(&build);
     std::fs::create_dir_all(&build)?;
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
+    let (cc_default, cxx_default) = if cfg!(windows) { ("clang", "clang++") } else { ("cc", "c++") };
+    let cc = std::env::var("CC").unwrap_or_else(|_| cc_default.into());
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| cxx_default.into());
     let mut objs = vec![];
     let mut cpp = false;
     for (file, is_cpp) in [("parser.c", false), ("scanner.c", false), ("scanner.cc", true)] {
@@ -276,7 +500,11 @@ fn compile(grammar: &str, src: &Path, out: &Path) -> Result<()> {
         }
         let obj = build.join(format!("{file}.o"));
         let mut c = Command::new(if is_cpp { &cxx } else { &cc });
-        c.args(["-c", "-fPIC", "-O2", "-w", if is_cpp { "-std=c++14" } else { "-std=c11" }])
+        c.args(["-c", "-O2", "-w", if is_cpp { "-std=c++14" } else { "-std=c11" }]);
+        if !cfg!(windows) {
+            c.arg("-fPIC");
+        }
+        c
             .arg("-I")
             .arg(src)
             .arg(&path)
@@ -288,7 +516,13 @@ fn compile(grammar: &str, src: &Path, out: &Path) -> Result<()> {
     }
     std::fs::create_dir_all(out.parent().unwrap())?;
     let tmp = out.with_extension("tmp");
-    run(Command::new(if cpp { &cxx } else { &cc }).arg("-shared").args(&objs).arg("-o").arg(&tmp))?;
+    let mut link = Command::new(if cpp { &cxx } else { &cc });
+    link.arg("-shared").args(&objs).arg("-o").arg(&tmp);
+    if cfg!(windows) {
+        // Older grammars don't mark their entry point dllexport.
+        link.arg(format!("-Wl,/EXPORT:tree_sitter_{grammar}"));
+    }
+    run(&mut link)?;
     std::fs::rename(&tmp, out)?;
     let _ = std::fs::remove_dir_all(&build);
     Ok(())
@@ -365,7 +599,7 @@ fn list(available: bool) -> Result<()> {
         }
     }
     if available {
-        let catalog = Catalog::load(&helix()?)?;
+        let catalog = Catalog::load(&helix_dir()?)?;
         let names: Vec<&str> = catalog
             .languages
             .iter()

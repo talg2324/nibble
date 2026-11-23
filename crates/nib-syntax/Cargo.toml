@@ -10,7 +10,6 @@ publish.workspace = true
 helix-core.workspace = true
 tree-house.workspace = true
 tree-house-bindings.workspace = true
-tree-sitter-python.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-json.workspace = true
 tree-sitter-yaml.workspace = true

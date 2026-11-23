@@ -269,6 +269,7 @@ fn main() -> Result<()> {
             line_height: cfg.editor.line_height,
             beginner_mode: cfg.editor.beginner_mode,
             blame: cfg.editor.blame,
+            offer_languages: !cfg.editor.languages_offered,
             theme_cfg: cfg.theme.clone(),
             lsp: cfg
                 .lsp

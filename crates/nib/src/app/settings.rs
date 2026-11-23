@@ -1,5 +1,5 @@
 //! Settings: the gear menu in the control strip, the Settings panel (Appearance, Keyboard
-//! Shortcuts) and the Beginner-mode cheat sheet.
+//! Shortcuts, Languages) and the Beginner-mode cheat sheet.
 //!
 //! Every change applies immediately and is written back to config.toml (debounced), touching only
 //! the keys the UI owns so hand-written comments and profiles survive.
@@ -28,6 +28,7 @@ use std::time::Duration;
 pub enum Page {
     Appearance,
     Shortcuts,
+    Languages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,21 @@ pub struct State {
     pub window: WindowState,
     /// Token clicked in the editor while Appearance is open: (text, scope).
     revealed: Option<(String, &'static str)>,
+    langs: Langs,
+}
+
+/// The Languages page: grammars to add with `nib grammar add`.
+#[derive(Default)]
+struct Langs {
+    /// `[languages]` in config.toml when the page opened (or after an add).
+    added: Vec<String>,
+    picked: Vec<&'static str>,
+    /// `nib grammar add` is running.
+    busy: bool,
+    /// Its output: Ok when it succeeded.
+    output: Option<Result<String, String>>,
+    /// Opened on startup; `[editor] languages_offered` is written when the page closes.
+    first_run: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +147,9 @@ pub enum Msg {
     /// Scroll the revealed scope's row into view (sent one update after revealing, once the
     /// panel has been rebuilt with that row in it).
     ScrollToRevealed,
+    PickLanguage(&'static str),
+    AddLanguages,
+    LanguagesAdded(Result<String, String>),
 }
 
 /// Window size presets (logical px). Ones larger than the monitor are hidden.
@@ -315,10 +334,11 @@ impl App {
 
     pub(super) fn open_settings(&mut self, page: Page) -> Task<Message> {
         self.settings.menu = false;
+        let mark = self.leave_languages();
         if self.settings.page == Some(page) {
             self.settings.page = None;
             self.settings.recording = None;
-            return Task::none();
+            return mark;
         }
         self.settings.page = Some(page);
         // Settings takes the side panel's spot.
@@ -328,7 +348,31 @@ impl App {
         if page == Page::Appearance {
             self.ensure_appearance_data();
         }
-        Task::none()
+        if page == Page::Languages {
+            self.settings.langs.added = added_languages();
+        }
+        mark
+    }
+
+    /// On startup, before the user ever saw it: show Settings → Languages.
+    pub(super) fn offer_languages(&mut self) {
+        let _ = self.open_settings(Page::Languages);
+        self.settings.langs.first_run = true;
+    }
+
+    /// The Languages page is closing: the first time, remember that it was offered.
+    fn leave_languages(&mut self) -> Task<Message> {
+        if self.settings.page != Some(Page::Languages) || !std::mem::take(&mut self.settings.langs.first_run) {
+            return Task::none();
+        }
+        Task::perform(
+            async {
+                std::thread::spawn(|| {
+                    let _ = Config::mark_languages_offered();
+                });
+            },
+            |_| s(Msg::Noop),
+        )
     }
 
     fn ensure_appearance_data(&mut self) {
@@ -425,9 +469,37 @@ impl App {
                 self.settings.menu = false;
             }
             Msg::Close => {
+                let mark = self.leave_languages();
                 self.settings.page = None;
                 self.settings.recording = None;
                 self.settings.edit = None;
+                return mark;
+            }
+            Msg::PickLanguage(l) => {
+                let p = &mut self.settings.langs.picked;
+                if let Some(i) = p.iter().position(|x| *x == l) {
+                    p.remove(i);
+                } else {
+                    p.push(l);
+                }
+            }
+            Msg::AddLanguages => {
+                let st = &mut self.settings.langs;
+                if st.busy || st.picked.is_empty() {
+                    return Task::none();
+                }
+                st.busy = true;
+                st.output = None;
+                let langs: Vec<String> = st.picked.iter().map(|l| l.to_string()).collect();
+                return Task::perform(add_languages(langs), |r| s(Msg::LanguagesAdded(r)));
+            }
+            Msg::LanguagesAdded(r) => {
+                let st = &mut self.settings.langs;
+                st.busy = false;
+                st.added = added_languages();
+                let added = st.added.clone();
+                st.picked.retain(|l| !added.iter().any(|a| a == l));
+                st.output = Some(r);
             }
             Msg::Beginner(on) => return self.toggle_beginner(on),
             Msg::FontSize(s) => {
@@ -907,6 +979,7 @@ impl App {
                 container(text("SETTINGS").size(10).color(th.dim)).padding([4, 10]),
                 item("Appearance", Command::OpenSettings, s(Msg::Open(Page::Appearance))),
                 item("Keyboard Shortcuts", Command::KeyboardShortcuts, s(Msg::Open(Page::Shortcuts))),
+                item("Languages", Command::OpenLanguages, s(Msg::Open(Page::Languages))),
                 container(space()).height(1).width(Length::Fill).style(move |_| container::Style::default().background(border)),
                 beginner,
             ]
@@ -954,6 +1027,7 @@ impl App {
         let header = row![
             tab("Appearance", Page::Appearance),
             tab("Keyboard Shortcuts", Page::Shortcuts),
+            tab("Languages", Page::Languages),
             space::horizontal(),
             self.icon_button("✕", "Close settings", s(Msg::Close)),
         ]
@@ -962,6 +1036,7 @@ impl App {
         let body = match page {
             Page::Appearance => self.appearance_page(),
             Page::Shortcuts => self.shortcuts_page(),
+            Page::Languages => self.languages_page(),
         };
         let path = Config::path().map(|p| p.display().to_string()).unwrap_or_default();
         let footer = row![
@@ -1275,6 +1350,65 @@ impl App {
         column![line, editor].spacing(2).into()
     }
 
+    fn languages_page(&self) -> Element<'_, Message> {
+        let th = &self.theme;
+        let st = &self.settings.langs;
+        let mut col = column![
+            self.section("Languages"),
+            text(format!(
+                "nib highlights {} out of the box. Pick the languages you work in to add them:",
+                nib_syntax::BUILTIN_LANGUAGES.join(", ")
+            ))
+            .size(12)
+            .color(th.foreground),
+        ]
+        .spacing(4);
+        for &l in crate::grammar_cli::OFFERED {
+            let added = st.added.iter().any(|a| a == l);
+            let picked = st.picked.contains(&l);
+            let (glyph, color) = match (added, picked) {
+                (true, _) => ("✓", th.accent),
+                (false, true) => ("☑", th.accent),
+                (false, false) => ("☐", th.dim),
+            };
+            let r = row![
+                text(glyph).size(13).color(color).width(16),
+                text(l).size(12).color(th.foreground),
+                space::horizontal(),
+                text(if added { "added" } else { "" }).size(10).color(th.dim),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            let b = self.flat_button(r, s(Msg::PickLanguage(l))).padding([5, 10]).width(Length::Fill);
+            col = col.push(if added || st.busy { b.on_press_maybe(None) } else { b });
+        }
+        let add: Element<'_, Message> = if st.busy {
+            text("Adding…").size(11).color(th.dim).into()
+        } else if st.picked.is_empty() {
+            text("").size(11).into()
+        } else {
+            self.small_button(&format!("Add {}", st.picked.join(", ")), s(Msg::AddLanguages))
+        };
+        col = col.push(container(add).padding(Padding { top: 8.0, ..Padding::ZERO }));
+        if let Some(out) = &st.output {
+            let (msg, color) = match out {
+                Ok(o) => (o.as_str(), th.dim),
+                Err(e) => (e.as_str(), th.warn),
+            };
+            col = col.push(container(text(msg.trim().to_string()).size(11).color(color)).padding(Padding { top: 6.0, ..Padding::ZERO }));
+            if out.is_ok() {
+                col = col.push(text("Open a new nib window to use them.").size(12).color(th.foreground));
+            }
+        }
+        col = col.push(self.section("Other languages"));
+        col = col.push(
+            text("Add any other language with `nib grammar add <language>`; `nib grammar list --available` lists them, `nib grammar rm` takes one away.")
+                .size(12)
+                .color(th.dim),
+        );
+        col.into()
+    }
+
     fn shortcuts_page(&self) -> Element<'_, Message> {
         let th = &self.theme;
         let st = &self.settings;
@@ -1486,6 +1620,28 @@ mod tests {
 
 /// Write `settings` into config.toml on the settings writer, a thread of its own that takes
 /// saves in the order they come, so a later save is never overwritten by an earlier one.
+/// The languages `nib grammar add` turned on (`[languages]` in config.toml).
+fn added_languages() -> Vec<String> {
+    Config::load().map(|c| c.languages.into_keys().collect()).unwrap_or_default()
+}
+
+/// Run `nib grammar add LANGS…` (this nib's own binary) off the UI thread: its output, Ok when it
+/// succeeded.
+fn add_languages(langs: Vec<String>) -> impl std::future::Future<Output = Result<String, String>> {
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let r = std::env::current_exe()
+            .and_then(|nib| std::process::Command::new(nib).arg("grammar").arg("add").args(&langs).output())
+            .map_err(|e| format!("couldn't run nib grammar add: {e}"))
+            .and_then(|o| {
+                let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                if o.status.success() { Ok(text) } else { Err(text) }
+            });
+        let _ = tx.send(r);
+    });
+    async move { rx.await.unwrap_or_else(|_| Err("nib grammar add stopped".into())) }
+}
+
 fn save_in_order(settings: UserSettings) -> impl std::future::Future<Output = Result<PathBuf, String>> {
     type Job = (UserSettings, iced::futures::channel::oneshot::Sender<Result<PathBuf, String>>);
     static WRITER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> = std::sync::OnceLock::new();

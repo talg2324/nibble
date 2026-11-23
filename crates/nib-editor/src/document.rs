@@ -107,11 +107,19 @@ impl Document {
         }
     }
 
+    /// The highlighting language, else one guessed from the file extension for the languages whose
+    /// editing (indent, comment toggle) nib knows without a grammar, else `text`.
     pub fn language_name(&self) -> &'static str {
-        self.syntax
-            .as_ref()
-            .map(|s| nib_syntax::registry().name(s.lang))
-            .unwrap_or("text")
+        if let Some(s) = &self.syntax {
+            return nib_syntax::registry().name(s.lang);
+        }
+        let ext = self.path.as_deref().and_then(|p| p.extension()).and_then(|e| e.to_str()).unwrap_or("");
+        match ext {
+            "py" | "pyi" | "pyw" => "python",
+            "rs" => "rust",
+            "go" => "go",
+            _ => "text",
+        }
     }
 
     /// Changes whenever the text does.
@@ -967,10 +975,11 @@ mod tests {
 
     #[test]
     fn syntax_survives_edits_and_undo() {
-        let mut d = doc("x = 1\n");
-        assert_eq!(d.language_name(), "python");
+        let mut d = Document::new(Rope::from("x=1\n"), Some("t.sh".into()));
+        d.attach_syntax();
+        assert_eq!(d.language_name(), "bash");
         d.move_doc(true, false);
-        for c in "def g(): pass".chars() {
+        for c in "g() { :; }".chars() {
             d.type_char(c);
         }
         d.undo();

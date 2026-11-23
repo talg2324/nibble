@@ -101,7 +101,7 @@ The window and the daemon speak a small typed protocol (length-prefixed msgpack)
 ## Features
 
 - **Editing**: tabs, familiar keys, undo and redo, comment, duplicate and delete lines, change all occurrences, word navigation, system clipboard, mouse selection. Every key is rebindable in a visual shortcut editor.
-- **Highlighting**: tree-sitter. Python, Bash, JSON, YAML, TOML, Markdown and HTML are built in; [add any other language](#adding-a-language) Helix supports with one command.
+- **Highlighting**: tree-sitter. Bash, JSON, YAML, TOML, Markdown and HTML are built in; on first run nib offers Python, Rust, Go, Zig, Java and JavaScript, and [any other language](#adding-a-language) Helix supports is one command.
 - **Language servers**: go to definition, find references, rename, hover. They run on the code's machine and start only when you open a file they serve. Python, Rust, Go, TypeScript/JavaScript and C/C++ work out of the box once their server is installed; any other is a few lines of config.
 - **Find** (⌘F): in the current file or agent chat; Tab switches to the whole project, which is searched by `nibd`, so it is fast over SSH too. Fuzzy file names plus matching lines, skipping gitignored, hidden and binary files.
 - **Files follow the disk**: when a file open in a tab is changed outside nibble (a terminal, a formatter, `git checkout`, an agent's script), the tab updates within a second, over SSH too. Unsaved edits are never replaced; saving over an outside change asks first.
@@ -213,15 +213,15 @@ This is how agents debug nibble, how the end-to-end tests run (`scripts/e2e.sh`)
 
 ## Adding a language
 
-Highlighting for Python, Bash, JSON, YAML, TOML, Markdown and HTML is compiled in. Any other language that [Helix](https://helix-editor.com) supports is one command away:
+Highlighting for Bash, JSON, YAML, TOML, Markdown and HTML is compiled in. The first time nib opens, **Settings → Languages** offers Python, Rust, Go, Zig, Java and JavaScript; tick the ones you use (it stays in the gear menu, and the command palette has `Settings: Languages`). Any other language that [Helix](https://helix-editor.com) supports is one command away:
 
 ```bash
-nib grammar add rust go javascript    # fetch, compile and turn on
+nib grammar add rust go javascript    # turn them on
 nib grammar list --available          # the ~250 it can add
 nib grammar remove go
 ```
 
-This fetches the grammar at the revision Helix pins, compiles it with your C compiler, copies Helix's queries, checks that the pair loads, and only then adds a `[languages.<name>]` entry to your config. Files go into `~/.config/nib/grammars/` and `~/.config/nib/queries/`; there is no rebuild of nibble. It needs git and a C compiler (`cc`, or `$CC`).
+The languages the page offers come prebuilt with each release (`nib-grammars-<version>-<platform>.tar.gz`, checked against the release's `SHA256SUMS`), so they need no compiler. Any other language is built from source: nib fetches the grammar at the revision Helix pins and compiles it with your C compiler, which needs git and `cc` (or `$CC`; `clang` on Windows). `--from-source` builds even the prebuilt ones. Either way nib copies Helix's queries, checks that the grammar and queries load together, and only then adds a `[languages.<name>]` entry to your config. Files go into `~/.config/nib/grammars/` and `~/.config/nib/queries/`; nibble is not rebuilt. Open a new window to use them.
 
 By hand: put `grammars/<name>.{dylib,so}` and `queries/<name>/*.scm` in the config folder and describe the language in `config.toml`:
 
