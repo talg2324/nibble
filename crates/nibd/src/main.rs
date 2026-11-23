@@ -487,6 +487,10 @@ impl State {
                 self.places = places::setup(&root)
                     .inspect_err(|e| log!("scratch / NIBDIR: {e}"))
                     .ok();
+                // Work trees agents made in a scratch folder that has since been swept: git
+                // would list them for ever.
+                let at = root.clone();
+                thread::spawn(move || git::prune_worktrees(&at));
                 let lsp = lsp::Lsp::new(root.clone(), &lsp, self.tx.clone());
                 let path_of = |p: Option<&PathBuf>| p.map(|p| nib_proto::path::to_wire(p)).unwrap_or_default();
                 let resp = Response::Hello {

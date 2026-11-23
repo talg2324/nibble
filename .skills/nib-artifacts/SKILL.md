@@ -18,7 +18,8 @@ Inside a nib terminal (`$TERM_PROGRAM` is `nib`), nib provides both, on the mach
 code lives:
 
 - **`$NIB_SCRATCH`**: this session's scratch directory. Deleted about a day after the session
-  ends.
+  ends. An agent nib started gets a folder of its own in it; git work trees made there (a copy
+  of the code to compare against) are removed when the agent ends.
 - **`$NIBDIR`**: this project's persistent directory, outside the repo. It survives sessions:
   look in it first, since earlier work may already be there.
 

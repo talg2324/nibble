@@ -911,6 +911,9 @@ struct Meta {
     tx: Sender<ServerMsg>,
     /// Writes the conversation down (`history`).
     rec: Arc<Mutex<history::Recorder>>,
+    /// Its own scratch folder (`$NIB_SCRATCH` for it): the git work trees it makes there are
+    /// removed when it ends (`close`).
+    scratch: Option<PathBuf>,
 }
 
 /// What a session's reader thread tells the rest: that its turn ended, and which files it
@@ -1328,7 +1331,10 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
     // What the agent's commands see: nib's folders (the nib-artifacts skill), and the mailbox.
     let name = replace.and_then(|old| s.meta.get(&old)).map(|m| m.id_name.clone()).unwrap_or_else(|| mail::name(agent, id));
     let mut env: Vec<(&'static str, OsString)> = Vec::new();
-    env.extend(dirs.scratch.map(|p| ("NIB_SCRATCH", p.as_os_str().to_os_string())));
+    // A scratch folder of its own inside the window's, so what it makes there (a work tree to
+    // compare against, say) is known to be its, and goes when it does (`close`).
+    let own_scratch = dirs.scratch.map(|p| p.join("agents").join(&name)).filter(|p| std::fs::create_dir_all(p).is_ok());
+    env.extend(own_scratch.as_ref().map(|p| ("NIB_SCRATCH", p.as_os_str().to_os_string())));
     env.extend(dirs.nibdir.map(|p| ("NIBDIR", p.as_os_str().to_os_string())));
     if let (true, Some(dir), Ok(me)) = (tools, &s.mail, std::env::current_exe()) {
         env.push(("NIB_MAILBOX", dir.as_os_str().to_os_string()));
@@ -1433,7 +1439,7 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
             });
             s.touched.entry(id).or_default().extend(edited);
         }
-        s.meta.insert(id, Meta { id_name: name, name: called, agent, model, task, mode, busy: watch.busy, tx, rec: watch.rec });
+        s.meta.insert(id, Meta { id_name: name, name: called, agent, model, task, mode, busy: watch.busy, tx, rec: watch.rec, scratch: own_scratch });
     }
     if !carry.is_empty() {
         if let (Some(dir), Some(m)) = (&s.mail, s.meta.get(&id)) {
@@ -3013,11 +3019,16 @@ fn end(session: Session) {
 }
 
 pub fn close(sessions: &Shared, id: AiId) {
-    let (session, frozen) = {
+    let (session, frozen, ended) = {
         let mut s = sessions.lock().unwrap();
-        s.meta.remove(&id);
+        let meta = s.meta.remove(&id);
         s.carry.remove(&id);
-        (s.map.remove(&id), s.frozen.remove(&id))
+        // The agent itself ends with its last session (a model switch handed its name on, so
+        // there it goes on): then the work trees it made in its scratch go too.
+        let ended = meta
+            .filter(|m| !s.meta.values().any(|o| o.id_name == m.id_name))
+            .and_then(|m| Some((s.root.clone()?, m.scratch?)));
+        (s.map.remove(&id), s.frozen.remove(&id), ended)
     };
     if let Some(s) = session {
         // Killing a frozen assistant would leave the commands it started frozen for good.
@@ -3025,6 +3036,9 @@ pub fn close(sessions: &Shared, id: AiId) {
             let _ = signal_tree(pid, "CONT");
         }
         end(s);
+    }
+    if let Some((root, dir)) = ended {
+        thread::spawn(move || crate::git::remove_worktrees_under(&root, &dir));
     }
 }
 
@@ -3035,6 +3049,12 @@ impl Drop for Sessions {
                 let _ = signal_tree(pid, "CONT");
             }
             end(s);
+        }
+        // The window closed: every agent ended, and with it the work trees they made.
+        if let Some(root) = &self.root {
+            for dir in self.meta.values().filter_map(|m| m.scratch.as_ref()) {
+                crate::git::remove_worktrees_under(root, dir);
+            }
         }
     }
 }
@@ -3151,7 +3171,10 @@ mod tests {
             let msg = rx.recv_timeout(Duration::from_secs(5)).expect("the stand-in should answer");
             if matches!(msg, ServerMsg::Notify(ServerNotify::AiEvent { id, event: AiEvent::TurnDone { .. } }) if id == new) { break; }
         }
-        let received: Value = serde_json::from_str(&std::fs::read_to_string(root.join("received.json")).unwrap()).unwrap();
+        // The agent's own scratch folder, inside the window's.
+        let own = shared.lock().unwrap().meta[&new].scratch.clone().unwrap();
+        assert!(own.starts_with(root.join("agents")));
+        let received: Value = serde_json::from_str(&std::fs::read_to_string(own.join("received.json")).unwrap()).unwrap();
         let prompt = received.pointer("/message/content").unwrap().as_str().unwrap();
         assert!(prompt.contains("Fix escaped quotes"));
         assert!(prompt.contains("tests still need running"));
@@ -3162,6 +3185,57 @@ mod tests {
         close(&shared, new);
         history::delete(&root, &history_id).unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The git work trees an agent made in its own scratch folder go when the agent ends; a
+    /// model switch (its name goes on) keeps them, and another agent's or the user's stay.
+    #[test]
+    fn an_agents_own_work_trees_go_when_it_ends() {
+        let dir = std::env::temp_dir().join(format!("nibd-ai-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let sh = |args: &[&str]| Command::new("git").arg("-C").arg(&root).args(args).output().is_ok_and(|o| o.status.success());
+        if !sh(&["init", "-q"]) {
+            return; // no git on this machine
+        }
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        assert!(sh(&["add", "a.txt"]) && sh(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one"]));
+        let mine = dir.join("scratch/agents/claude-1");
+        let other = dir.join("scratch/agents/claude-2");
+        for (d, t) in [(&mine, "base"), (&other, "base")] {
+            std::fs::create_dir_all(d).unwrap();
+            assert!(sh(&["worktree", "add", "-q", "--detach", &d.join(t).to_string_lossy()]));
+        }
+        let listed = |p: &Path| {
+            let out = Command::new("git").arg("-C").arg(&root).args(["worktree", "list", "--porcelain"]).output().unwrap();
+            let p = nib_proto::path::canonical(p).unwrap_or_else(|_| p.to_path_buf());
+            String::from_utf8_lossy(&out.stdout).lines().any(|l| l.strip_prefix("worktree ").is_some_and(|t| Path::new(t) == p))
+        };
+        assert!(listed(&mine.join("base")) && listed(&other.join("base")));
+
+        let shared: Shared = Default::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let watch = Watch { sessions: Arc::downgrade(&shared), busy: Arc::new(AtomicBool::new(false)), rec: Arc::new(Mutex::new(history::Recorder::new(&root, AiAgent::Claude, None))) };
+        let meta = |id_name: &str, scratch: &Path| Meta { id_name: id_name.into(), name: id_name.into(), agent: AiAgent::Claude, model: None, task: "t".into(), mode: AiMode::Auto, busy: watch.busy.clone(), tx: tx.clone(), rec: watch.rec.clone(), scratch: Some(scratch.to_path_buf()) };
+        {
+            let mut s = shared.lock().unwrap();
+            s.root = Some(root.clone());
+            // Sessions 1 and 3 are the same agent (3 took over after a model switch); 2 another.
+            s.meta.insert(1, meta("claude-1", &mine));
+            s.meta.insert(3, meta("claude-1", &mine));
+            s.meta.insert(2, meta("claude-2", &other));
+        }
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(400));
+        close(&shared, 1);
+        settle();
+        assert!(listed(&mine.join("base")), "its name goes on: kept");
+        close(&shared, 3);
+        settle();
+        assert!(!listed(&mine.join("base")) && !mine.join("base").exists(), "it ended: its work tree is gone");
+        assert!(listed(&other.join("base")), "another agent's stays");
+        crate::git::remove_worktrees_under(&root, &other);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Worktree-per-feature (D-080): the first message says which way to work, and an agent
@@ -3189,7 +3263,7 @@ mod tests {
             let mut s = shared.lock().unwrap();
             s.root = Some(root.clone());
             s.mail = Some(mailbox.clone());
-            let m = Meta { id_name: "claude-1".into(), name: "add-sum".into(), agent: AiAgent::Claude, model: None, task: "t".into(), mode: AiMode::Auto, busy: watch.busy.clone(), tx, rec: watch.rec.clone() };
+            let m = Meta { id_name: "claude-1".into(), name: "add-sum".into(), agent: AiAgent::Claude, model: None, task: "t".into(), mode: AiMode::Auto, busy: watch.busy.clone(), tx, rec: watch.rec.clone(), scratch: None };
             s.meta.insert(1, m);
         }
         let letters = || mail::collect(&mailbox);
@@ -3263,7 +3337,7 @@ mod tests {
             let mut s = shared.lock().unwrap();
             s.root = Some(dir.clone());
             for id in [1, 2] {
-                let m = Meta { id_name: format!("claude-{id}"), name: format!("claude-{id}"), agent: AiAgent::Claude, model: None, task: "t".into(), mode: AiMode::Auto, busy: watch.busy.clone(), tx: tx.clone(), rec: watch.rec.clone() };
+                let m = Meta { id_name: format!("claude-{id}"), name: format!("claude-{id}"), agent: AiAgent::Claude, model: None, task: "t".into(), mode: AiMode::Auto, busy: watch.busy.clone(), tx: tx.clone(), rec: watch.rec.clone(), scratch: None };
                 s.meta.insert(id, m);
             }
         }

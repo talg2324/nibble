@@ -83,6 +83,9 @@ the diff afterwards: if another agent had changed one of those files too, its ch
 - Do not switch branches in the work tree, and do not merge into the user's branch or push:
   landing is the user's.
 - Sub-agents of your own that edit files edit in your work tree too: give them its path.
+- Need another checkout (a baseline to measure against)? Make it under `$NIB_SCRATCH`
+  (`git worktree add --detach "$NIB_SCRATCH/base"`): nib removes work trees there when you end.
+  Never elsewhere: nothing would clean it up.
 
 Then check your work, in the work tree: build it, run the tests that cover it, and try the
 change itself.

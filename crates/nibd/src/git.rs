@@ -114,6 +114,35 @@ fn git_with(dir: &Path, guard: &[String], args: &[&str]) -> io::Result<Option<St
     Ok(Some(s))
 }
 
+/// Remove every work tree of the repository at `root` that lies inside `dir` (an agent's own
+/// scratch folder, when the agent ends), and forget work trees whose folder is gone. Run with
+/// the repository's own config turned off (`guard`), like everything nibd runs by itself.
+pub fn remove_worktrees_under(root: &Path, dir: &Path) {
+    let Some(guard) = guard(root) else { return };
+    let git = |args: &[&str]| cmd(root).args(&guard).args(args).output();
+    // Compared as git prints them: real paths (`/private/var/…`, not `/var/…`).
+    let dir = nib_proto::path::canonical(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if let Ok(out) = git(&["worktree", "list", "--porcelain"]) {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let Some(tree) = line.strip_prefix("worktree ").map(Path::new) else { continue };
+            if tree.starts_with(&dir) && tree != dir {
+                let removed = git(&["worktree", "remove", "--force", "--force", &tree.to_string_lossy()]).is_ok_and(|o| o.status.success());
+                if !removed {
+                    let _ = std::fs::remove_dir_all(tree);
+                }
+            }
+        }
+    }
+    let _ = git(&["worktree", "prune"]);
+}
+
+/// Forget work trees whose folder is gone (a scratch folder swept after its session ended).
+pub fn prune_worktrees(root: &Path) {
+    if let Some(guard) = guard(root) {
+        let _ = cmd(root).args(&guard).args(["worktree", "prune"]).output();
+    }
+}
+
 pub fn info(dir: &Path) -> GitInfo {
     // Independent of each other: run at once (each is a process start, ~10 ms).
     let Some(guard) = guard(dir) else { return GitInfo::NotRepo };
