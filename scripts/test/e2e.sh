@@ -36,43 +36,13 @@ run_edit() {
   wait $pid
 }
 
-echo "e2e: local"
-printf 'import os\n' > "$TMP/a.py"
-TEXT='x = 1' run_edit "$TMP/a.py"
-[ "$(cat "$TMP/a.py")" = $'import os\nx = 1' ] || { echo "FAIL: local content: $(cat "$TMP/a.py")"; exit 1; }
-echo "  ok"
-
-echo "e2e: headless"
-printf 'import os\n' > "$TMP/h.py"
-SOCK="$TMP/h.sock"
-NIB_CONTROL="$SOCK" "$NIB" --headless "$TMP/h.py" > "$TMP/h.out" &
-HPID=$!
-for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
-ctl wait 20
-ctl run move_doc_end; ctl type 'y = 2'; ctl run save; ctl wait 20
-ctl run new_terminal; ctl wait 20
-ctl type 'echo $((6*7))\n'
-for _ in $(seq 50); do "$NIB" ctl -s "$SOCK" state | grep -qF '\n42\n' && break; sleep 0.1; done
-"$NIB" ctl -s "$SOCK" state | grep -qF '\n42\n' || { echo "FAIL: headless terminal"; exit 1; }
-ctl run quit; wait $HPID
-[ "$(cat "$TMP/h.py")" = $'import os\ny = 2' ] || { echo "FAIL: headless content: $(cat "$TMP/h.py")"; exit 1; }
-echo "  ok"
-
-# The project's apps: defined, started in order, read, stopped; a port something else holds
-# is left alone; what nib ctl defines waits for the user; nothing is left listening once the
-# window is gone.
-echo "e2e: apps"
-mkdir -p "$TMP/srv"; echo hello > "$TMP/srv/index.html"
-read -r P1 P2 P3 <<< "$(python3 -c "
-import socket
-s = [socket.socket() for _ in range(3)]
-for x in s: x.bind(('127.0.0.1', 0))
-print(*[x.getsockname()[1] for x in s])")"
+# NIB_E2E_ONLY=web,forward runs only those legs (local, headless, apps, web, forward, bench).
+want() { [ -z "${NIB_E2E_ONLY:-}" ] || [[ ",$NIB_E2E_ONLY," == *",$1,"* ]]; }
 answers() { python3 -c "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), 1)" "$1" 2>/dev/null; }
 # On a failure: the servers' terminals, so the log says why (a command not found, a slow start).
 show_srv() { for s in one two; do echo "--- pair/$s:"; "$NIB" ctl -s "$SOCK" app log pair "$s" --lines 15 2>&1 | tail -15; done; }
 srv() { "$NIB" ctl -s "$SOCK" app list | python3 -c "import json, sys; print(' '.join(a['name'] + '/' + s['name'] + '=' + s['state'] for a in json.load(sys.stdin)['apps'] for s in a['servers']))"; }
-closed() { for _ in $(seq 50); do answers "$1" || return 0; sleep 0.1; done; return 1; }
+closed() { for _ in $(seq "${2:-50}"); do answers "$1" || return 0; sleep 0.1; done; return 1; }   # $2: tries, 0.1 s apart
 # Apps the user approved, as their own click in the Apps panel leaves them in apps.json (nib ctl
 # defines apps, but never approves one): $1 the window's socket, $2 {name: definition}. The
 # hash is the daemon's (serve::hash, pinned by its test): SHA-256 of the definition as compact
@@ -92,6 +62,43 @@ for name, d in apps.items():
 json.dump({"apps": out}, open(nibdir + "/apps.json", "w"))
 PY
 }
+if want local; then
+echo "e2e: local"
+printf 'import os\n' > "$TMP/a.py"
+TEXT='x = 1' run_edit "$TMP/a.py"
+[ "$(cat "$TMP/a.py")" = $'import os\nx = 1' ] || { echo "FAIL: local content: $(cat "$TMP/a.py")"; exit 1; }
+echo "  ok"
+
+fi  # local
+if want headless; then
+echo "e2e: headless"
+printf 'import os\n' > "$TMP/h.py"
+SOCK="$TMP/h.sock"
+NIB_CONTROL="$SOCK" "$NIB" --headless "$TMP/h.py" > "$TMP/h.out" &
+HPID=$!
+for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
+ctl wait 20
+ctl run move_doc_end; ctl type 'y = 2'; ctl run save; ctl wait 20
+ctl run new_terminal; ctl wait 20
+ctl type 'echo $((6*7))\n'
+for _ in $(seq 50); do "$NIB" ctl -s "$SOCK" state | grep -qF '\n42\n' && break; sleep 0.1; done
+"$NIB" ctl -s "$SOCK" state | grep -qF '\n42\n' || { echo "FAIL: headless terminal"; exit 1; }
+ctl run quit; wait $HPID
+[ "$(cat "$TMP/h.py")" = $'import os\ny = 2' ] || { echo "FAIL: headless content: $(cat "$TMP/h.py")"; exit 1; }
+echo "  ok"
+
+fi  # headless
+# The project's apps: defined, started in order, read, stopped; a port something else holds
+# is left alone; what nib ctl defines waits for the user; nothing is left listening once the
+# window is gone.
+if want apps; then
+echo "e2e: apps"
+mkdir -p "$TMP/srv"; echo hello > "$TMP/srv/index.html"
+read -r P1 P2 P3 <<< "$(python3 -c "
+import socket
+s = [socket.socket() for _ in range(3)]
+for x in s: x.bind(('127.0.0.1', 0))
+print(*[x.getsockname()[1] for x in s])")"
 SOCK="$TMP/s.sock"
 NIB_CONTROL="$SOCK" "$NIB" --headless "$TMP/srv" > "$TMP/s.out" &
 SPID=$!
@@ -137,6 +144,7 @@ closed "$P1" && closed "$P2" || { echo "FAIL: a server outlived the window"; exi
 kill $HOLD 2>/dev/null; wait $HOLD 2>/dev/null || true
 echo "  ok"
 
+fi  # apps
 # The web tab's engine and the agents' page requests, against scripts/test/e2e-web/site.py: a small
 # local app, and a stand-in for "another machine" on this one's network address, which must
 # never be asked for a page. Runs with the browser nib would use; NIB_E2E_BROWSERS (paths,
@@ -195,8 +203,22 @@ web_leg() {
   for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
   if "$NIB" ctl -s "$SOCK" state | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["web"]["browser"] else 1)'; then
     python3 scripts/test/e2e-web/check.py "$NIB" "$pid" "$WEB_PORT" "http://$OUTSIDE:$((WEB_PORT + 1))" "$TMP/outside.log" > "$TMP/web.log" 2>&1 \
-      || { tail -5 "$TMP/web.log"; echo "FAIL: web"; exit 1; }
+      || { tail -5 "$TMP/web.log"; window_log "$TMP/w.out"; echo "FAIL: web"; exit 1; }
     echo "  ok ($(grep -c '^ok' "$TMP/web.log") checks)"
+    # A page whose server has stopped is not shown from the browser's cache: its file is old, so
+    # a cache would keep the page for long, and the second open must find nothing listening.
+    mkdir -p "$TMP/stale"; echo '<title>Stale</title>an old page' > "$TMP/stale/index.html"; touch -t 202001010000 "$TMP/stale/index.html"
+    SP=$(python3 -c "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")
+    python3 -m http.server "$SP" --bind 127.0.0.1 --directory "$TMP/stale" >/dev/null 2>&1 & STALE=$!
+    KIDS="$KIDS $STALE"
+    for _ in $(seq 300); do answers "$SP" && break; sleep 0.1; done
+    st=$("$NIB" ctl -s "$SOCK" web open "$SP" | python3 -c "import json, sys; v = json.load(sys.stdin); print(v.get('tab', '') if v.get('title') == 'Stale' else '')")
+    [ -n "$st" ] || { echo "FAIL: the stale-page check's page did not open"; exit 1; }
+    "$NIB" ctl -s "$SOCK" web close --tab "$st" >/dev/null
+    kill $STALE; closed "$SP" 300 || { echo "FAIL: the stale-page check's server did not stop"; exit 1; }
+    "$NIB" ctl -s "$SOCK" web open "$SP" > "$TMP/stale.out" 2>&1 || true
+    grep -qF "nothing is listening" "$TMP/stale.out" || { cat "$TMP/stale.out"; echo "FAIL: a page whose server stopped was shown from the browser's cache"; exit 1; }
+    echo "  ok (a stopped server's page is not shown from the cache)"
     # nibd answers nib-web only with a token it gave an agent it started (crates/nibd/src/tokens.rs),
     # which a script cannot get yet; so in CI (the release smoke test) the agent's leg is skipped.
     if [ -n "${CI:-}" ]; then
@@ -212,8 +234,30 @@ web_leg() {
   sleep 1
   ! pgrep -f -- "$TMP_WEB_MARK" >/dev/null || { echo "FAIL: a browser was left running"; exit 1; }
 }
+# On a failure: the end of a window's own log (its first output line names its run directory),
+# which has its requests and every slow operation, and of its daemon's.
+window_log() {
+  local rd nibd
+  rd=$(head -1 "$1" | python3 -c "import json, sys; print(json.load(sys.stdin)['run_dir'])" 2>/dev/null) || return 0
+  echo "--- nib.log:"; tail -40 "$rd/nib.log" 2>/dev/null
+  nibd=$(head -1 "$1" | python3 -c "import json, sys; print(json.load(sys.stdin)['logs']['nibd'])" 2>/dev/null) || return 0
+  echo "--- nibd log:"; tail -20 "$nibd" 2>/dev/null
+}
+# On a forward failure: what listens on port $1 (and which process), what it answers, the
+# window's forwards, the fake ssh's log and the window's own log.
+forward_diag() {
+  echo "--- listening on $1:"; lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || echo "(nothing, or no lsof)"
+  echo "--- curl http://127.0.0.1:$1/:"; curl -s -m 5 -D - -o /dev/null "http://127.0.0.1:$1/" || echo "(curl exit $?)"
+  echo "--- forward list:"; "$NIB" ctl -s "$SOCK" forward list 2>&1 | head -20
+  echo "--- fake ssh log:"; tail -30 "$TMP/fssh/log" 2>/dev/null
+  window_log "$TMP/f.out"
+}
+if want web; then
 echo "e2e: web"
-OUTSIDE=$(python3 -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('192.0.2.1', 9)); print(s.getsockname()[0])" 2>/dev/null || true)
+# "Another machine": NIB_E2E_OUTSIDE (a name or address that reaches this machine but is not
+# loopback by name, e.g. outside.test in /etc/hosts), else this machine's network address.
+OUTSIDE=${NIB_E2E_OUTSIDE:-}
+[ -n "$OUTSIDE" ] || OUTSIDE=$(python3 -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('192.0.2.1', 9)); print(s.getsockname()[0])" 2>/dev/null || true)
 if [ -z "$OUTSIDE" ] || [ "${OUTSIDE#127.}" != "$OUTSIDE" ]; then
   echo "  skipped: this machine has no network address to stand in for another machine"
 else
@@ -223,7 +267,26 @@ else
   python3 scripts/test/e2e-web/site.py outside "$OUTSIDE" "$((WEB_PORT + 1))" "$TMP/outside.log" & SITE2=$!
   KIDS="$KIDS $SITE1 $SITE2"
   sleep 0.5
-  if [ -n "${NIB_E2E_BROWSERS:-}" ]; then
+  # The address must answer this machine: some VMs (GitHub's macOS runners) drop connections to
+  # their own address, and a page whose image never comes never finishes loading. Refused: the
+  # site is not up yet, try again; no answer at all: it never will.
+  if ! python3 - "$OUTSIDE" "$((WEB_PORT + 1))" <<'PY'
+import socket, sys, time
+for _ in range(60):
+    try:
+        socket.create_connection((sys.argv[1], int(sys.argv[2])), 2).close()
+        sys.exit(0)
+    except ConnectionRefusedError:
+        time.sleep(0.5)
+    except OSError:
+        sys.exit(1)
+sys.exit(1)
+PY
+  then
+    # Asked for by name: the web leg's checks (the local-only rule) must run, not be skipped.
+    [ -z "${NIB_E2E_OUTSIDE:-}" ] || { echo "FAIL: NIB_E2E_OUTSIDE=$OUTSIDE does not answer this machine"; exit 1; }
+    echo "  skipped: this machine's network address ($OUTSIDE) does not answer it, so it cannot stand in for another machine"
+  elif [ -n "${NIB_E2E_BROWSERS:-}" ]; then
     IFS=: read -ra BROWSERS <<< "$NIB_E2E_BROWSERS"
     for b in "${BROWSERS[@]}"; do echo "  with $b"; NIB_BROWSER="$b" web_leg; done
   else
@@ -233,20 +296,30 @@ else
   unset XDG_CACHE_HOME
 fi
 
+fi  # web
 # Another machine's ports: a window "on another machine" (scripts/test/e2e-web/fake_ssh.py stands in
 # for ssh, so the other machine is this one) forwards a port of it, shows a page through the
 # forward, forwards a ready server's port, and leaves nothing behind. What ssh itself does is
 # not checked here (NIB_E2E_SSH_HOST below does that, where there is a host).
+if want forward; then
 echo "e2e: forward"
 mkdir -p "$TMP/far" "$TMP/fbin" "$TMP/fssh"; echo '<title>Far</title><h1>hello from afar</h1>' > "$TMP/far/index.html"
 printf '#!/bin/sh\nexec python3 "%s/scripts/test/e2e-web/fake_ssh.py" "$@"\n' "$PWD" > "$TMP/fbin/ssh"; chmod +x "$TMP/fbin/ssh"
 NIBD_BIN="$(cd "$(dirname "$NIB")" && pwd)/nibd"
 printf '[profiles.far]\nssh = "far.test"\nroot = "%s"\nnibd = "%s"\n[profiles.gpu]\nssh = "gpu.test"\nroot = "~"\n' "$TMP/far" "$NIBD_BIN" > "$TMP/config.toml"
+# Two free ports in a row, F2 = F1 + 1: F1's first forward lands on F1 + 1 here (F1 is taken: the
+# other machine is this one), so a local address that showed one page is later asked for another
+# machine's port with nothing behind it. GitHub's runners hand out ports like this by chance.
 read -r F1 F2 <<< "$(python3 -c "
 import socket
-s = [socket.socket() for _ in range(2)]
-for x in s: x.bind(('127.0.0.1', 0))
-print(*[x.getsockname()[1] for x in s])")"
+while True:
+    a, b = socket.socket(), socket.socket()
+    a.bind(('127.0.0.1', 0)); p = a.getsockname()[1]
+    try:
+        b.bind(('127.0.0.1', p + 1))
+    except OSError:
+        continue
+    print(p, p + 1); break")"
 python3 -m http.server "$F1" --bind 127.0.0.1 --directory "$TMP/far" >/dev/null 2>&1 & FAR=$!
 KIDS="$KIDS $FAR"
 for _ in $(seq 50); do answers "$F1" && break; sleep 0.1; done
@@ -287,6 +360,8 @@ L3=${GOT##*=}
 ctl app down
 for _ in $(seq 50); do [ -z "$(fwd forward list)" ] && break; sleep 0.1; done
 [ -z "$(fwd forward list)" ] && closed "$L3" || { echo "FAIL: a stopped server's forward stayed"; exit 1; }
+# The server itself is gone too before its port is asked for again below (slow on a fresh machine).
+closed "$F2" 300 || { echo "FAIL: a stopped server still listens on $F2"; exit 1; }
 # A page of the other machine, shown here through a forward made for it and gone with its tab.
 if "$NIB" ctl -s "$SOCK" state | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["web"]["browser"] else 1)'; then
   export XDG_CACHE_HOME="$TMP/cache"
@@ -319,7 +394,7 @@ print(f['local'] if ok else 'FAIL %s' % v)" "$F1")
   # By its saved name, with a path; and a port nothing listens on there says whose it is.
   "$NIB" ctl -s "$SOCK" web open "gpu:$F1/index.html" | grep -qF '"host": "@gpu"' || { echo "FAIL: web open PROFILE:PORT"; exit 1; }
   "$NIB" ctl -s "$SOCK" web read | grep -qF 'hello from afar' || { echo "FAIL: the page of a saved connection was not read"; exit 1; }
-  "$NIB" ctl -s "$SOCK" web open "$F2" > "$TMP/f.unanswered" 2>&1 || true; grep -qF "@far's port $F2" "$TMP/f.unanswered" || { cat "$TMP/f.unanswered"; echo "FAIL: an unanswered far port does not say whose it is"; exit 1; }
+  "$NIB" ctl -s "$SOCK" web open "$F2" > "$TMP/f.unanswered" 2>&1 || true; grep -qF "@far's port $F2" "$TMP/f.unanswered" || { cat "$TMP/f.unanswered"; forward_diag "$F2"; echo "FAIL: an unanswered far port does not say whose it is"; exit 1; }
   [ "$(fwd forward list | tr ' ' '\n' | grep -c .)" = 1 ] || { echo "FAIL: a forward for a page that never came was kept: $(fwd forward list)"; exit 1; }
   unset XDG_CACHE_HOME
   echo "  ok"
@@ -334,12 +409,15 @@ sleep 0.5
 kill $FAR 2>/dev/null; wait $FAR 2>/dev/null || true
 printf '' > "$TMP/config.toml"
 
+fi  # forward
+if want bench; then
 echo "e2e: bench"
 python3 - "$TMP/big.py" <<'PY'
 import sys; open(sys.argv[1], "w").write(("def f(x: int) -> str:\n    return str(x + 1)  # c\n") * 5000)
 PY
 "$NIB" --bench "$TMP/big.py"
 
+fi  # bench
 if [ -n "${NIB_E2E_SSH_HOST:-}" ]; then
   echo "e2e: ssh $NIB_E2E_SSH_HOST"
   mkdir -p "$TMP/remote" "$TMP/daemons/x86_64-unknown-linux-musl"

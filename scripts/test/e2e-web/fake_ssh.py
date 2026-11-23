@@ -20,6 +20,13 @@ WITH_VALUE = {"-o", "-l", "-p", "-i", "-J", "-L", "-O", "-F", "-E"}
 
 def relay(spec):
     _, lport, _, rport = spec.rsplit(":", 3)
+    if lport == rport:
+        # The other machine is this one, so its port L would be this relay's own: a loop no real
+        # ssh can make. Nothing listens there, so nothing listens here either: a connection is
+        # refused, as it would be through ssh to a machine where nothing listens. Kept running
+        # until cancelled, like any forward.
+        while True:
+            signal.pause()
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -42,11 +49,6 @@ def relay(spec):
 
     while True:
         conn, _ = srv.accept()
-        if lport == rport:
-            # The other machine is this one: its port, were anything there, would not be this
-            # relay. Nothing listens there.
-            conn.close()
-            continue
         try:
             out = socket.create_connection(("localhost", int(rport)), 5)
         except OSError:

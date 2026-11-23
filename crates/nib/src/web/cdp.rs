@@ -61,6 +61,10 @@ impl Browser {
             for domain in ["Page.enable", "Runtime.enable", "Network.enable"] {
                 self.send(Some(&sid), domain, json!({}));
             }
+            // No HTTP cache: a local app's page is always what its server sends now, never a
+            // copy kept from before (a server that stopped, a file that changed, a port another
+            // app took). Local apps rarely say how long a response may be kept.
+            self.send(Some(&sid), "Network.setCacheDisabled", json!({ "cacheDisabled": true }));
         }
         match kind {
             "page" => {

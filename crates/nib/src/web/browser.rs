@@ -179,6 +179,8 @@ pub fn describe() -> Value {
 /// Firefox preferences for a browser nobody sees and only local apps are shown in: no first-run pages,
 /// no questions, nothing remembered about people, nothing sent home.
 const USER_JS: &str = r#"user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.cache.disk.enable", false);
+user_pref("browser.cache.memory.enable", false);
 user_pref("browser.aboutwelcome.enabled", false);
 user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("startup.homepage_welcome_url", "");

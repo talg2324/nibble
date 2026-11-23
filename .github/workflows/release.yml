@@ -20,13 +20,30 @@
 #   install.sh, install.ps1, SHA256SUMS
 #
 # "Run workflow" (Actions tab) on any branch builds everything and keeps the archives as the
-# run's artifacts, without publishing anything.
+# run's artifacts, without publishing anything. With `smoke: <tag>` it builds nothing and only
+# smoke-tests that published release, on the systems `os` picks, with this branch's workflow and
+# e2e.sh: for trying a change to the smoke test without a new rc.
+#   gh workflow run release.yml --ref BRANCH -f smoke=v0.4-rc.4 -f os=macos -f e2e=web
 name: release
 
 on:
   push:
     tags: ['v[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+-rc.[0-9]+']
   workflow_dispatch:
+    inputs:
+      smoke:
+        description: 'Only smoke-test this published release (a tag, e.g. v0.4-rc.4): nothing is built'
+        required: false
+        default: ''
+      os:
+        description: 'Smoke on'
+        type: choice
+        options: [all, macos, ubuntu, windows]
+        default: all
+      e2e:
+        description: 'Only these e2e.sh legs, e.g. web,forward (empty: all)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -42,6 +59,9 @@ jobs:
       base: ${{ steps.v.outputs.base }}                 # vX.Y
       prerelease: ${{ steps.v.outputs.prerelease }}     # true for an rc
       promote_from: ${{ steps.v.outputs.promote_from }} # the rc a final tag promotes, or empty
+      smoke_only: ${{ steps.v.outputs.smoke_only }}     # true: run by hand to smoke-test a release
+      commit: ${{ steps.v.outputs.commit }}             # the commit the release was built from
+      smoke_matrix: ${{ steps.v.outputs.smoke_matrix }} # the systems the smoke test runs on
     steps:
       - uses: actions/checkout@v5
         with:
@@ -49,10 +69,33 @@ jobs:
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
+          SMOKE: ${{ inputs.smoke }}
+          OS: ${{ inputs.os || 'all' }}
         run: |
           ws="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           base="v${ws%.0}"
           echo "base=$base" >> "$GITHUB_OUTPUT"
+          mac='{"os":"macos-latest","container":""}'
+          # Chrome's sandbox needs user namespaces (Docker's default seccomp profile blocks them)
+          # and more /dev/shm than Docker's 64 MB: the container's, for e2e.sh's web leg.
+          linux='{"os":"ubuntu-latest","container":{"image":"ubuntu:22.04","options":"--security-opt seccomp=unconfined --shm-size=1g"}}'
+          win='{"os":"windows-latest","container":""}'
+          case "$OS" in
+            macos) m="[$mac]" ;; ubuntu) m="[$linux]" ;; windows) m="[$win]" ;; *) m="[$mac,$linux,$win]" ;;
+          esac
+          echo "smoke_matrix=$m" >> "$GITHUB_OUTPUT"
+          if [[ -n "$SMOKE" ]]; then
+            # Smoke-test a published release; build nothing.
+            gh release view "$SMOKE" >/dev/null || { echo "::error::no published release $SMOKE"; exit 1; }
+            {
+              echo "smoke_only=true"
+              echo "version=$SMOKE"
+              echo "commit=$(git rev-list -n 1 "$SMOKE")"
+              if [[ "$SMOKE" == *-rc.* ]]; then echo "prerelease=true"; else echo "prerelease=false"; fi
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF_TYPE" != tag ]]; then
             echo "version=$base-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -81,7 +124,7 @@ jobs:
 
   daemon:
     needs: check
-    if: needs.check.outputs.promote_from == ''
+    if: needs.check.outputs.promote_from == '' && needs.check.outputs.smoke_only != 'true'
     name: nibd ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -107,7 +150,7 @@ jobs:
 
   client:
     needs: check
-    if: needs.check.outputs.promote_from == ''
+    if: needs.check.outputs.promote_from == '' && needs.check.outputs.smoke_only != 'true'
     name: nibble ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     # Linux: built on Ubuntu 22.04 (glibc 2.35), so it runs on distros from 2022 on.
@@ -217,8 +260,9 @@ jobs:
   smoke:
     needs: [check, release, promote]
     if: >-
-      always() && github.ref_type == 'tag' &&
-      (needs.release.result == 'success' || needs.promote.result == 'success')
+      always() && needs.check.result == 'success' &&
+      (needs.release.result == 'success' || needs.promote.result == 'success' ||
+       needs.check.outputs.smoke_only == 'true')
     name: smoke ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
@@ -228,12 +272,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-latest, container: '' }
-          - { os: ubuntu-latest, container: 'ubuntu:22.04' }
-          - { os: windows-latest, container: '' }
+        include: ${{ fromJSON(needs.check.outputs.smoke_matrix) }}
     env:
       TAG: ${{ needs.check.outputs.version }}
+      COMMIT: ${{ needs.check.outputs.commit }}
+      NIB_E2E_ONLY: ${{ inputs.e2e }}
       PRE: ${{ needs.check.outputs.prerelease }}
       REL: https://github.com/${{ github.repository }}/releases/download/${{ needs.check.outputs.version }}
       LATEST: https://github.com/${{ github.repository }}/releases/latest/download
@@ -245,6 +288,9 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl git python3 xvfb \
             libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libgl1 libfontconfig1
+          # A browser for e2e.sh's web leg (the test's, not the release's).
+          curl -fsSLo /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/chrome.deb
       # Only for scripts/test/e2e.sh; nothing is built.
       - uses: actions/checkout@v5
       - name: install, version, grammar
@@ -258,13 +304,38 @@ jobs:
           fi
           N="$HOME/.local/share/nib/nib"
           "$N" --version
-          grep -q "commit ${GITHUB_SHA::7}" "$HOME/.local/share/nib/BUILD_INFO" \
+          grep -q "commit ${COMMIT::7}" "$HOME/.local/share/nib/BUILD_INFO" \
             || { echo "::error::installed a different build:"; cat "$HOME/.local/share/nib/BUILD_INFO"; exit 1; }
           out="$("$N" grammar add python 2>&1)"; echo "$out"
           grep -q "added python (prebuilt)" <<< "$out" || { echo "::error::python was not installed from the release's bundle"; exit 1; }
+      # The web leg's "another machine": a name nib takes for another machine (only localhost,
+      # *.localhost, 127.x and [::1] are this one) that /etc/hosts sends to 127.0.0.1. The runners'
+      # own non-loopback addresses do not answer them (macOS drops those connections).
       - name: e2e.sh on the installed nib
         if: runner.os != 'Windows'
-        run: NIB="$HOME/.local/share/nib/nib" scripts/test/e2e.sh
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            echo "127.0.0.1 outside.test" | sudo tee -a /etc/hosts >/dev/null
+            NIB="$HOME/.local/share/nib/nib" NIB_E2E_OUTSIDE=outside.test scripts/test/e2e.sh
+          else
+            echo "127.0.0.1 outside.test" >> /etc/hosts
+            # Chrome will not run as root without --no-sandbox, which nib does not pass: here, as
+            # a user, with nib installed for them by the same installer.
+            useradd -m tester
+            cp -r . /home/tester/repo && chown -R tester /home/tester/repo
+            # Chrome alone first: if it cannot start here, its own words say why (nib hides them).
+            runuser -u tester -- google-chrome --headless=new --no-first-run --user-data-dir=/tmp/chrome-check --dump-dom about:blank 2>&1 | tail -15 || true
+            # shellcheck disable=SC2016  # expanded by the user's shell, not here
+            runuser -u tester -- env PRE="$PRE" TAG="$TAG" REL="$REL" LATEST="$LATEST" CI=1 NIB_E2E_ONLY="$NIB_E2E_ONLY" bash -c '
+              set -e
+              cd ~/repo
+              if [[ "$PRE" == true ]]; then
+                curl -fsSL "$REL/install.sh" | NIB_VERSION="$TAG" bash -s -- --yes --no-modify-path > /dev/null
+              else
+                curl -fsSL "$LATEST/install.sh" | bash -s -- --yes --no-modify-path > /dev/null
+              fi
+              NIB="$HOME/.local/share/nib/nib" NIB_E2E_OUTSIDE=outside.test scripts/test/e2e.sh'
+          fi
       - name: install, version, grammar, headless edit (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -281,7 +352,7 @@ jobs:
           if (-not (Test-Path $N)) { throw 'the installer did not install nib.exe' }
           & $N --version
           $info = Get-Content (Join-Path $dir 'BUILD_INFO') -Raw
-          if ($info -notmatch "commit $($env:GITHUB_SHA.Substring(0, 7))") { throw "installed a different build: $info" }
+          if ($info -notmatch "commit $($env:COMMIT.Substring(0, 7))") { throw "installed a different build: $info" }
           $out = (& $N grammar add python 2>&1 | Out-String); $out
           if ($out -notmatch 'added python \(prebuilt\)') { throw "python was not installed from the release's bundle" }
           # nib --headless: open a file, type, save and quit through nib ctl; check the file.
