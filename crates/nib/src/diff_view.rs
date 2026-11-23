@@ -123,6 +123,8 @@ impl<'a, Message> DiffView<'a, Message> {
 
 #[derive(Default)]
 struct State {
+    /// Wheel movement not yet a whole row (`zoom::whole_lines`).
+    wheel: f32,
     char_w: f32,
     line_h: f32,
     measured_for: Option<Typeface>,
@@ -223,6 +225,11 @@ where
                     mouse::ScrollDelta::Lines { y, .. } => -y * 3.0,
                     mouse::ScrollDelta::Pixels { y, .. } => -y / st.line_h,
                 };
+                let rows = crate::zoom::whole_lines(&mut st.wheel, rows);
+                if rows == 0.0 {
+                    shell.capture_event();
+                    return;
+                }
                 shell.publish((self.on_event)(DiffEvent::Scroll { rows }));
                 shell.capture_event();
             }

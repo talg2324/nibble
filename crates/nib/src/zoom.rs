@@ -88,6 +88,16 @@ fn travel(delta: ScrollDelta) -> f32 {
     (if y != 0.0 { y } else { x }) / per
 }
 
+/// Adds `delta` (lines, maybe a fraction of one: a trackpad's few pixels) to `pending` and takes
+/// the whole lines out, keeping the rest for the next event, so slow scrolling moves instead of
+/// rounding to nothing. Every scrolling grid (editor, table, diff, terminal) goes through it.
+pub fn whole_lines(pending: &mut f32, delta: f32) -> f32 {
+    *pending += delta;
+    let n = pending.trunc();
+    *pending -= n;
+    n
+}
+
 /// Takes whole steps out of `pending`.
 fn whole_steps(pending: &mut f32) -> i32 {
     let n = pending.trunc();
@@ -282,6 +292,15 @@ impl<'a, Message: 'a> From<ZoomRoot<'a, Message>> for Element<'a, Message> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slow_trackpad_scrolling_adds_up() {
+        let mut acc = 0.0;
+        // A third of a line per event: nothing, nothing, then one line.
+        let moved: Vec<f32> = (0..6).map(|_| super::whole_lines(&mut acc, 0.34)).collect();
+        assert_eq!(moved, [0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(super::whole_lines(&mut acc, -2.5), -2.0);
+    }
+
     use super::*;
 
     #[test]

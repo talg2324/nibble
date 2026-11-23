@@ -14,7 +14,7 @@ use std::process::Command;
 
 const USAGE: &str = "\
 usage: nib grammar add LANGUAGE...     fetch, compile and turn on languages (rust, go, javascript, …)
-       nib grammar remove LANGUAGE...  turn them off and delete their files
+       nib grammar rm LANGUAGE...      turn them off and delete their files (also: remove)
        nib grammar list [--available]  languages nib highlights; --available: all it can add
 
 Grammars are compiled with `cc` (or $CC; C++ scanners with `c++` / $CXX) and need git.
@@ -23,7 +23,7 @@ Changes apply to nib windows opened afterwards.";
 pub fn grammar_main(args: &[String]) -> i32 {
     let r = match args.first().map(String::as_str) {
         Some("add") if args.len() > 1 => add_all(&args[1..]),
-        Some("remove") if args.len() > 1 => remove_all(&args[1..]),
+        Some("rm" | "remove") if args.len() > 1 => remove_all(&args[1..]),
         Some("list") => list(args.get(1).is_some_and(|a| a == "--available")),
         _ => {
             eprintln!("{USAGE}");

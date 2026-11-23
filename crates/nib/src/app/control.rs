@@ -532,7 +532,7 @@ impl App {
             "session": crate::control::session(),
             "label": self.label,
             "root": self.root,
-            "connected": self.connected && !self.disconnected,
+            "connected": self.live(),
             "connection": self.connection_json(),
             // Scratch and NIBDIR on the daemon's machine, and which one the file tree shows.
             "roots": self.tree.places_json(),

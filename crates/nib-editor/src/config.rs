@@ -761,10 +761,42 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// A config.toml as a user's grows: comments, saved connections, then the rest. (The shipped
+    /// example has every line commented out, so it can't stand in for one.)
+    const LIVED_IN: &str = r##"# my nib config
+[editor]
+tab_width = 4
+font_size = 14
+
+[window]
+# width = 1200
+
+# `nib @name [path]` opens a profile. Paths are relative to `root` on the target machine.
+[profiles.gpu]
+ssh = "gpu-box"          # Host alias from ~/.ssh/config (ProxyJump etc. are honored)
+root = "~/projects/seg"
+
+[profiles.ubuntu]
+wsl = "Ubuntu-24.04"     # Windows only
+root = "~/code"
+
+[theme]
+# background = "#000000"
+
+[ai]
+# cloud_models = true
+
+[keys]
+# "mod+y" = "none"
+"##;
+
     #[test]
     fn parse_example() {
-        let s = include_str!("../../../config/config.example.toml");
-        let c: Config = toml::from_str(s).unwrap();
+        // The shipped example parses, and copying it as is changes nothing: no connections.
+        let shipped: Config = toml::from_str(include_str!("../../../config/config.example.toml")).unwrap();
+        assert!(shipped.profiles.is_empty(), "the example adds no connections");
+        assert!(shipped.ai.worktree_per_feature && shipped.ai.pick_model, "defaults, untouched");
+        let c: Config = toml::from_str(LIVED_IN).unwrap();
         assert_eq!(
             c.profiles["gpu"].target().unwrap(),
             Target::Ssh {
@@ -789,8 +821,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip_keeps_comments() {
-        let src = include_str!("../../../config/config.example.toml");
-        let mut doc: toml_edit::DocumentMut = src.parse().unwrap();
+        let mut doc: toml_edit::DocumentMut = LIVED_IN.parse().unwrap();
         let mut theme = ThemeConfig::default();
         theme.colors.insert("background".into(), "#101010".into());
         theme.syntax.insert("string.regexp".into(), "#ff0000".into());
@@ -829,8 +860,7 @@ mod tests {
 
     #[test]
     fn profiles_are_written_beside_the_others_keeping_comments() {
-        let src = include_str!("../../../config/config.example.toml");
-        let mut doc: toml_edit::DocumentMut = src.parse().unwrap();
+        let mut doc: toml_edit::DocumentMut = LIVED_IN.parse().unwrap();
         let lab = Profile { user: Some("tal".into()), port: Some(2222), ..ssh("10.0.0.7") };
         put_profile(&mut doc, "lab", &lab, None).unwrap();
         // Changing a value keeps the comment after it.

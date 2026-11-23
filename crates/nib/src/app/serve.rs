@@ -48,14 +48,14 @@ impl App {
     /// person at the window asked (a control client never is). `quiet`: the window's own
     /// question (at connect): no message if the daemon refuses.
     pub(super) fn app_ask(&mut self, op: AppOp, call: Option<Call>, user: bool, quiet: bool) -> Task<Message> {
-        if quiet && (self.conn.is_none() || self.disconnected) {
+        if quiet && (self.conn.is_none() || self.lost()) {
             return Task::none();
         }
-        if self.conn.is_none() || self.disconnected {
+        if self.conn.is_none() || self.lost() {
             if let Some(c) = &call {
-                c.err("not connected");
+                c.err(self.not_connected());
             }
-            return self.flash_warn("not connected");
+            return self.flash_warn(self.not_connected());
         }
         self.request(Request::App { op, user }, Pending::Serve { call, quiet })
     }
@@ -151,6 +151,7 @@ impl App {
                     size: (rows, cols),
                     queued: Vec::new(),
                     server: Some(key),
+                    sel: None,
                 });
                 // Shown, but the keyboard stays where it is.
                 self.terms_visible = true;

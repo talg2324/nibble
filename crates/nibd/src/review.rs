@@ -38,9 +38,7 @@ fn kept(mailbox: &Path, agent: &str) -> Kept {
 
 fn keep(mailbox: &Path, agent: &str, k: &Kept) -> std::io::Result<()> {
     fs::create_dir_all(mailbox.join("work"))?;
-    let tmp = mailbox.join("work").join(format!(".{agent}.review.tmp"));
-    fs::write(&tmp, serde_json::to_vec_pretty(k).unwrap_or_default())?;
-    fs::rename(tmp, file(mailbox, agent))
+    crate::fs_ops::write_whole(&file(mailbox, agent), serde_json::to_vec_pretty(k).unwrap_or_default())
 }
 
 /// Forget the review (the agent's work landed).
@@ -246,6 +244,10 @@ const USAGE: &str = "usage:
 
 /// `nibd review …`, run by an agent. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
+    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "help")) {
+        println!("{USAGE}");
+        return 0;
+    }
     let (Some(mailbox), Ok(agent)) = (std::env::var_os("NIB_MAILBOX").map(PathBuf::from), std::env::var("NIB_AGENT")) else {
         eprintln!("nib-review: only works inside an agent that nib started (NIB_MAILBOX and NIB_AGENT are not set)");
         return 2;

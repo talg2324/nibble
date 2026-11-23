@@ -350,7 +350,7 @@ impl App {
     /// Read the review of the agent whose work shows.
     fn diff_review_ask(&mut self) -> Task<Message> {
         let Some(id) = agent_of(self.diff.scope) else { return Task::none() };
-        if self.diff_tab().is_none() || self.disconnected || !self.connected {
+        if self.diff_tab().is_none() || !self.live() {
             return Task::none();
         }
         self.diff.review_stamp = self.diff.work.get(&id).and_then(|w| w.review);
@@ -529,7 +529,7 @@ impl App {
             self.diff.plan = None;
         }
         match stamp {
-            Some(stamp) if !self.diff.plan.as_ref().is_some_and(|p| p.stamp == stamp) && self.diff.plan_asked != Some((id, stamp)) && self.diff_tab().is_some() && !self.disconnected => {
+            Some(stamp) if !self.diff.plan.as_ref().is_some_and(|p| p.stamp == stamp) && self.diff.plan_asked != Some((id, stamp)) && self.diff_tab().is_some() && !self.lost() => {
                 self.diff.plan_asked = Some((id, stamp));
                 self.request(Request::WorkPlan { id }, Pending::DiffPlan { id, stamp })
             }
@@ -687,7 +687,7 @@ impl App {
     }
 
     fn diff_ask(&mut self) -> Task<Message> {
-        if self.disconnected || !self.connected || self.diff.asking.is_some_and(|t| t.elapsed() < ASK_TIMEOUT) {
+        if !self.live() || self.diff.asking.is_some_and(|t| t.elapsed() < ASK_TIMEOUT) {
             return Task::none();
         }
         self.diff.asking = Some(Instant::now());
@@ -1975,7 +1975,7 @@ mod tests {
 
         // Another plan: it is shown, and the review is read again (nibd finds where the lines
         // of each comment went); one whose lines are gone shows under a row all the same.
-        a.connected = true;
+        a.link = crate::app::Link::Live;
         let _ = a.diff_work(3, AiWork { plan: Some(9), ..Default::default() });
         let _ = a.on_diff_plan(3, 9, Ok(Response::WorkPlan(Some("# Add sum\n\n1. test it\n".into()))));
         assert_eq!(reviews(&a), 5);

@@ -475,7 +475,10 @@ impl App {
         self.ai.front = true;
         // Closing its file changed the tabs: that is not a file coming forward.
         self.ai.tabs_seen = (self.active, self.tabs.len(), self.tab().map(|t| t.id));
-        self.focus = Focus::Ai;
+        // Shown, but the keyboard stays where it was typing in a terminal.
+        if !matches!(self.focus, Focus::Terminal(_)) {
+            self.focus = Focus::Ai;
+        }
     }
 
     /// The file of `beat` is open at tab `i` and in front: work out how to play it.

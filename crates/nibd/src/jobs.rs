@@ -702,9 +702,7 @@ fn done_ok(path: &Path) -> bool {
 }
 
 fn write_json(path: &Path, v: &Value) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default() + "\n")?;
-    std::fs::rename(tmp, path)
+    crate::fs_ops::write_whole(path, serde_json::to_string_pretty(v).unwrap_or_default() + "\n")
 }
 
 /// Every job in the JSONL file `jobs` (relative to `root`), results under `out`: `<id>.json` per

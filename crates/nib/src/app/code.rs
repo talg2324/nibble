@@ -603,6 +603,7 @@ impl App {
             layers = layers.push(h);
         }
         let card = match (&self.code.picker, &self.code.rename) {
+            _ if self.palette.is_some() => self.palette_view(),
             _ if self.search.open => self.search_view(),
             (Some(p), _) => self.picker_view(p),
             (None, Some(r)) => self.rename_view(r),

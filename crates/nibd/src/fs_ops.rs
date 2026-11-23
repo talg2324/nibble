@@ -5,6 +5,20 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+/// Write `path` whole or not at all: beside it under a hidden name (which the folders' readers
+/// skip), then renamed over it. For the state files that something else reads at any moment
+/// (mailbox, apps, reviews, plans, branch records). A file the user edits goes through
+/// `write_file`, which keeps permissions and syncs.
+pub fn write_whole(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()));
+    fs::write(&tmp, bytes).and_then(|_| fs::rename(&tmp, path)).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
+}
+
 pub fn expand_home(p: &str) -> PathBuf {
     if p == "~" || p.starts_with("~/") || (cfg!(windows) && p.starts_with("~\\")) {
         if let Some(home) = nib_proto::path::home_dir() {

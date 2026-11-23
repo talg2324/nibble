@@ -7,6 +7,7 @@ mod diff;
 mod drop;
 mod forward;
 mod git;
+mod palette;
 mod pdf_tab;
 mod peek;
 mod plan;
@@ -109,6 +110,7 @@ pub enum Message {
     HoverPopup(bool),
     /// Find (`search.rs`).
     Search(search::Msg),
+    Palette(palette::Msg),
     /// A request on the control socket (`crate::control`).
     Ctl(crate::control::Call),
     /// The window screenshot a control `snapshot` asked for (and where to save it).
@@ -151,6 +153,8 @@ enum Pending {
     Reload { tab: u64 },
     /// Re-read of an image tab's file that changed on disk.
     ReloadMedia { tab: u64 },
+    /// A PDF tab's file changed (`watch.rs`): parse it again.
+    ReloadPdf { tab: u64 },
     /// An image referenced by a Markdown / HTML preview.
     PreviewImage { tab: u64, url: String },
     /// An image an agent's reply shows, for the chat with this key.
@@ -183,6 +187,33 @@ enum Pending {
     Search { seq: u64 },
 }
 
+/// What a "press again to confirm" warning is waiting for. A second press confirms only the same
+/// thing (the same tab), within `ARM_WINDOW`: a later press, or one on another tab, warns afresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Armed {
+    /// Close this tab and drop its unsaved changes.
+    Close(u64),
+    /// Quit with unsaved files.
+    Quit,
+    /// Save this tab over a file that changed on disk.
+    ForceSave(u64),
+    /// Close the agent with this key while it is working.
+    KillAgent(u64),
+}
+
+/// The window's daemon connection, once there is one (`conn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    /// Connected; the daemon hasn't taken this window's Hello yet.
+    Greeting,
+    /// The daemon took the Hello: requests go out.
+    Live,
+    /// The connection is gone (or the Hello was refused). Tabs and edits stay in memory.
+    Lost,
+}
+
+const ARM_WINDOW: Duration = Duration::from_secs(5);
+
 pub struct Tab {
     id: u64,
     doc: Document,
@@ -207,6 +238,10 @@ pub struct Tab {
     diff: bool,
     /// A web tab (`web.rs`), likewise: the page it shows.
     web: Option<u32>,
+    /// Opened in passing (a file looked at from the tree, a jump): the next such open takes its
+    /// place while it is untouched, and its name is in italics. The document version it opened
+    /// at; an edit, or opening it in a tab of its own, keeps it.
+    transient: Option<u64>,
 }
 
 struct Term {
@@ -220,6 +255,8 @@ struct Term {
     /// The project's server that runs here (`serve.rs`): headed with its name and state, kept
     /// when the server ends by itself, and closing it stops the server.
     server: Option<String>,
+    /// Text selected with the mouse (`TermEvent::Select`), for Copy.
+    sel: Option<(crate::terminal_view::Cell, crate::terminal_view::Cell)>,
 }
 
 /// Where keyboard input goes. Terminals are referenced by `Term::key`.
@@ -244,19 +281,30 @@ enum Focus {
     Apps,
 }
 
-/// The terminal key (Ctrl+`, with or without Shift) is held: H and B can join it (see below).
-/// Released without any gesture, it runs its own command (`tap`, a new terminal). Moving between
+/// The terminal key (`toggle_terminal` / `new_terminal`, Ctrl+` with or without Shift by
+/// default) is held: H and B can join it, with the same modifiers held (see below). Released
+/// without any gesture, it runs its own command (`tap`). Moving between
 /// panes is not a gesture: see `Command::NextPane` and `App::switch_tab_or_pane`. Closing a terminal is the Close command (`App::close_focused`).
 #[derive(Debug)]
 struct Leader {
     key: Key,
+    /// Its modifiers: H and B count while these are held (whatever the key is bound to).
+    ctrl: bool,
+    alt: bool,
+    logo: bool,
     tap: Command,
     used: bool,
 }
 
-/// Ctrl + ` + H: hide / show the terminals.
+impl Leader {
+    fn joins(&self, chord: &KeyChord, key: Key) -> bool {
+        chord.key == key && chord.ctrl == self.ctrl && chord.alt == self.alt && chord.logo == self.logo
+    }
+}
+
+/// Terminal key + H: hide / show the terminals.
 const HIDE_TERMS_KEY: Key = Key::Char('h');
-/// Ctrl + ` + B: jump to the bottom toolbar (and back). Works from a terminal too, where a plain
+/// Terminal key + B: jump to the bottom toolbar (and back). Works from a terminal too, where a plain
 /// Ctrl+B (`Command::FocusToolbar` on macOS) belongs to the shell.
 const TOOLBAR_KEY: Key = Key::Char('b');
 
@@ -278,7 +326,6 @@ fn status_replies(data: &[u8], screen: &vt100::Screen) -> Vec<u8> {
     out
 }
 
-/// Commands that work wherever keyboard focus is (terminal, explorer, toolbar).
 /// One line of a text box that doesn't wrap: when it's wider than the box, the box shows its end
 /// (where the caret is) instead of clipping it off.
 fn tail_line<'a>(line: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
@@ -286,6 +333,13 @@ fn tail_line<'a>(line: impl Into<Element<'a, Message>>) -> Element<'a, Message> 
     scrollable(line).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::hidden())).anchor_right().width(Length::Fill).into()
 }
 
+/// Where a key's command applies, in one place:
+/// - `app_wide`: from wherever the keyboard is (a panel, the tree, the toolbar, a terminal);
+///   everything else is the editor's (or the focused panel's own keys).
+/// - `leaves_the_shell`: from a terminal even on a chord shells could use (plain Ctrl): these
+///   are bound to chords shells don't use. Other app-wide commands reach the app from a terminal
+///   on its app chords only (Cmd on macOS, Ctrl+Shift elsewhere; `App::terminal_key`).
+/// - The terminal key's hold gestures (H, B) are `HIDE_TERMS_KEY` / `TOOLBAR_KEY`.
 fn app_wide(c: Command) -> bool {
     use Command::*;
     tab_number(c).is_some()
@@ -293,6 +347,7 @@ fn app_wide(c: Command) -> bool {
             c,
             Quit | ToggleExplorer
                 | Find
+                | CommandPalette
                 | ToggleTerminal
                 | ToggleGit
                 | ToggleDiff
@@ -304,6 +359,7 @@ fn app_wide(c: Command) -> bool {
                 | PrevAgent
                 | NewAgent
                 | KillAgent
+                | StopAgent
                 | FoldAgents
                 | AgentHistory
                 | Panic
@@ -317,12 +373,19 @@ fn app_wide(c: Command) -> bool {
                 | ReopenClosedTab
                 | FontBigger
                 | FontSmaller
+                | FontReset
                 | OpenSettings
                 | KeyboardShortcuts
                 | ToggleBeginnerMode
                 | ToggleFullscreen
                 | TogglePreview
         )
+}
+
+/// See `app_wide`: Ctrl chords shells don't use; others (Ctrl+Q, Ctrl+W, ...) stay with the shell.
+fn leaves_the_shell(c: Command) -> bool {
+    use Command::*;
+    tab_number(c).is_some() || matches!(c, ToggleTerminal | NewTerminal | NextTab | PrevTab | NextPane | PrevPane | FontBigger | FontSmaller | FontReset)
 }
 
 /// GoToTabN -> N-1.
@@ -422,19 +485,20 @@ pub struct App {
     flash_seq: u64,
     /// Recent flash messages, newest last (the control socket's `state` shows them).
     messages: VecDeque<(String, bool)>,
-    quit_armed: bool,
-    close_armed: bool,
+    /// A "press again to confirm" waiting for its second press, and since when (`take_armed`).
+    armed: Option<(Armed, Instant)>,
     /// nib's own title bar, on WSL (`titlebar.rs`).
     titlebar: titlebar::State,
-    force_save_armed: bool,
-    disconnected: bool,
-    connected: bool,
+    /// How it stands with the daemon of `conn`.
+    link: Link,
     /// What nibd was last told to watch (`ClientNotify::Watch`), on connection `gen`.
     watched: Option<(u64, Vec<String>)>,
     bench: Option<Bench>,
     headless: bool,
     code: code::State,
     search: search::State,
+    /// The command palette, while it is open.
+    palette: Option<palette::Palette>,
 }
 
 pub struct Init {
@@ -457,9 +521,10 @@ pub struct Init {
     pub lsp: Vec<nib_proto::LspServer>,
     /// `[ai]`
     pub ai: nib_editor::config::AiConfig,
+    /// `[window]`: what Settings writes back until the window says its real size (never, headless).
+    pub window: nib_editor::config::WindowConfig,
 }
 
-const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
 /// Height of the macOS title bar the window content runs under (see main.rs); 0 elsewhere.
 pub const TITLEBAR_H: f32 = if cfg!(target_os = "macos") { 28.0 } else { 0.0 };
 pub use titlebar::own_frame;
@@ -482,6 +547,7 @@ impl App {
             headless,
             lsp,
             ai,
+            window,
         } = init;
         let pending = HashMap::new();
         let connected_already = conn.is_some();
@@ -544,18 +610,17 @@ impl App {
             flash: None,
             flash_seq: 0,
             messages: VecDeque::new(),
-            quit_armed: false,
-            close_armed: false,
+            armed: None,
             titlebar: Default::default(),
-            force_save_armed: false,
-            disconnected: false,
-            connected: false,
+            link: Link::Greeting,
             watched: None,
             bench: bench.then_some(Bench { frames: 0, started: None }),
             headless,
             code: Default::default(),
             search: Default::default(),
+            palette: None,
         };
+        app.seed_window(&window);
         let mut t = Task::none();
         for w in warnings {
             t = app.flash_warn(w);
@@ -615,7 +680,9 @@ impl App {
             _ => None,
         });
         let resized = iced::window::resize_events().map(|(_, size)| Message::Settings(settings::Msg::Resized(size)));
-        let mut subs = vec![keys, blur, resized];
+        // The window's own close button: Quit, which asks first when files are unsaved.
+        let close = iced::window::close_requests().map(|_| Message::Control(Command::Quit));
+        let mut subs = vec![keys, blur, resized, close];
         if titlebar::own_frame() {
             subs.push(iced::window::resize_events().map(|(id, _)| Message::TitleBar(titlebar::Msg::Resized(id))));
         }
@@ -648,8 +715,9 @@ impl App {
     }
 
     fn request(&mut self, req: Request, p: Pending) -> Task<Message> {
-        let Some(conn) = self.conn.as_mut().filter(|_| !self.disconnected) else {
-            return self.flash_warn("not connected");
+        let link = self.link;
+        let Some(conn) = self.conn.as_mut().filter(|_| link != Link::Lost) else {
+            return self.flash_warn(self.not_connected());
         };
         let (t0, name) = (Instant::now(), nib_proto::timing::label(&req));
         match conn.request(req) {
@@ -659,16 +727,17 @@ impl App {
                 Task::none()
             }
             Err(e) => {
-                self.disconnected = true;
+                self.link = Link::Lost;
                 self.flash_warn(format!("send failed: {e}"))
             }
         }
     }
 
     fn notify(&mut self, n: ClientNotify) {
-        let Some(conn) = self.conn.as_mut().filter(|_| !self.disconnected) else { return };
+        let link = self.link;
+        let Some(conn) = self.conn.as_mut().filter(|_| link != Link::Lost) else { return };
         if conn.notify(n).is_err() {
-            self.disconnected = true;
+            self.link = Link::Lost;
         }
     }
 
@@ -863,6 +932,7 @@ impl App {
             Message::HoverDue(seq) => self.hover_due(seq),
             Message::HoverPopup(over) => self.hover_popup(over),
             Message::Search(m) => self.on_search_msg(m),
+            Message::Palette(m) => self.on_palette_msg(m),
             Message::Ctl(call) => self.on_control(call),
             Message::ControlShot(call, path, shot) => {
                 Self::control_shot(call, path, shot);
@@ -952,11 +1022,20 @@ impl App {
         }
         let Some(p) = self.pending.remove(&id) else { return Task::none() };
         match (p, result) {
-            (Pending::Hello { open }, Ok(Response::Hello { root, scratch, nibdir, lsp_extensions, .. })) => {
+            (Pending::Hello { open }, Ok(Response::Hello { root, scratch, nibdir, lsp_extensions, daemon_version, .. })) => {
+                // Same protocol, another build (a nibd on $PATH, a profile's own nibd): it works,
+                // but say so, since what they do can differ.
+                let ours = env!("CARGO_PKG_VERSION");
+                let mismatch = if daemon_version != ours && !daemon_version.is_empty() {
+                    crate::control::log("conn", &format!("nibd {daemon_version} answered nib {ours}"));
+                    self.flash_warn(format!("nibd on {} is version {daemon_version}, this nib is {ours}: update one of them if something misbehaves", self.label))
+                } else {
+                    Task::none()
+                };
                 self.root = root;
                 self.code.lsp_extensions = lsp_extensions.into_iter().collect();
                 self.tree.set_places(scratch, nibdir);
-                self.connected = true;
+                self.link = Link::Live;
                 self.ai_tell_wpf();
                 // The tree is there from the start; with no file to edit, the keyboard is in it.
                 self.tree.open = true;
@@ -967,7 +1046,7 @@ impl App {
                         Task::none()
                     }
                 };
-                Task::batch([first, self.git_refresh()])
+                Task::batch([first, self.git_refresh(), mismatch])
             }
             (Pending::Git { poll }, result) => self.on_git(poll, result),
             (Pending::AiOpen { chat, generation }, result) => self.on_ai_opened(chat, generation, result),
@@ -1004,6 +1083,8 @@ impl App {
             (Pending::Reload { .. }, Err(_)) => Task::none(),
             (Pending::ReloadMedia { tab }, Ok(Response::File { data, .. })) => self.on_reload_media(tab, data),
             (Pending::ReloadMedia { .. }, Err(_)) => Task::none(),
+            (Pending::ReloadPdf { tab }, Ok(Response::File { data, .. })) => self.reload_pdf(tab, data),
+            (Pending::ReloadPdf { .. }, Err(_)) => Task::none(),
             (Pending::Open { new_tab, .. }, Ok(Response::File { path, data, .. }))
                 if Kind::of(std::path::Path::new(&path)) == Kind::Image =>
             {
@@ -1053,12 +1134,11 @@ impl App {
                 if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
                     t.doc.mark_saved(revision, mtime_ns);
                 }
-                self.force_save_armed = false;
                 let saved = self.flash_info(format!("saved {}", path.rsplit('/').next().unwrap_or(&path)));
                 Task::batch([saved, self.tree_refresh()])
             }
-            (Pending::Save { .. }, Err(e)) if e.kind == ErrorKind::Conflict => {
-                self.force_save_armed = true;
+            (Pending::Save { tab, .. }, Err(e)) if e.kind == ErrorKind::Conflict => {
+                self.arm(Armed::ForceSave(tab));
                 self.flash_warn("file changed on disk since it was opened — save again to overwrite")
             }
             (Pending::PtyOpen { term }, Ok(Response::PtyOpened { id })) => {
@@ -1087,14 +1167,24 @@ impl App {
         }
     }
 
-    /// Show a freshly loaded document: in a new tab, or replacing the active (unmodified) tab.
+    /// Show a freshly loaded document: in a new tab, or (opened in passing, `!new_tab`) in the
+    /// one slot for that: in place of the tab opened in passing before it, wherever it is, if it
+    /// is still untouched. Never in place of a tab the user opened on purpose or edited, the diff
+    /// tab or a page.
     fn put_doc(&mut self, doc: Document, new_tab: bool) {
-        let tab = Tab::new(self.next_tab_id, doc);
+        let mut tab = Tab::new(self.next_tab_id, doc);
         self.next_tab_id += 1;
-        let replace = !new_tab && self.tab().is_some_and(|t| !t.doc.is_modified());
-        if replace {
+        if !new_tab {
+            tab.transient = Some(tab.doc.version());
+        }
+        let slot = if new_tab { None } else { self.tabs.iter().position(Tab::is_transient) };
+        if let Some(i) = slot {
+            self.active = i;
             self.lsp_close(self.active);
-            self.tabs[self.active] = tab;
+            let old = std::mem::replace(&mut self.tabs[self.active], tab);
+            if let (false, Some(p)) = (old.local, old.doc.path.as_ref()) {
+                self.closed.push(p.to_string_lossy().into_owned());
+            }
         } else {
             self.tabs.push(tab);
             self.active = self.tabs.len() - 1;
@@ -1113,7 +1203,7 @@ impl App {
     }
 
     fn save(&mut self) -> Task<Message> {
-        let force = std::mem::take(&mut self.force_save_armed);
+        let force = self.tab().map(|t| t.id).is_some_and(|id| self.take_armed(Armed::ForceSave(id)));
         if self.tab().is_some_and(|t| t.local) {
             return self.save_local_tab();
         }
@@ -1121,7 +1211,7 @@ impl App {
         if tab.doc.read_only {
             return self.flash_warn("read-only buffer");
         }
-        let Some(path) = tab.doc.path.clone() else { return Task::none() };
+        let Some(path) = tab.doc.path.clone() else { return self.flash_warn("nothing to save to: this buffer is not a file") };
         let revision = tab.doc.save_point();
         let req = Request::WriteFile {
             path: path.to_string_lossy().into_owned(),
@@ -1306,7 +1396,8 @@ impl App {
     /// Ctrl + ` + H. Never opens a terminal.
     fn hide_show_terms(&mut self) -> Task<Message> {
         if self.terms_here().next().is_none() {
-            return self.flash_info("no terminals (Ctrl+` opens one)");
+            let how = self.keymap.chords_for(Command::ToggleTerminal).first().map_or_else(String::new, |k| format!(" ({k} opens one)"));
+            return self.flash_info(format!("no terminals{how}"));
         }
         self.toggle_terminal(true)
     }
@@ -1321,6 +1412,11 @@ impl App {
         let (rows, cols) = (24, 80);
         let key = self.next_term_key;
         self.next_term_key += 1;
+        // No daemon to run it: a pane that would stay blank for good helps nobody.
+        if self.conn.is_none() || self.lost() {
+            let how = if self.lost() { " — reconnect from the SSH panel" } else { " yet" };
+            return (key, self.flash_warn(format!("no terminal: not connected{how}")));
+        }
         self.terms.push(Term {
             key,
             id: None,
@@ -1328,6 +1424,7 @@ impl App {
             size: (rows, cols),
             queued: Vec::new(),
             server: None,
+            sel: None,
         });
         self.terms_visible = true;
         self.set_focus(Focus::Terminal(key));
@@ -1391,6 +1488,7 @@ impl App {
         if t.parser.screen().scrollback() > 0 {
             t.parser.screen_mut().set_scrollback(0);
         }
+        t.sel = None;
         match t.id {
             Some(id) => self.notify(ClientNotify::PtyInput { id, data }),
             None => t.queued.extend(data),
@@ -1405,7 +1503,10 @@ impl App {
             // that is another machine). Anything else: the system's browser, on the machine at
             // the keyboard (a remote shell has none).
             TermEvent::OpenUrl(url) => self.open_link(&url),
+            TermEvent::Select(sel) => t.sel = sel,
             TermEvent::Scroll(lines) => {
+                // The selection is of the rows that were shown.
+                t.sel = None;
                 let s = t.parser.screen_mut();
                 let cur = s.scrollback() as i64;
                 s.set_scrollback((cur + lines as i64).max(0) as usize);
@@ -1426,33 +1527,32 @@ impl App {
     fn terminal_key(&mut self, chord: KeyChord, text: Option<String>) -> Option<Task<Message>> {
         let cmd = self.keymap.lookup(&chord);
         let app_chord = if cfg!(target_os = "macos") { chord.logo } else { chord.ctrl && chord.shift };
-        // Ctrl chords shells don't use; others (Ctrl+Q, Ctrl+W, ...) stay with the shell.
-        let always_app = cmd.is_some_and(|c| {
-            tab_number(c).is_some()
-                || matches!(
-                    c,
-                    Command::ToggleTerminal
-                        | Command::NewTerminal
-                        | Command::NextTab
-                        | Command::PrevTab
-                        | Command::NextPane
-                        | Command::PrevPane
-                        | Command::FontBigger
-                        | Command::FontSmaller
-                )
-        });
+        let always_app = cmd.is_some_and(leaves_the_shell);
+        // Copy and paste: Cmd+C / Cmd+V on macOS (as bound), Ctrl+Shift+C / V elsewhere, where
+        // Ctrl+C and Ctrl+V are the shell's.
+        let mac = cfg!(target_os = "macos");
+        let other = |c: char| !mac && chord.ctrl && chord.shift && !chord.alt && chord.key == Key::Char(c);
+        if app_chord && (cmd == Some(Command::Copy) && mac || other('c')) {
+            let text = self.focused_term().and_then(|t| Some(crate::terminal_view::selected_text(t.parser.screen(), t.sel?)));
+            return Some(match text {
+                Some(s) => Task::batch([iced::clipboard::write(s), self.flash_info("copied")]),
+                None => self.flash_info("nothing selected: drag over the text to copy"),
+            });
+        }
         if app_chord || always_app {
-            let is_copy_paste = matches!(chord.key, Key::Char('v'));
-            if is_copy_paste {
+            if cmd == Some(Command::Paste) && mac || other('v') {
                 return Some(iced::clipboard::read().map(Message::PastedTerm));
             }
-            return match cmd {
-                Some(Command::Copy | Command::Paste | Command::Cut | Command::Undo | Command::Redo | Command::SelectAll) => {
-                    Some(Task::none())
-                }
-                Some(c) => Some(self.exec(c)),
-                None => Some(Task::none()),
-            };
+            match cmd {
+                // Only what works from anywhere leaves the terminal: an editing command (delete
+                // line, comment, cursor moves, undo) would change the file behind it, out of sight.
+                Some(c) if app_wide(c) || c == Command::Save => return Some(self.exec(c)),
+                Some(_) => return Some(Task::none()),
+                // Cmd chords nothing is bound to are nobody's.
+                None if chord.logo => return Some(Task::none()),
+                // Ctrl+Shift ones are the shell's (Ctrl+Shift+- is readline's undo, C-_).
+                None => {}
+            }
         }
         let app_cursor = self.focused_term().is_some_and(|t| t.parser.screen().application_cursor());
         let bytes = key_bytes(&chord, text.as_deref(), app_cursor)?;
@@ -1472,14 +1572,14 @@ impl App {
             if chord.key == l.key {
                 return done; // auto-repeat while held
             }
-            if chord.ctrl && chord.key == HIDE_TERMS_KEY {
+            if l.joins(&chord, HIDE_TERMS_KEY) {
                 if repeat {
                     return done;
                 }
                 l.used = true;
                 return Some(self.hide_show_terms());
             }
-            if chord.ctrl && chord.key == TOOLBAR_KEY {
+            if l.joins(&chord, TOOLBAR_KEY) {
                 if !repeat {
                     l.used = true;
                     if self.focus == Focus::Toolbar {
@@ -1503,7 +1603,7 @@ impl App {
         if repeat {
             return done; // never repeat-open terminals
         }
-        let mut leader = Leader { key: chord.key, tap, used: false };
+        let mut leader = Leader { key: chord.key, ctrl: chord.ctrl, alt: chord.alt, logo: chord.logo, tap, used: false };
         if self.held.contains(&Key::Tab) {
             // Pressed on top of Ctrl+Tab (the old pane gesture): Tab already did its job, and
             // this must not open a terminal.
@@ -1524,6 +1624,9 @@ impl App {
         if self.settings.menu && chord == KeyChord::new(Key::Esc) {
             self.settings.menu = false;
             return Task::none();
+        }
+        if self.palette.is_some() {
+            return self.palette_key(chord, text);
         }
         if self.search.open {
             return self.search_key(chord, text);
@@ -1579,14 +1682,16 @@ impl App {
             }
         }
         let cmd = self.keymap.lookup(&chord);
-        if cmd != Some(Command::Quit) {
-            self.quit_armed = false;
-        }
-        if cmd != Some(Command::CloseTab) {
-            self.close_armed = false;
-        }
-        if cmd != Some(Command::Save) {
-            self.force_save_armed = false;
+        // Anything else in between calls the confirmation off.
+        if let Some((what, _)) = self.armed {
+            let again = match what {
+                Armed::Quit => Command::Quit,
+                Armed::Close(_) | Armed::KillAgent(_) => Command::CloseTab,
+                Armed::ForceSave(_) => Command::Save,
+            };
+            if cmd != Some(again) {
+                self.armed = None;
+            }
         }
         if let Some(c) = cmd {
             return self.exec(c);
@@ -1663,6 +1768,7 @@ impl App {
             Save => return self.save(),
             ToggleExplorer => return self.toggle_tree(),
             Find => return self.search_start(),
+            CommandPalette => return self.palette_open(),
             // Only means something in the file tree, which handles it itself.
             OpenInNewTab => return Task::none(),
             ToggleTerminal => return self.toggle_terminal(false),
@@ -1704,6 +1810,11 @@ impl App {
             NewAgent => return self.ai_new_agent(),
             KillAgent if self.ai.shown() => return self.on_ai_msg(ai::Msg::Kill(self.ai_current())),
             KillAgent => return Task::none(),
+            StopAgent if self.ai.shown() => {
+                self.ai_stop();
+                return Task::none();
+            }
+            StopAgent => return Task::none(),
             FoldAgents => return self.on_ai_msg(ai::Msg::Fold),
             AgentHistory => return self.ai_history_open(),
             Panic => return self.ai_panic(),
@@ -1713,7 +1824,7 @@ impl App {
             }
             CloseTab => return self.close_focused(),
             ReopenClosedTab => return self.reopen_closed_tab(),
-            FontBigger | FontSmaller | TogglePreview if self.pdf_active() => {
+            FontBigger | FontSmaller | FontReset | TogglePreview if self.pdf_active() => {
                 return self.pdf_command(c).unwrap_or_else(Task::none);
             }
             FontBigger | FontSmaller if self.preview_shown() && self.focus == Focus::Main => {
@@ -1724,10 +1835,20 @@ impl App {
                 return self.web_zoom_by(if c == FontBigger { 1 } else { -1 });
             }
             FontBigger | FontSmaller => return self.zoom_font(if c == FontBigger { 1 } else { -1 }),
+            FontReset if self.preview_shown() && self.focus == Focus::Main => {
+                self.preview_zoom = 1.0;
+                return self.flash_info("preview 100%");
+            }
+            FontReset if self.web_front().is_some() && self.focus == Focus::Main => return self.web_zoom_by(0),
+            FontReset => {
+                let size = nib_editor::config::default_font_size();
+                return self.update(Message::Settings(settings::Msg::FontSize(size)));
+            }
             c if tab_number(c).is_some() => {
                 let i = tab_number(c).unwrap();
+                // As a click on its tab: in front, with the keyboard (from the agents tab too).
                 if i < self.tabs.len() {
-                    self.active = i;
+                    return self.update(Message::SelectTab(i));
                 }
                 return Task::none();
             }
@@ -1815,12 +1936,9 @@ impl App {
                 Task::none()
             }
             Focus::Toolbar => Task::none(),
-            // The tab shown, whole: the agents tab closes, its agents keep working.
-            Focus::Tabs if self.ai_history_front() && self.ai.shown() => self.handle(Message::Ai(ai::Msg::HistoryClose)),
-            Focus::Tabs if self.ai.shown() => {
-                self.ai_close();
-                Task::none()
-            }
+            // The agents tab in front: as in the panel (the history tab closes, or the agent shown;
+            // hiding the agents tab is ToggleAi).
+            Focus::Tabs if self.ai.shown() => self.ai_close_key(),
             Focus::Git => {
                 self.git_close();
                 Task::none()
@@ -1844,11 +1962,12 @@ impl App {
 
     fn close_tab(&mut self) -> Task<Message> {
         let Some(tab) = self.tab() else { return Task::none() };
-        if tab.doc.is_modified() && !self.close_armed {
-            self.close_armed = true;
-            return self.flash_warn(format!("unsaved changes — {MOD}W again to discard"));
+        let (id, modified) = (tab.id, tab.doc.is_modified());
+        let name = tab.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "this tab".into());
+        if modified && !self.take_armed(Armed::Close(id)) {
+            self.arm(Armed::Close(id));
+            return self.flash_warn(format!("unsaved changes in {name} — close it again to discard"));
         }
-        self.close_armed = false;
         self.lsp_close(self.active);
         let tab = self.tabs.remove(self.active);
         if let (false, Some(p)) = (tab.local, tab.doc.path.as_ref()) {
@@ -1886,10 +2005,29 @@ impl App {
             .into()
     }
 
+    /// The daemon is there and has taken the Hello.
+    fn live(&self) -> bool {
+        self.link == Link::Live
+    }
+
+    /// The connection was lost (or refused).
+    fn lost(&self) -> bool {
+        self.link == Link::Lost
+    }
+
+    fn arm(&mut self, what: Armed) {
+        self.armed = Some((what, Instant::now()));
+    }
+
+    /// Whether this is the confirming second press for `what`. Either way the warning is spent.
+    fn take_armed(&mut self, what: Armed) -> bool {
+        matches!(self.armed.take(), Some((w, at)) if w == what && at.elapsed() < ARM_WINDOW)
+    }
+
     fn quit(&mut self) -> Task<Message> {
         let dirty = self.tabs.iter().filter(|t| t.doc.is_modified()).count();
-        if dirty > 0 && !self.quit_armed {
-            self.quit_armed = true;
+        if dirty > 0 && !self.take_armed(Armed::Quit) {
+            self.arm(Armed::Quit);
             return self.flash_warn(format!("{dirty} unsaved file(s) — quit again to discard"));
         }
         crate::forward::clear_now();
@@ -1985,7 +2123,7 @@ impl App {
                 }
                 let focused = self.focus == Focus::Terminal(t.key);
                 let key = t.key;
-                let tv = TerminalView::new(t.parser.screen(), th, self.face.font, self.face.size, focused, move |ev| Message::Term(key, ev));
+                let tv = TerminalView::new(t.parser.screen(), th, self.face.font, self.face.size, focused, move |ev| Message::Term(key, ev)).selection(t.sel);
                 let body: Element<'_, Message> = match self.serve_header(t) {
                     Some(head) => column![head, Element::from(tv)].into(),
                     None => tv.into(),
@@ -2034,7 +2172,9 @@ impl App {
         let name = text("nibble").size(18).font(crate::fonts::mono()).color(th.dim);
         let mut col = column![logo, name].spacing(10).align_x(iced::Alignment::Center);
 
-        if self.connected {
+        if self.lost() {
+            col = col.push(space().height(24)).push(text(format!("disconnected from {}", self.label)).size(12).color(th.warn));
+        } else if self.live() {
             let mut hints = column![].spacing(8);
             for (cmd, what) in [
                 (Command::ToggleExplorer, "open a file"),
@@ -2061,8 +2201,6 @@ impl App {
             col = col.push(space().height(24)).push(
                 container(text(format!("couldn't connect to {label}: {e}{hint}")).size(12).color(th.warn)).max_width(560),
             );
-        } else if self.disconnected {
-            col = col.push(space().height(24)).push(text(format!("disconnected from {}", self.label)).size(12).color(th.warn));
         }
         container(col).center(Length::Fill).into()
     }
@@ -2089,8 +2227,15 @@ impl App {
         let th = &self.theme;
         // The keys are in the bar: the tab in front is filled in, like a selected row.
         let in_bar = self.focus == Focus::Tabs;
+        let file_name = |t: &Tab| t.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let tabs = self.tabs.iter().enumerate().map(|(i, t)| {
-            let name = t.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = file_name(t);
+            // Two tabs of the same name (two mod.rs): each says its folder.
+            let twin = !name.is_empty() && self.tabs.iter().filter(|o| o.web.is_none() && !o.diff && file_name(o) == name).count() > 1;
+            let name = match t.doc.path.as_ref().and_then(|p| p.parent()).and_then(|d| d.file_name()).filter(|_| twin) {
+                Some(dir) => format!("{}/{name}", dir.to_string_lossy()),
+                None => name,
+            };
             // The tab a followed agent opened.
             let name = if t.diff { "Review".to_string() } else if let Some(page) = t.web { self.web_title(page) } else { name };
             let name = if t.doc.path.as_deref().is_some_and(|p| self.ai_follow_tab(p)) { format!("◉ {name}") } else { name };
@@ -2100,7 +2245,7 @@ impl App {
             let underline = if active { th.accent } else { Color::TRANSPARENT };
             let held = (active && in_bar).then_some(iced::Background::Color(th.browser_sel_bg));
             let label = row![
-                text(name).size(12).color(fg).font(crate::fonts::mono()),
+                text(name).size(12).color(fg).font(if t.is_transient() { crate::fonts::mono_italic() } else { crate::fonts::mono() }),
                 button(text(dot).size(11).color(th.dim)).on_press(Message::CloseTabAt(i)).padding([0, 4]).style(|_, _| button::Style::default()),
             ]
             .spacing(6)
@@ -2185,15 +2330,16 @@ impl App {
         vec![
             (
                 if self.tree.open { &i.folder_on } else { &i.folder },
-                format!("File tree ({MOD}B)"),
+                self.tip_with_key("File tree", Command::ToggleExplorer),
                 Message::Control(Command::ToggleExplorer),
             ),
             (if self.ai.shown() { &i.network_on } else { &i.network }, self.tip_with_key("Agents", Command::ToggleAi), Message::Control(Command::ToggleAi)),
             (
                 if self.terms_visible { &i.terminal_on } else { &i.terminal },
-                "Terminals: show / hide (Ctrl+` H) · new: Ctrl+`".into(),
+                self.tip_with_key("Terminals: show / hide", Command::ToggleTerminal),
                 Message::Control(Command::ToggleTerminal),
             ),
+            (&i.terminal_new, self.tip_with_key("New terminal", Command::NewTerminal), Message::Control(Command::NewTerminal)),
             (
                 // Lit while the panel is open or any app runs.
                 if self.apps.open || self.serve.list.iter().any(|a| a.running()) { &i.apps_on } else { &i.apps },
@@ -2203,7 +2349,7 @@ impl App {
             (if self.git_ui.open { &i.git_on } else { &i.git }, self.tip_with_key("Git", Command::ToggleGit), Message::Control(Command::ToggleGit)),
             (if self.diff_active() { &i.diff_on } else { &i.diff }, self.tip_with_key("Review: what changed, like a pull request", Command::ToggleDiff), Message::Control(Command::ToggleDiff)),
             (if self.ssh.open { &i.remote_on } else { &i.remote }, self.tip_with_key("SSH: connections", Command::ToggleSsh), Message::Control(Command::ToggleSsh)),
-            (if gear_on { &i.gear_on } else { &i.gear }, "Settings".into(), Message::Settings(settings::Msg::ToggleMenu)),
+            (if gear_on { &i.gear_on } else { &i.gear }, self.tip_with_key("Settings", Command::OpenSettings), Message::Settings(settings::Msg::ToggleMenu)),
         ]
     }
 
@@ -2399,6 +2545,7 @@ mod tests {
             theme_cfg: Default::default(),
             lsp: vec![],
             ai: Default::default(),
+            window: Default::default(),
             launch: crate::Launch {
                 target: nib_editor::Target::Local { nibd: None },
                 root: "/tmp".into(),
@@ -2431,6 +2578,121 @@ mod tests {
         down(a, s);
         up(a, s.rsplit('+').next().unwrap());
     }
+    #[test]
+    fn a_confirmation_counts_only_for_the_same_tab_and_soon() {
+        let mut a = app();
+        for name in ["a.rs", "b.rs"] {
+            let mut doc = Document::new(Default::default(), Some(PathBuf::from(format!("/tmp/{name}"))));
+            doc.type_char('x');
+            a.put_doc(doc, true);
+        }
+        // Close b (warns), then the × of a: a warns too, it is not closed on b's warning.
+        down(&mut a, "mod+w");
+        assert_eq!(a.tabs.len(), 2);
+        let _ = a.update(Message::CloseTabAt(0));
+        assert_eq!(a.tabs.len(), 2, "a's close was not confirmed by b's warning");
+        // The × of a again: now it closes.
+        let _ = a.update(Message::CloseTabAt(0));
+        assert_eq!(a.tabs.len(), 1);
+        // A late second press warns again.
+        down(&mut a, "mod+w");
+        a.armed = a.armed.map(|(w, at)| (w, at - ARM_WINDOW));
+        down(&mut a, "mod+w");
+        assert_eq!(a.tabs.len(), 1, "an old warning does not confirm");
+        // Quit: the same.
+        down(&mut a, "mod+q");
+        a.armed = a.armed.map(|(w, at)| (w, at - ARM_WINDOW));
+        assert!(!a.take_armed(Armed::Quit));
+    }
+
+    #[test]
+    fn a_headless_settings_save_keeps_the_configured_window() {
+        let mut a = app();
+        a.headless = true;
+        let cfg = nib_editor::config::WindowConfig { width: 1000.0, height: 700.0, fullscreen: true };
+        a.seed_window(&cfg);
+        let w = a.user_settings().window;
+        assert_eq!((w.width, w.height, w.fullscreen), (1000.0, 700.0, true));
+    }
+
+    #[test]
+    fn a_file_opened_in_passing_replaces_only_another_untouched_one() {
+        let mut a = app();
+        let doc = |n: &str| Document::new(Default::default(), Some(PathBuf::from(format!("/tmp/{n}"))));
+        // Opened on purpose: kept by an open in passing.
+        a.put_doc(doc("kept.rs"), true);
+        a.put_doc(doc("a.rs"), false);
+        assert_eq!(a.tabs.len(), 2);
+        // In passing over in passing: replaced, and reopen-closed can bring it back.
+        a.put_doc(doc("b.rs"), false);
+        assert_eq!(a.tabs.len(), 2);
+        assert!(a.tabs[1].is_transient());
+        assert_eq!(a.closed.last().map(String::as_str), Some("/tmp/a.rs"));
+        // From another tab: the slot is reused where it is, not added to.
+        a.active = 0;
+        a.put_doc(doc("b2.rs"), false);
+        assert_eq!((a.tabs.len(), a.active), (2, 1));
+        // Edited (even if undone back): its own tab now.
+        a.tabs[1].doc.type_char('x');
+        a.tabs[1].doc.undo();
+        a.put_doc(doc("c.rs"), false);
+        assert_eq!(a.tabs.len(), 3);
+    }
+
+    #[test]
+    fn cmd_number_brings_the_file_tab_forward_from_the_agents_tab() {
+        let mut a = app();
+        open_file(&mut a, "a.rs");
+        open_file(&mut a, "b.rs");
+        a.ai.open = true;
+        a.ai.front = true;
+        a.focus = Focus::Ai;
+        down(&mut a, "mod+1");
+        assert!(!a.ai.shown());
+        assert_eq!((a.active, a.focus), (0, Focus::Main));
+        // And mod+0 is the font's default size again.
+        down(&mut a, "mod+=");
+        down(&mut a, "mod+0");
+        assert_eq!(a.face.size, nib_editor::config::default_font_size());
+    }
+
+    #[test]
+    fn text_selected_in_a_terminal_can_be_copied() {
+        let mut a = with_terms(1);
+        let key = a.terms[0].key;
+        a.terms[0].parser.process(b"hello world\r\nsecond line");
+        let copy = if cfg!(target_os = "macos") { "cmd+c" } else { "ctrl+shift+c" };
+        down(&mut a, copy);
+        assert!(a.flash.as_ref().is_some_and(|f| f.0.contains("nothing selected")));
+        let _ = a.update(Message::Term(key, TermEvent::Select(Some(((0, 6), (1, 5))))));
+        assert_eq!(crate::terminal_view::selected_text(a.terms[0].parser.screen(), a.terms[0].sel.unwrap()), "world\nsecond");
+        down(&mut a, copy);
+        assert!(a.flash.as_ref().is_some_and(|f| f.0 == "copied"));
+        assert!(a.terms[0].queued.is_empty(), "the copy key did not reach the shell");
+        // Typing (or scrolling) leaves the selection behind.
+        let _ = a.update(Message::Key { chord: chord("x"), text: Some("x".into()), repeat: false });
+        assert!(a.terms[0].sel.is_none());
+    }
+
+    #[test]
+    fn editing_shortcuts_in_a_terminal_leave_the_file_alone() {
+        let mut a = with_terms(1);
+        let mut doc = Document::new(Default::default(), Some(PathBuf::from("/tmp/a.rs")));
+        doc.type_char('x');
+        a.put_doc(doc, true);
+        a.focus = term(&a, 0);
+        let before = a.tabs[0].doc.to_bytes();
+        // Delete line, toggle comment, indent: editor commands, not for a file out of sight.
+        for k in ["mod+shift+k", "mod+/", "mod+]"] {
+            down(&mut a, k);
+        }
+        assert_eq!(a.tabs[0].doc.to_bytes(), before);
+        assert_eq!(a.focus, term(&a, 0));
+        // An app-wide one still works from the terminal.
+        down(&mut a, "mod+b");
+        assert!(a.tree.open);
+    }
+
     /// Answer every outstanding PtyOpen like the daemon would.
     fn answer_ptys(a: &mut App) {
         let ids: Vec<ReqId> =
@@ -2465,13 +2727,18 @@ mod tests {
     }
 
     #[test]
-    fn every_tap_opens_a_new_terminal() {
+    fn a_tap_opens_a_terminal_or_goes_there_and_back_and_shift_opens_another() {
         let mut a = app();
         tap(&mut a, "ctrl+`");
         assert_eq!(a.terms.len(), 1);
         assert_eq!(a.focus, term(&a, 0));
+        // Again: back to the editor, then to the same terminal; never a second one.
         tap(&mut a, "ctrl+`");
+        assert_eq!((a.terms.len(), a.focus), (1, Focus::Main));
+        tap(&mut a, "ctrl+`");
+        assert_eq!((a.terms.len(), a.focus), (1, term(&a, 0)));
         tap(&mut a, "ctrl+shift+`"); // "Ctrl+~"
+        tap(&mut a, "ctrl+shift+`");
         assert_eq!(a.terms.len(), 3);
         assert_eq!(a.focus, term(&a, 2), "focus goes to the new one");
     }
@@ -2718,8 +2985,8 @@ mod tests {
     #[test]
     fn keys_reach_the_focused_terminal_only() {
         let mut a = app();
-        tap(&mut a, "ctrl+`");
-        tap(&mut a, "ctrl+`"); // both still waiting for the daemon: input is queued
+        tap(&mut a, "ctrl+shift+`");
+        tap(&mut a, "ctrl+shift+`"); // both still waiting for the daemon: input is queued
         let _ = a.update(Message::Key { chord: chord("a"), text: Some("a".into()), repeat: false });
         cycle(&mut a, 3, false); // B -> Toolbar -> Main -> A
         let _ = a.update(Message::Key { chord: chord("b"), text: Some("b".into()), repeat: false });
@@ -2744,8 +3011,10 @@ mod tests {
         tap(&mut a, "right");
         tap(&mut a, "right");
         tap(&mut a, "right");
+        tap(&mut a, "right");
         tap(&mut a, "right"); // clamps at the last button
-        assert_eq!(a.toolbar_sel, 7);
+        assert_eq!(a.toolbar_sel, 8);
+        tap(&mut a, "left");
         tap(&mut a, "left");
         tap(&mut a, "left");
         tap(&mut a, "left");
@@ -3021,7 +3290,7 @@ mod tests {
     #[test]
     fn images_and_videos_open_as_viewers() {
         let mut a = app();
-        a.connected = true;
+        a.link = crate::app::Link::Live;
         // A video is never read from the daemon.
         let pending = a.pending.len();
         let _ = a.open_path("clip.mp4".into(), true);
@@ -3058,7 +3327,7 @@ mod tests {
     fn pdfs_open_scroll_zoom_and_follow_links() {
         use crate::pdf::{self, Msg};
         let mut a = app();
-        a.connected = true;
+        a.link = crate::app::Link::Live;
         let _ = a.open_path("/tmp/paper.pdf".into(), true);
         let (&id, _) = a.pending.iter().find(|(_, p)| matches!(p, Pending::Open { .. })).unwrap();
         let data = pdf::tests::sample();

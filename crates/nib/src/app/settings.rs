@@ -203,6 +203,15 @@ pub(super) fn raise(c: Color, t: f32) -> Color {
 // ---------------------------------------------------------------------------------------------
 
 impl App {
+    /// At boot: `[window]` as configured, so a settings save before the window reports its size
+    /// (or headless, where it never does) writes back what is there instead of the defaults.
+    pub(super) fn seed_window(&mut self, cfg: &WindowConfig) {
+        self.settings.window.size = Some(Size::new(cfg.width, cfg.height));
+        if self.headless {
+            self.settings.window.fullscreen = cfg.fullscreen;
+        }
+    }
+
     pub(super) fn user_settings(&self) -> UserSettings {
         UserSettings {
             font_size: self.face.size,
@@ -669,6 +678,22 @@ impl App {
             line_height: cfg.editor.line_height,
         };
         self.beginner = cfg.editor.beginner_mode;
+        // Tab width: the open files too (what they hold stays as typed).
+        self.tab_width = cfg.editor.tab_width;
+        for t in &mut self.tabs {
+            t.doc.tab_width = self.tab_width;
+        }
+        // Language servers: the daemon gets them with the next Hello (a connect, another folder).
+        let lsp: Vec<nib_proto::LspServer> = cfg
+            .lsp
+            .iter()
+            .map(|(name, s)| nib_proto::LspServer { name: name.clone(), command: s.command.clone(), extensions: s.extensions.clone(), roots: s.roots.clone() })
+            .collect();
+        let lsp_changed = lsp != self.lsp;
+        self.lsp = lsp;
+        if self.ai.adopt_switches(&cfg.ai) {
+            self.ai_tell_wpf();
+        }
         self.ai.retune(cfg.ai.effort, cfg.ai.prompt, cfg.ai.image_zoom_delay);
         let mut window_task = Task::none();
         if let Some(id) = self.settings.window.id {
@@ -692,7 +717,8 @@ impl App {
                 let w = w.clone();
                 self.flash_warn(w)
             }
-            None => self.flash_info("settings applied from config.toml"),
+            None if lsp_changed => self.flash_info("settings applied from config.toml; [lsp] takes effect on the next connect (renderer: on the next start)"),
+            None => self.flash_info("settings applied from config.toml (renderer: on the next start)"),
         };
         Task::batch([window_task, note])
     }

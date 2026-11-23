@@ -252,6 +252,26 @@ fn plan_of(kind: &AiStepKind) -> Option<String> {
 }
 
 impl Chat {
+    /// Its session ended (exit, a lost connection) or a new one starts: what only that session
+    /// could answer or finish goes with it, so nothing of it shows over what comes next (a
+    /// permission card, a half-filled question form, "Compacting…", "stopped by the user").
+    pub(super) fn drop_session_state(&mut self) {
+        self.ask = None;
+        self.form = Default::default();
+        self.stopping = false;
+        self.resume = false;
+        self.compacting = false;
+        self.accepting = false;
+    }
+
+    /// A new conversation (`/clear`, a new assistant): nothing of the old one's plans, answers or
+    /// "done" carries over.
+    pub(super) fn reset_conversation(&mut self) {
+        self.drop_session_state();
+        self.plans.clear();
+        self.finished = None;
+    }
+
     /// The key of the plan it asks to have approved, if that is what it asks.
     pub(super) fn asked_plan(&self) -> Option<&String> {
         let a = self.ask.as_ref().filter(|a| a.tool == "ExitPlanMode")?;
@@ -552,6 +572,35 @@ impl Panel {
     }
 
     /// The remembered system prompt, `None` when empty.
+    /// Settings > Reload: the `[ai]` switches and the last pick take effect now (the tuning goes
+    /// through `retune`). Whether WPF changed, so nibd can be told.
+    pub(super) fn adopt_switches(&mut self, cfg: &nib_editor::config::AiConfig) -> bool {
+        self.cloud_models = cfg.cloud_models;
+        self.pick_model = cfg.pick_model;
+        if let Some(agent) = cfg.agent.as_deref().and_then(AiAgent::from_id) {
+            self.last = Some((agent, cfg.model.clone()));
+        }
+        std::mem::replace(&mut self.wpf, cfg.worktree_per_feature) != cfg.worktree_per_feature
+    }
+
+    /// The panel for another machine: nothing of the old machine's agents, chats or setup, but
+    /// the user's choices as they are now (WPF, the last agent / model / effort / prompt, model
+    /// picking) carry over, so a switch never quietly puts back the defaults.
+    pub(super) fn for_another_machine(&self) -> Self {
+        let mut p = Self::new(nib_editor::config::AiConfig {
+            cloud_models: self.cloud_models,
+            agent: self.last.as_ref().map(|(a, _)| a.id().to_string()),
+            model: self.last.as_ref().and_then(|(_, m)| m.clone()),
+            pick_model: self.pick_model,
+            effort: self.last_effort.clone(),
+            prompt: self.last_prompt_opt(),
+            image_zoom_delay: self.image_zoom_delay.as_secs_f32(),
+            worktree_per_feature: self.wpf,
+        });
+        p.open = self.open;
+        p
+    }
+
     fn last_prompt_opt(&self) -> Option<String> {
         Some(self.last_prompt.clone()).filter(|p| !p.is_empty())
     }
@@ -1410,6 +1459,8 @@ impl App {
 
     /// The daemon went away: nothing outstanding will be answered. Say so instead of waiting.
     pub(super) fn ai_disconnected(&mut self) {
+        // Nothing more of the followed agent will come; its files can't be read again from here.
+        let _ = self.ai_follow_stop(true);
         self.ai.checking = false;
         self.ai.panic = None;
         for c in &mut self.ai.chats {
@@ -1421,6 +1472,7 @@ impl App {
             }
             c.busy = false;
             c.frozen = false;
+            c.drop_session_state();
             end_steps(c, true);
         }
     }
@@ -1474,7 +1526,9 @@ impl App {
         match pick {
             Some(agent) if then.is_some() || !running => {
                 if then.is_some() {
+                    // The chat the setup was for comes forward, not just its tab.
                     self.ai.open = true;
+                    self.ai.front = true;
                     self.focus = Focus::Ai;
                 }
                 // The same one again keeps its model, if it still has it.
@@ -1532,7 +1586,7 @@ impl App {
             ai.turns.push(Turn { who: Who::User, text: q.clone(), md: markdown::Content::new(), math: Default::default(), images: Default::default(), step: None });
         }
         ai.busy = ai.queued.is_some();
-        ai.compacting = false;
+        ai.reset_conversation();
         ai.error = None;
         ai.picking = false;
         ai.pull_focus = false;
@@ -1826,6 +1880,12 @@ impl App {
             self.ai_close();
             return Task::none();
         }
+        // One that is at work is not ended by a stray key: press again.
+        let key = self.ai.key;
+        if self.ai.busy && !self.take_armed(super::Armed::KillAgent(key)) {
+            self.arm(super::Armed::KillAgent(key));
+            return self.flash_warn(format!("{} is working — close again to stop and end it", self.ai_name()));
+        }
         self.ai_kill(self.ai.cur)
     }
 
@@ -1841,8 +1901,9 @@ impl App {
 
     /// The keyboard goes back to where it came from.
     fn ai_leave(&mut self) {
-        // Back to the file that was in front, if there is one; the agents keep working.
-        self.ai.front = self.tabs.is_empty();
+        // Back to the file that was in front, if there is one; the agents keep working. (A
+        // closed panel is in front of nothing.)
+        self.ai.front = self.ai.open && self.tabs.is_empty();
         self.focus = match self.ai.return_to.take() {
             Some(Focus::Terminal(k)) if self.term_shown(k) => Focus::Terminal(k),
             Some(Focus::Tree) if self.tree.open => Focus::Tree,
@@ -1853,6 +1914,7 @@ impl App {
 
     fn ai_start(&mut self, agent: AiAgent) -> Task<Message> {
         self.ai.generation += 1;
+        self.ai.drop_session_state();
         self.ai.session = Session::Starting;
         self.ai.usage = None;
         self.ai.since = Some(Instant::now());
@@ -1862,8 +1924,6 @@ impl App {
         // What the `/` menu offers this assistant (asked each chat: skills come and go).
         self.ai.local_skills = compose::local_skills();
         let skills = self.request(Request::AiSkills { agent }, Pending::AiSkills { agent });
-        // Every assistant works as an agent, within the mode picked.
-        let _ = AiAgent::Claude;
         let (mode, chat) = (self.ai.mode, self.ai.key);
         self.ai.told_mode = mode;
         let (effort, prompt) = self.ai_tuning(agent);
@@ -2195,7 +2255,7 @@ impl App {
             AiEvent::Exit { msg } => {
                 ai.busy = false;
                 ai.frozen = false;
-                ai.ask = None;
+                ai.drop_session_state();
                 end_steps(ai, true);
                 let name = ai.agent.map_or("The assistant", AiAgent::name);
                 let msg = msg.unwrap_or_else(|| format!("{name} exited."));
@@ -2210,6 +2270,12 @@ impl App {
         let text = self.ai.input.trim().to_string();
         if text.is_empty() && self.ai.images.is_empty() {
             return Task::none();
+        }
+        // Waiting or not, nibble's own commands run (`/clear` is not an answer).
+        if self.ai.ask.is_some() || self.ai.asked_plan().is_some() {
+            if let Some(t) = self.ai_slash_command(&text) {
+                return t;
+            }
         }
         // It is waiting for leave: what is typed is the answer (a question's), or a no with what
         // to do instead.
@@ -2293,6 +2359,10 @@ impl App {
 
     fn ai_send_now(&mut self, id: AiId, text: String) {
         let (text, attach) = self.ai_outgoing(&text);
+        // A dropped file goes once, as it was when dropped; named again later, it is read afresh.
+        for a in &attach {
+            self.ai.dropped.remove(&a.path);
+        }
         let images = std::mem::take(&mut self.ai.images).into_iter().map(|p| AiImage { media_type: "image/png".into(), data: p.png }).collect();
         self.notify(ClientNotify::AiSend { id, text, attach, images });
     }
@@ -2325,7 +2395,11 @@ impl App {
             return self.ai_panic_key(chord.key);
         }
         if self.ai.accepting {
-            return self.ai_accept_key(chord);
+            if let Some(t) = self.ai_accept_key(chord) {
+                return t;
+            }
+            // Anything else puts the question away and does what it does in the chat (types,
+            // walks the agents with Tab, runs an app-wide command).
         }
         // ⌘D: this agent's work in the diff tab, like its pull request (Esc there comes back).
         let see = if cfg!(target_os = "macos") { chord.logo && !chord.ctrl } else { chord.ctrl };
@@ -2385,10 +2459,13 @@ impl App {
             }
         }
         match chord.key {
-            // Waiting for leave: Esc says no, Enter on an empty box says yes.
-            Key::Esc if self.ai.ask.is_some() => self.ai_answer(false, None),
-            Key::Enter if self.ai.input.is_empty() && self.ai.images.is_empty() && self.ai.ask.as_ref().is_some_and(|a| a.questions.is_empty()) && !held && !chord.alt && !chord.shift => self.ai_answer(true, None),
+            // A selection first: Esc only lets go of it.
             Key::Esc if self.ai.selection().is_some() => self.ai.anchor = None,
+            // Waiting for leave: Esc on an empty box says no (with words typed, Enter says no
+            // with them, and Esc keeps them), Enter on an empty box says yes.
+            Key::Esc if self.ai.ask.is_some() && self.ai.input.trim().is_empty() => self.ai_answer(false, None),
+            Key::Esc if self.ai.ask.is_some() => return self.flash_info("Enter refuses with what you typed; empty the box for Esc to refuse without it"),
+            Key::Enter if self.ai.input.is_empty() && self.ai.images.is_empty() && self.ai.ask.as_ref().is_some_and(|a| a.questions.is_empty()) && !held && !chord.alt && !chord.shift => self.ai_answer(true, None),
             Key::Esc => self.ai_leave(),
             // With nothing typed, Tab walks the agents (with text it would be too easy to leave a
             // half-written message by accident; the menu's Tab completes, above).
@@ -2770,7 +2847,7 @@ impl App {
             if let Some(n) = note {
                 col = col.push(text(n).size(11).color(dim));
             }
-            col = col.push(text("Picking a model starts a new chat. ↑↓ model · ←→ assistant · Enter pick · Esc close").size(11).color(dim));
+            col = col.push(text("Picking a model goes on with this chat. ↑↓ model · ←→ assistant · Enter pick · Esc close").size(11).color(dim));
         } else if shown == AiAgent::OpenCode && info.can_install && !busy {
             col = col.push(
                 text("Install runs OpenCode's and Ollama's own installers on that machine (Ollama may ask for your password in the terminal). Then download a model here.")
@@ -2927,12 +3004,12 @@ fn limit_label(l: &AiLimit) -> String {
     s
 }
 
-/// The models the dropdown lists for `info`. OpenCode is the one for your own models: unless
 /// `[ai] image_zoom_delay` (seconds) as a wait; a negative or non-finite one is no wait.
 fn zoom_delay(seconds: f32) -> std::time::Duration {
     std::time::Duration::try_from_secs_f32(seconds).unwrap_or_default()
 }
 
+/// The models the dropdown lists for `info`. OpenCode is the one for your own models: unless
 /// `[ai] cloud_models` is on, only those downloaded to the machine. The others are cloud
 /// services only, so all of theirs.
 fn shown_models(info: &AiAgentInfo, cloud_models: bool) -> Vec<&AiModel> {
@@ -3220,13 +3297,18 @@ mod tests {
         event(&mut a, 7, done());
         assert!(a.ai.chats[0].finished.is_some() && !a.ai.accepting);
         assert_eq!(a.ai.chats[0].turns.last().map(|t| (t.who, t.text.as_str())), Some((Who::Done, "Asked: Fix the sum\nDone: Fixed calc.py")));
-        // Tabbed to: asked. Any other key goes back to the chat, and is not typed.
+        // Tabbed to: asked. Any other key goes back to the chat, and is typed there (nothing lost).
         key(&mut a, "tab");
         assert!(a.ai.cur == 0 && a.ai.accepting);
         type_str(&mut a, "x");
-        assert!(!a.ai.accepting && a.ai.input.is_empty() && a.ai.finished.is_some());
-        // Asked again next time; ⌘↵ accepts and ends it.
+        assert!(!a.ai.accepting && a.ai.input == "x" && a.ai.finished.is_some());
+        a.ai.input.clear();
+        // Asked again next time; Tab walks on past it; ⌘↵ accepts and ends it.
         key(&mut a, "tab");
+        key(&mut a, "tab");
+        assert!(a.ai.cur == 0 && a.ai.accepting);
+        key(&mut a, "tab");
+        assert!(a.ai.cur == 1, "Tab is not used up by the question");
         key(&mut a, "tab");
         assert!(a.ai.cur == 0 && a.ai.accepting);
         key(&mut a, accept);
@@ -3489,6 +3571,16 @@ mod tests {
         assert!(a.ai.ask.is_some(), "an unrelated resolution leaves this question open");
         event(&mut a, 7, AiEvent::AskResolved { request: "r1".into() });
         assert!(a.ai.ask.is_none(), "an agent-resolved question closes its card");
+        // With words typed, Esc keeps them (Enter would refuse with them).
+        event(&mut a, 7, ask("Bash", false));
+        type_str(&mut a, "half a thought");
+        key(&mut a, "esc");
+        assert!(a.ai.ask.is_some() && a.ai.input == "half a thought");
+        a.ai.input.clear();
+        // nibble's own commands still run while it waits: /clear is not an answer.
+        type_str(&mut a, "/clear");
+        key(&mut a, "enter");
+        assert!(a.ai.ask.is_none() && !a.ai.turns.iter().any(|t| t.text == "/clear"));
     }
 
     #[test]
@@ -3562,6 +3654,40 @@ mod tests {
         let _ = a.update(Message::Ai(Msg::Follow));
         let _ = a.update(Message::Ai(Msg::Follow));
         assert!(a.ai.follow.is_none());
+    }
+
+    #[test]
+    fn the_stop_key_stops_the_shown_agent_and_keeps_it() {
+        let mut a = chatting();
+        say(&mut a, "go");
+        assert!(a.ai.busy);
+        let n = a.ai.chats.len();
+        key(&mut a, if cfg!(target_os = "macos") { "cmd+." } else { "ctrl+shift+." });
+        assert!(a.ai.stopping, "told to stop");
+        assert_eq!(a.ai.chats.len(), n, "and still there");
+    }
+
+    #[test]
+    fn following_and_a_pending_question_end_with_the_session() {
+        // Killed while followed: the show stops with it.
+        let mut a = chatting();
+        say(&mut a, "go");
+        let _ = a.update(Message::Ai(Msg::Follow));
+        assert!(a.ai.follow.is_some());
+        let _ = a.ai_kill(a.ai.cur);
+        assert!(a.ai.follow.is_none());
+        // Disconnected while followed and asking: neither the show nor the question outlives it.
+        let mut a = chatting();
+        say(&mut a, "go");
+        let _ = a.update(Message::Ai(Msg::Follow));
+        event(&mut a, 7, AiEvent::Ask(AiAsk { request: "r1".into(), step: None, tool: "Bash".into(), what: "ls".into(), questions: vec![] }));
+        assert!(a.ai.ask.is_some());
+        a.ai_disconnected();
+        assert!(a.ai.follow.is_none() && a.ai.ask.is_none());
+        // A new conversation starts with nothing of the old one's "done".
+        a.ai.finished = Some(Default::default());
+        a.ai.reset_conversation();
+        assert!(a.ai.finished.is_none() && !a.ai.accepting);
     }
 
     #[test]
@@ -3682,8 +3808,13 @@ mod tests {
         key(&mut a, "esc");
         assert!(!a.ai_history_front() && a.ai.shown(), "Esc goes back to the agents");
 
-        // ⌘W on the agents kills the one shown; on a lone blank one it closes the area.
+        // ⌘W on the agents ends the one shown (asking first while it works); on a lone blank one
+        // it closes the area.
         let n = a.ai.chats.len();
+        a.ai.busy = true;
+        let _ = a.update(Message::Control(Command::CloseTab));
+        assert_eq!(a.ai.chats.len(), n, "at work: asked first");
+        assert!(a.flash.as_ref().is_some_and(|f| f.0.contains("working")));
         let _ = a.update(Message::Control(Command::CloseTab));
         assert_eq!(a.ai.chats.len(), n - 1);
         while a.ai.chats.len() > 1 || !a.ai.chats[0].blank() {
@@ -4040,6 +4171,32 @@ mod tests {
         assert_eq!(a.ai.last_effort.as_deref(), Some("low"));
         assert_eq!(a.ai.prompt_save_seq, seq + 1, "a pending save is dropped");
         assert_eq!(Side::Prompt.name(), "system");
+    }
+
+    #[test]
+    fn another_machine_keeps_the_users_ai_choices() {
+        let cfg = nib_editor::config::AiConfig {
+            agent: Some("codex".into()),
+            model: Some("m1".into()),
+            pick_model: false,
+            effort: Some("low".into()),
+            prompt: Some("Be terse.".into()),
+            worktree_per_feature: false,
+            cloud_models: true,
+            image_zoom_delay: 2.0,
+        };
+        let mut p = Panel::new(cfg.clone());
+        p.open = true;
+        let q = p.for_another_machine();
+        assert!(!q.wpf, "WPF stays off");
+        assert!(q.open && !q.pick_model && q.cloud_models);
+        assert_eq!(q.last, Some((AiAgent::Codex, Some("m1".into()))));
+        assert_eq!((q.last_effort.as_deref(), q.last_prompt.as_str()), (Some("low"), "Be terse."));
+        assert_eq!(q.image_zoom_delay, p.image_zoom_delay);
+        // Reload: the switches take effect, and only a WPF change needs telling nibd.
+        let mut r = Panel::new(cfg.clone());
+        assert!(!r.adopt_switches(&cfg));
+        assert!(r.adopt_switches(&nib_editor::config::AiConfig { worktree_per_feature: true, ..cfg }) && r.wpf);
     }
 
     #[test]

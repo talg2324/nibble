@@ -1,41 +1,44 @@
 # nib config — copy to ~/.config/nib/config.toml (Windows: %APPDATA%\nib\config.toml)
+# nibble's defaults are built in, and everything here is commented out: uncomment only what you
+# want different. Font, line height, beginner mode, [window], [theme] and [keys] can also be
+# changed from Settings (gear icon), which writes them here; tab_width and renderer only here.
 
 [editor]
-tab_width = 4
-font_size = 14
-renderer = "auto"        # "cpu" on GPU-less machines (e.g. Horizon VM), "gpu", or "auto"
-                          # (auto on WSL: finds the GPU once and caches it in ~/.cache/nib/gpu.json)
+# tab_width = 4
+# font_size = 14
+# renderer = "auto"        # "cpu" on GPU-less machines (e.g. Horizon VM), "gpu", or "auto"
+#                          # (auto on WSL: finds the GPU once and caches it in ~/.cache/nib/gpu.json)
+#                          # read at start: a change needs a restart
 # font = "JetBrains Mono"  # code font family; unset = system monospace
 # line_height = 1.4
 # beginner_mode = false    # shortcut cheat sheet on the right
-# Everything in [editor], [window], [theme] and [keys] can also be changed from Settings (gear
-# icon). nibble's defaults are built in; this file only needs what you want different.
 
 [window]
 # width = 1200             # logical pixels; also Settings > Appearance > Window
 # height = 800
 # fullscreen = false
 
-# `nib @name [path]` opens a profile. Paths are relative to `root` on the target machine.
-# The SSH panel (server icon) and `nib ctl ssh add` write these for you.
-[profiles.gpu]
-ssh = "gpu-box"          # Host alias from ~/.ssh/config (ProxyJump etc. are honored)
-root = "~/projects/seg"
-
-[profiles.lab]
-ssh = "10.0.0.7"         # or a hostname, or user@host
-user = "tal"             # optional, ssh only: -l
-port = 2222              # -p
-identity = "~/.ssh/lab"  # -i
-jump = "bastion"         # -J
-root = "~/code"
-
-[profiles.ubuntu]
-wsl = "Ubuntu-24.04"     # Windows only
-root = "~/code"
-
-[profiles.here]
-root = "~/src/nibble"    # neither ssh nor wsl = local
+# Saved connections: `nib @name [path]` opens one, and the SSH panel (server icon) lists them.
+# Paths are relative to `root` on the target machine. The SSH panel and `nib ctl ssh add` write
+# these for you; examples:
+# [profiles.gpu]
+# ssh = "gpu-box"          # Host alias from ~/.ssh/config (ProxyJump etc. are honored)
+# root = "~/projects/seg"
+#
+# [profiles.lab]
+# ssh = "10.0.0.7"         # or a hostname, or user@host
+# user = "tal"             # optional, ssh only: -l
+# port = 2222              # -p
+# identity = "~/.ssh/lab"  # -i
+# jump = "bastion"         # -J
+# root = "~/code"
+#
+# [profiles.ubuntu]
+# wsl = "Ubuntu-24.04"     # Windows only
+# root = "~/code"
+#
+# [profiles.here]
+# root = "~/src/project"   # neither ssh nor wsl = this machine
 
 # Colours ("#rrggbb"); everything is optional. Built-in defaults shown.
 [theme]
@@ -83,9 +86,11 @@ root = "~/src/nibble"    # neither ssh nor wsl = local
 # effort = "high"       # nib writes these two as you set them: the thinking level and the
 # prompt = "Be terse."  # system prompt added to the assistant's own (both set in the agents tab)
 # image_zoom_delay = 1.0 # seconds the mouse rests on a picture in the chat before it shows 4x bigger
+# worktree_per_feature = false  # default true: an agent that changes files does it on a branch
+#                               # of its own, landed on yours as one commit (the WPF switch)
 
 # Override shortcuts: chord = command name, or "none" to unbind.
-# Command names: see `nib --commands`.
+# Command names: see `nib --commands` (or the command palette, Cmd/Ctrl+Shift+P).
 [keys]
 # "mod+shift+d" = "duplicate_line"   # mod = Cmd on macOS, Ctrl elsewhere
 # "mod+y" = "none"

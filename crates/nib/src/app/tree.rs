@@ -626,7 +626,7 @@ impl App {
     /// Ask the daemon for the project's files and git state. One question at a time: asked again
     /// while one is out, it is repeated when the answer arrives.
     pub(super) fn tree_refresh(&mut self) -> Task<Message> {
-        if !self.tree.open || !self.connected || self.disconnected {
+        if !self.tree.open || !self.live() {
             return Task::none();
         }
         if self.tree.asking {
@@ -877,7 +877,7 @@ impl App {
             }
             Act::FoldAll => self.tree.fold_all(true),
             Act::Root | Act::RootUp if self.tree.place != Place::Project => {
-                return self.flash_info("only a project folder can become the root (p goes back to the project)");
+                return self.flash_info("only a project folder can become the root (Tab goes round the places, back to the project)");
             }
             Act::Root => {
                 let Some(e) = self.tree.cursor_entry() else { return Task::none() };
@@ -1021,7 +1021,7 @@ impl App {
         }
         if self.tree.ask.is_some() {
             match chord.key {
-                Key::Char('y') | Key::Enter if !held => return self.tree_delete(),
+                Key::Char('y') if !held => return self.tree_delete(),
                 Key::Char('n') | Key::Esc => self.tree.ask = None,
                 _ => {}
             }
@@ -1065,7 +1065,7 @@ impl App {
             Key::Char('-') => return self.tree_act(Act::RootUp),
             Key::F(2) | Key::Char('r') => return self.tree_act(Act::Rename),
             Key::Char('n') => return self.tree_act(if chord.shift { Act::NewFolder } else { Act::NewFile }),
-            Key::Char('d') | Key::Delete | Key::Backspace => return self.tree_act(Act::Delete),
+            Key::Char('d') | Key::Delete => return self.tree_act(Act::Delete),
             Key::Esc if !self.tree.selected.is_empty() => self.tree.selected.clear(),
             Key::Esc if !self.tabs.is_empty() => self.focus = Focus::Main,
             _ => {
@@ -1765,7 +1765,12 @@ mod tests {
         assert_eq!(a.tree.ask.as_deref(), Some(&["src/app".to_string()][..]));
         key(&mut a, "n");
         assert!(a.tree.ask.is_none() && a.tree.input.is_none(), "n answered the question, it did not start a new file");
+        // Backspace, then Enter (from muscle memory) deletes nothing: only d / Delete ask, only y answers.
+        key(&mut a, "backspace");
+        assert!(a.tree.ask.is_none(), "Backspace does not start a delete");
         key(&mut a, "d");
+        key(&mut a, "enter");
+        assert!(a.tree.ask.is_some(), "Enter does not confirm a delete");
         key(&mut a, "y");
         assert!(a.pending.values().any(|p| matches!(p, Pending::TreeFs { reveal: None, renamed: None, .. })));
     }
@@ -1790,7 +1795,7 @@ mod tests {
     #[test]
     fn scratch_and_nibdir_are_places_with_their_own_trees() {
         let mut a = app();
-        a.connected = true;
+        a.link = crate::app::Link::Live;
         a.tree.set_places("/s".into(), "/n".into());
         a.tree.opened.insert("docs".into());
         let project = shown(&a);
@@ -1834,7 +1839,7 @@ mod tests {
     #[test]
     fn an_answer_about_the_previous_place_is_not_shown() {
         let mut a = app();
-        a.connected = true;
+        a.link = crate::app::Link::Live;
         a.tree.set_places("/s".into(), "/n".into());
         key(&mut a, "tab");
         let asked_scratch = sent(&a, |p| matches!(p, Pending::Tree));

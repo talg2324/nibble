@@ -116,7 +116,7 @@ impl App {
     }
 
     fn git_ask(&mut self, poll: bool) -> Task<Message> {
-        if self.disconnected {
+        if self.lost() {
             return Task::none();
         }
         let details = if self.git_ui.open {

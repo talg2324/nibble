@@ -244,7 +244,6 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
         ("mod+a", SelectAll),
         ("mod+b", ToggleExplorer),
         ("mod+o", OpenFolder),
-        ("mod+shift+o", ToggleExplorer),
         ("mod+enter", OpenInNewTab),
         ("ctrl+tab", NextTab),
         ("ctrl+shift+tab", PrevTab),
@@ -265,12 +264,14 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
         ("mod+shift+=", FontBigger), // Mod+"+" on US keyboards
         ("mod++", FontBigger),       // numpad +
         ("mod+-", FontSmaller),
+        ("mod+0", FontReset),
         ("f12", GoToDefinition),
         ("shift+f12", FindReferences),
         ("f2", RenameSymbol),
         ("mod+f2", ChangeAllOccurrences),
-        ("ctrl+`", NewTerminal),
-        ("ctrl+shift+`", NewTerminal), // "Ctrl+~" on US keyboards
+        // Tap: open one, or go there and back; with Shift ("Ctrl+~" on US keyboards): another.
+        ("ctrl+`", ToggleTerminal),
+        ("ctrl+shift+`", NewTerminal),
         ("mod+/", ToggleComment),
         ("mod+p", TogglePreview), // ⌘⇧V is commonly taken by clipboard managers
         ("mod+shift+k", DeleteLine),
@@ -309,11 +310,11 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
         ("mod+shift+[", PrevAgent),
         ("mod+shift+n", NewAgent),
         ("mod+shift+h", AgentHistory),
-        ("mod+shift+backspace", KillAgent),
         ("ctrl+.", Panic),
         ("mod+shift+r", ToggleSsh), // R for remote
         ("mod+shift+a", ToggleApps),
         ("mod+f", Find),
+        ("mod+shift+p", CommandPalette),
     ];
     if cfg!(target_os = "macos") {
         v.extend([
@@ -331,6 +332,7 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
             ("cmd+shift+down", SelectDocEnd),
             ("alt+backspace", DeleteWordBackward),
             ("ctrl+cmd+f", ToggleFullscreen),
+            ("cmd+.", StopAgent),
             // Elsewhere Ctrl+B is the file browser (mod+b): Ctrl+` then B does this on every OS.
             ("ctrl+b", FocusToolbar),
             // Alt+Tab belongs to the window manager elsewhere.
@@ -351,6 +353,8 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
             ("ctrl+shift+end", SelectDocEnd),
             ("ctrl+backspace", DeleteWordBackward),
             ("f11", ToggleFullscreen),
+            // Ctrl+. is Panic.
+            ("ctrl+shift+.", StopAgent),
             ("alt+left", NavigateBack),
             // Ctrl+W belongs to the shell inside a terminal (delete word); this works everywhere.
             ("ctrl+shift+w", CloseTab),

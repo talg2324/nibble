@@ -28,11 +28,10 @@ fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Where the project at `root` keeps its conversations.
+/// Where the project at `root` keeps its conversations: under the name its NIBDIR goes by, so
+/// two projects with the same folder name keep theirs apart (mailbox messages included).
 pub fn dir(root: &Path) -> PathBuf {
-    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "root".into());
-    let slug: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
-    crate::places::xdg("XDG_DATA_HOME", &[".local", "share"]).join("history").join(slug)
+    crate::places::xdg("XDG_DATA_HOME", &[".local", "share"]).join("history").join(crate::places::project_name(root))
 }
 
 /// A conversation's file, if `id` is one of this project's (and not a path).

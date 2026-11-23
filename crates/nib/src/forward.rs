@@ -105,7 +105,7 @@ fn spec(local: u16, remote: u16) -> String {
 /// same options, so that ssh finds the same socket.
 fn mux_command(host: &SshHost, what: &str, local: u16, remote: u16) -> Command {
     let mut c = ssh_command(host, &batch(), &["-O", what, "-L", &spec(local, remote)]);
-    c.args(["-o", "ControlPath=~/.ssh/nib-%C"]).arg(&host.host);
+    c.args(["-o", crate::transport::CONTROL_PATH]).arg(&host.host);
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     c
 }
@@ -437,7 +437,7 @@ mod tests {
     fn the_shared_connection_is_asked_with_the_options_it_was_started_with() {
         let a = args(&mux_command(&host(), "forward", 8765, 8765));
         assert!(has(&a, &["-O", "forward", "-L", "127.0.0.1:8765:localhost:8765"]), "{a:?}");
-        assert!(has(&a, &["-o", "ControlPath=~/.ssh/nib-%C"]) && has(&a, &["-o", "BatchMode=yes"]) && has(&a, &["-o", "StrictHostKeyChecking=yes"]), "{a:?}");
+        assert!(has(&a, &["-o", crate::transport::CONTROL_PATH]) && has(&a, &["-o", "BatchMode=yes"]) && has(&a, &["-o", "StrictHostKeyChecking=yes"]), "{a:?}");
         assert!(has(&a, &["-l", "tal", "-p", "2222"]), "the profile's options: the socket's name is made of them: {a:?}");
         assert_eq!(a.last().map(String::as_str), Some("gpu.lab"));
         let a = args(&mux_command(&host(), "cancel", 8766, 8765));

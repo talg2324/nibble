@@ -9,6 +9,9 @@ use iced::advanced::{Clipboard, Shell};
 use iced::alignment;
 use iced::{keyboard, mouse, Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Shadow, Size};
 
+/// A cell of the visible grid: `(row, col)`.
+pub type Cell = (u16, u16);
+
 #[derive(Debug, Clone)]
 pub enum TermEvent {
     Resized { rows: u16, cols: u16 },
@@ -16,6 +19,18 @@ pub enum TermEvent {
     Scroll(i32),
     /// Cmd-click (Ctrl-click off macOS) on a URL: open it on this machine.
     OpenUrl(String),
+    /// Text was selected with the mouse, first and last cell (both in); `None`: unselected.
+    Select(Option<(Cell, Cell)>),
+}
+
+/// `(a, b)` in reading order.
+fn ordered(a: Cell, b: Cell) -> (Cell, Cell) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// The text of a selection (`TermEvent::Select`), rows joined as the screen shows them.
+pub fn selected_text(screen: &vt100::Screen, (from, to): (Cell, Cell)) -> String {
+    screen.contents_between(from.0, from.1, to.0, to.1 + 1)
 }
 
 pub struct TerminalView<'a, Message> {
@@ -24,6 +39,7 @@ pub struct TerminalView<'a, Message> {
     font: Font,
     font_size: f32,
     focused: bool,
+    selection: Option<(Cell, Cell)>,
     on_event: Box<dyn Fn(TermEvent) -> Message + 'a>,
 }
 
@@ -36,7 +52,13 @@ impl<'a, Message> TerminalView<'a, Message> {
         focused: bool,
         on_event: impl Fn(TermEvent) -> Message + 'a,
     ) -> Self {
-        Self { screen, theme, font, font_size, focused, on_event: Box::new(on_event) }
+        Self { screen, theme, font, font_size, focused, selection: None, on_event: Box::new(on_event) }
+    }
+
+    /// The text selected (kept by the app, so Copy can read it), highlighted.
+    pub fn selection(mut self, selection: Option<(Cell, Cell)>) -> Self {
+        self.selection = selection;
+        self
     }
 }
 
@@ -49,6 +71,10 @@ struct State {
     mods: keyboard::Modifiers,
     /// The cell under the mouse, if it is over the grid.
     hover: Option<(u16, u16)>,
+    /// A selection being dragged: where the button went down, where the mouse is.
+    drag: Option<(Cell, Cell)>,
+    /// Wheel movement not yet a whole line (`zoom::whole_lines`).
+    wheel: f32,
 }
 
 /// A URL on the screen and the cells it covers: `(row, first col, end col)` per row it spans.
@@ -193,22 +219,54 @@ where
                 shell.request_redraw();
             }
         }
+        // The cell under the mouse, kept inside the grid (a drag may leave it).
+        let (cw, lh) = (st.cw, st.lh);
+        let clamped = move |p: Point| -> Cell {
+            let r = ((p.y - b.y - PAD) / lh).clamp(0.0, rows as f32 - 1.0);
+            let c = ((p.x - b.x - PAD) / cw).clamp(0.0, cols as f32 - 1.0);
+            (r as u16, c as u16)
+        };
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(button)) if cursor.is_over(b) => {
-                let link = (*button == mouse::Button::Left && st.mods.command())
-                    .then(|| hover.and_then(|(r, c)| link_at(self.screen, r, c)))
-                    .flatten();
+                let left = *button == mouse::Button::Left;
+                let link = (left && st.mods.command()).then(|| hover.and_then(|(r, c)| link_at(self.screen, r, c))).flatten();
                 match link {
                     Some(l) => shell.publish((self.on_event)(TermEvent::OpenUrl(l.url))),
-                    None => shell.publish((self.on_event)(TermEvent::Focus)),
+                    None => {
+                        shell.publish((self.on_event)(TermEvent::Focus));
+                        if left {
+                            // A press starts a selection (and drops the last one).
+                            if self.selection.is_some() {
+                                shell.publish((self.on_event)(TermEvent::Select(None)));
+                            }
+                            st.drag = cursor.position().map(|p| (clamped(p), clamped(p)));
+                        }
+                    }
                 }
                 shell.capture_event();
             }
+            Event::Mouse(mouse::Event::CursorMoved { position }) if st.drag.is_some() => {
+                let head = clamped(*position);
+                if let Some(d) = st.drag.as_mut().filter(|d| d.1 != head) {
+                    d.1 = head;
+                    shell.request_redraw();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if st.drag.is_some() => {
+                if let Some((a, h)) = st.drag.take() {
+                    // A click selects nothing; a drag selects what it went over.
+                    if a != h {
+                        shell.publish((self.on_event)(TermEvent::Select(Some(ordered(a, h)))));
+                    }
+                }
+                shell.request_redraw();
+            }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(b) => {
                 let lines = match *delta {
-                    mouse::ScrollDelta::Lines { y, .. } => (y * 3.0) as i32,
-                    mouse::ScrollDelta::Pixels { y, .. } => (y / st.lh) as i32,
+                    mouse::ScrollDelta::Lines { y, .. } => y * 3.0,
+                    mouse::ScrollDelta::Pixels { y, .. } => y / st.lh,
                 };
+                let lines = crate::zoom::whole_lines(&mut st.wheel, lines) as i32;
                 if lines != 0 {
                     shell.publish((self.on_event)(TermEvent::Scroll(lines)));
                 }
@@ -299,6 +357,15 @@ where
             }
             flush(renderer, &mut run, run_start, run_fg);
         }
+        // The selection, over the text: the one being dragged, else the app's.
+        if let Some(((r0, c0), (r1, c1))) = st.drag.map(|(a, h)| ordered(a, h)).or(self.selection) {
+            for r in r0..=r1.min(rows.saturating_sub(1)) {
+                let from = if r == r0 { c0 } else { 0 };
+                let to = if r == r1 { c1 + 1 } else { cols };
+                let rect = Rectangle { x: ox + from as f32 * cw, y: oy + r as f32 * lh, width: to.saturating_sub(from) as f32 * cw, height: lh };
+                quad(renderer, rect, Color { a: 0.45, ..th.selection });
+            }
+        }
         if let Some(link) = st.hover.filter(|_| st.mods.command()).and_then(|(r, c)| link_at(self.screen, r, c)) {
             for (r, c0, c1) in link.spans {
                 let y = oy + (r as f32 + 1.0) * lh - 2.0;
@@ -370,6 +437,16 @@ pub fn key_bytes(chord: &nib_editor::KeyChord, text: Option<&str>, app_cursor: b
             };
             vec![b]
         }
+        // Off macOS, Alt is Meta: ESC, then the key (readline's Alt+B / Alt+F / Alt+. ...). On
+        // macOS Option composes characters (∫, é), which are sent as typed.
+        Key::Char(c) if chord.alt && !chord.ctrl && !cfg!(target_os = "macos") => {
+            let mut v = b"\x1b".to_vec();
+            match text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) {
+                Some(t) => v.extend_from_slice(t.as_bytes()),
+                None => v.extend_from_slice((if chord.shift { c.to_ascii_uppercase() } else { c }).to_string().as_bytes()),
+            }
+            v
+        }
         Key::Char(_) => text.filter(|t| !t.is_empty())?.as_bytes().to_vec(),
     };
     // Alt as Meta (ESC prefix) for word movement in shells; not for text already composed by Option.
@@ -386,6 +463,17 @@ pub fn key_bytes(chord: &nib_editor::KeyChord, text: Option<&str>, app_cursor: b
 #[cfg(test)]
 mod tests {
     use super::link_at;
+
+    #[test]
+    fn alt_is_meta_off_macos() {
+        let chord = nib_editor::KeyChord::parse("alt+b").unwrap();
+        let got = super::key_bytes(&chord, Some("b"), false).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(got, b"b", "Option composes; sent as typed");
+        } else {
+            assert_eq!(got, b"\x1bb");
+        }
+    }
 
     #[test]
     fn a_url_wrapped_over_rows_is_one_link() {

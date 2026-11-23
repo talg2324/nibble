@@ -14,9 +14,13 @@ pub mod timing;
 pub mod web;
 pub use frame::{read_frame, write_frame, FrameError, MAX_FRAME};
 
-/// Bumped on any incompatible change. Client and daemon must match exactly (the daemon binary is
-/// content-addressed and uploaded by the client, so they are always built from the same tree).
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Bumped on any incompatible change to the messages in this crate (a new variant or field
+/// included): the release checklist bumps it whenever nib-proto changed since the last release.
+/// Client and daemon must match exactly. Usually they are built from the same tree (the daemon
+/// binary is content-addressed and uploaded by the client), but a `nibd` found on `$PATH` or set
+/// in a profile may be older; this is what refuses it, with a message, instead of failing later
+/// on a message it can't decode.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Time of day in UTC, `HH:MM:SS.mmmZ`: the stamp on every line nib and nibd write to their logs.
 pub fn log_clock() -> String {

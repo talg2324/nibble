@@ -36,10 +36,26 @@ impl App {
         Task::perform(async move { pdf::load(data).map(Arc::new) }, move |r| Message::Pdf(Msg::Loaded(id, r)))
     }
 
+    /// The PDF of tab `tab` changed on disk: parse the new one; the old pages stay until it's ready.
+    pub(super) fn reload_pdf(&mut self, tab: u64, data: Vec<u8>) -> Task<Message> {
+        if !self.tabs.iter().any(|t| t.id == tab) {
+            return Task::none();
+        }
+        Task::perform(async move { pdf::load(data).map(Arc::new) }, move |r| Message::Pdf(Msg::Loaded(tab, r)))
+    }
+
     pub(super) fn on_pdf(&mut self, msg: Msg) -> Task<Message> {
         match msg {
             Msg::Loaded(id, r) => {
                 let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+                // Read again (it was rebuilt): where it was being read, at the same zoom.
+                if let Some(v) = t.media.as_mut().and_then(Media::pdf_mut) {
+                    return match r {
+                        Ok(doc) => scroll(v.replace_doc(doc)),
+                        // Caught half-written: keep showing the last good one; the next change reads it again.
+                        Err(_) => Task::none(),
+                    };
+                }
                 t.media = Some(match r {
                     Ok(doc) => Media::Pdf(Box::new(PdfView::new(doc, DEFAULT_DPI))),
                     Err(e) => Media::Failed(e),
@@ -131,6 +147,8 @@ impl App {
         let (dx, dy) = match c {
             FontBigger => return Some(v.zoom_by(ZOOM_STEP).map_or_else(Task::none, scroll)),
             FontSmaller => return Some(v.zoom_by(1.0 / ZOOM_STEP).map_or_else(Task::none, scroll)),
+            // Back to fitting the pane.
+            FontReset => return Some(v.set_zoom(None).map_or_else(Task::none, scroll)),
             TogglePreview => {
                 if v.doc.outline.is_empty() {
                     return Some(self.flash_info("this PDF has no outline"));

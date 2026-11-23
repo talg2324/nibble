@@ -16,6 +16,11 @@ use iced::advanced::graphics::text::{cosmic_text as ct, font_system};
 use iced::Font;
 
 /// The monospace font, by name: what text in [`Font::MONOSPACE`] is drawn in.
+/// `mono()` in italics (a tab opened in passing).
+pub fn mono_italic() -> Font {
+    Font { style: iced::font::Style::Italic, ..mono() }
+}
+
 pub fn mono() -> Font {
     static MONO: OnceLock<Font> = OnceLock::new();
     *MONO.get_or_init(|| {

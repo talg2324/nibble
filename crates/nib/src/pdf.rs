@@ -368,6 +368,19 @@ impl PdfView {
         }
     }
 
+    /// The file was rebuilt: show `doc` instead, at the same zoom and scroll position (kept
+    /// inside the new content). Returns where to scroll.
+    pub fn replace_doc(&mut self, doc: Arc<PdfDoc>) -> Vector {
+        self.doc = doc;
+        self.rendered.clear();
+        self.pending.clear();
+        self.failed.clear();
+        self.hover = None;
+        let max_x = (self.content_width() - self.size.width).max(0.0);
+        self.offset = Vector::new(self.offset.x.clamp(0.0, max_x), self.clamp_y(self.offset.y));
+        self.offset
+    }
+
     fn widest(&self) -> f32 {
         self.doc.pages.iter().map(|p| p.width).fold(1.0, f32::max)
     }

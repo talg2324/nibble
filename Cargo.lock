@@ -2799,7 +2799,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nib"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "nib-editor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "helix-core",
@@ -2849,7 +2849,7 @@ dependencies = [
 
 [[package]]
 name = "nib-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "nib-syntax"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "helix-core",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "nibd"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "nib-proto",

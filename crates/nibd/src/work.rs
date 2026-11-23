@@ -49,7 +49,8 @@ pub fn plan(mailbox: &Path, agent: &str) -> Option<String> {
 /// Record `text` as the agent's plan (also done for it when it asks approval for one).
 pub fn set_plan(mailbox: &Path, agent: &str, text: &str) -> std::io::Result<()> {
     fs::create_dir_all(mailbox.join("work"))?;
-    fs::write(plan_file(mailbox, agent), text)
+    // Read by the window at any moment: never half there.
+    crate::fs_ops::write_whole(&plan_file(mailbox, agent), text)
 }
 
 /// What is kept for an agent: its branch record, its plan, the review of its work.
@@ -269,6 +270,10 @@ pub struct Ctx {
 
 /// `nibd work …`, run by an agent. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
+    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "help")) {
+        println!("{USAGE}");
+        return 0;
+    }
     let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let (Some(mailbox), Ok(agent), Some(root), Some(nibdir)) = (var("NIB_MAILBOX"), std::env::var("NIB_AGENT"), var("NIB_ROOT"), var("NIBDIR")) else {
         eprintln!("nib-work: only works inside an agent that nib started (NIB_MAILBOX, NIB_AGENT, NIB_ROOT and NIBDIR are not all set)");
@@ -535,7 +540,7 @@ fn start(ctx: &Ctx, name: &str, fix: bool) -> Result<Record, String> {
     let dir = if prefix.is_empty() { tree.clone() } else { tree.join(prefix.trim_end_matches('/')) };
     let rec = Record { branch, base, tree, dir };
     fs::create_dir_all(ctx.mailbox.join("work")).map_err(|e| e.to_string())?;
-    fs::write(record_file(&ctx.mailbox, &ctx.agent), serde_json::to_vec_pretty(&rec).unwrap_or_default()).map_err(|e| e.to_string())?;
+    crate::fs_ops::write_whole(&record_file(&ctx.mailbox, &ctx.agent), serde_json::to_vec_pretty(&rec).unwrap_or_default()).map_err(|e| e.to_string())?;
     Ok(rec)
 }
 

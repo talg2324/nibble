@@ -51,6 +51,7 @@ usage: nib [PATH]              open a local file or directory (default: .)
                                one agent run, or a resumable batch (nib ai help)
        nib gif FILE            an animated GIF as one contact sheet of its distinct frames, for
                                models that only see a GIF's first frame (nib gif help)
+       nib grammar add|rm|list syntax highlighting for more languages (nib grammar help)
        nib --version";
 
 /// Where a window works: the machine (`target`), the folder on it, and what to call it.
@@ -279,6 +280,7 @@ fn main() -> Result<()> {
                 })
                 .collect(),
             ai: cfg.ai.clone(),
+            window: cfg.window.clone(),
             launch,
             bench,
             headless,
@@ -344,6 +346,8 @@ fn main() -> Result<()> {
         },
         // WSL: no frame from winit; the app draws its own (app/titlebar.rs says why).
         decorations: !app::own_frame(),
+        // The window's close button asks first when files are unsaved, like Quit (app::App::subscription).
+        exit_on_close_request: false,
         ..Default::default()
     })
     .theme(|_: &app::App| iced::Theme::Dark)

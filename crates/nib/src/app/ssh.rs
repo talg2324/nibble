@@ -573,7 +573,7 @@ impl App {
         if self.connecting.as_ref().is_some_and(|c| c.launch.label == l.label && c.launch.root == l.root) {
             return self.flash_info(format!("already connecting to {}", l.label));
         }
-        let here = self.connected && !self.disconnected && self.launch.label == l.label && self.launch.target == l.target;
+        let here = self.live() && self.launch.label == l.label && self.launch.target == l.target;
         if here && l.root != self.launch.root {
             // Same machine, other folder: no new connection needed.
             let root = self.untilde(&l.root);
@@ -583,7 +583,9 @@ impl App {
         if here {
             return self.flash_info(format!("already on {} · {}", l.label, l.root));
         }
-        if let Some(cost) = self.switch_cost() {
+        // Back to where the connection was lost: the tabs stay, nothing to warn about.
+        let again = self.reconnecting_to(&l);
+        if let Some(cost) = self.switch_cost().filter(|_| !again) {
             if self.ssh.armed != Some(r) {
                 self.ssh.armed = Some(r);
                 return self.flash_warn(format!("{cost} — press again to switch to {}", l.label));
@@ -594,7 +596,7 @@ impl App {
         self.ssh.key = None;
         self.ssh.input.clear();
         self.ssh.sel = 0;
-        self.connect(l, false, true, None, true)
+        self.connect(l, false, !again, None, true)
     }
 
     /// `~/x` -> `/home/tal/x` on the connected machine (the daemon expands `~` only at Hello).
@@ -642,8 +644,13 @@ impl App {
             Ok(file) => {
                 crate::control::log("trust", &format!("{}: {} added to {}", l.label, p.fingerprints.join(", "), file.display()));
                 self.ssh.key = None;
+                let again = self.reconnecting_to(&l);
+                // Trusting a key is not agreeing to close what is open here: that asks, as always.
+                if let Some(cost) = self.switch_cost().filter(|_| !again) {
+                    return self.flash_warn(format!("host key trusted (added to {}) — {cost}: pick {} again to switch", file.display(), l.label));
+                }
                 let done = self.flash_info(format!("host key trusted (added to {})", file.display()));
-                Task::batch([done, self.connect(l, false, true, None, true)])
+                Task::batch([done, self.connect(l, false, !again, None, true)])
             }
             Err(e) => self.flash_warn(format!("couldn't trust the key: {e:#}")),
         }
@@ -681,8 +688,8 @@ impl App {
     /// Show the subfolders of `dir` (absolute, on the connected machine) where the file tree
     /// is, with the keyboard: picking one makes it the root, and the tree comes back.
     pub(super) fn ssh_browse(&mut self, dir: String) -> Task<Message> {
-        if !self.connected || self.disconnected {
-            return self.flash_warn("not connected");
+        if !self.live() {
+            return self.flash_warn(self.not_connected());
         }
         // The SSH panel brought us here (a new host): it's done.
         if self.ssh.open {
@@ -1184,7 +1191,14 @@ impl App {
             call.ok(json!({ "root": self.root }));
             return Task::none();
         }
-        self.connect_call = Some(call);
+        // Nothing would answer it: say so now instead of letting the caller time out.
+        if !self.live() {
+            call.err("not connected: connect first (ssh.connect)");
+            return Task::none();
+        }
+        if let Some(old) = self.connect_call.replace(call) {
+            old.err("replaced by another ssh.root / connect");
+        }
         self.change_root(abs)
     }
 
@@ -1206,7 +1220,7 @@ impl App {
         let is_sel = |r: Row| focused && ui.ask.is_none() && at(r) == Some(sel);
         let click = |r: Row| Message::Ssh(Msg::Click(at(r).unwrap_or(0)));
 
-        let here = if self.connected && !self.disconnected { format!("{} · {}", self.label, short_path(&self.launch.root, 40)) } else { String::new() };
+        let here = if self.live() { format!("{} · {}", self.label, short_path(&self.launch.root, 40)) } else { String::new() };
         let close = button(text("✕").size(12).color(dim)).on_press(Message::Ssh(Msg::Close)).padding([1, 6]).style(|_, _| button::Style::default());
         let header = row![
             text("SSH").size(12).color(fg),
@@ -1283,7 +1297,7 @@ impl App {
                     let (name, p) = &ui.profiles[i];
                     let root = p.all_roots().get(j).cloned().unwrap_or_default();
                     // On this host at a folder it doesn't list (home): the dot goes on its first row.
-                    let on_host = self.connected && self.launch.profile.as_deref() == Some(name.as_str());
+                    let on_host = self.live() && self.launch.profile.as_deref() == Some(name.as_str());
                     let listed = p.all_roots().contains(&self.launch.root);
                     let current = on_host && (self.launch.root == root || (!listed && j == 0));
                     let (name, host) = if j == 0 {
@@ -1295,7 +1309,7 @@ impl App {
                     self.ssh_list_row(click(*r), is_sel(*r), current, name, host, root)
                 }
                 Row::Home => {
-                    let current = self.connected && self.launch.profile.is_none();
+                    let current = self.live() && self.launch.profile.is_none();
                     self.ssh_list_row(click(*r), is_sel(*r), current, self.home.label.clone(), target_text(&self.home.target), self.home.root.clone())
                 }
                 Row::Alias(i) => self.ssh_list_row(click(*r), is_sel(*r), false, ui.aliases[i].clone(), "~/.ssh/config".into(), String::new()),

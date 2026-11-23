@@ -54,6 +54,14 @@ fn slug(root: &Path) -> String {
     name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect()
 }
 
+/// The name the project at canonical `root` goes by on this machine: its NIBDIR folder's
+/// (`projects.json`, so two projects with the same folder name are `app` and `app-2`), else
+/// its folder's name (a temp project, or one never opened). Its agents' history is kept under it.
+pub fn project_name(root: &Path) -> String {
+    let index = xdg("XDG_DATA_HOME", &[".local", "share"]).join("nibdir").join("projects.json");
+    read_index(&index).get(&*root.to_string_lossy()).cloned().unwrap_or_else(|| slug(root))
+}
+
 fn private_dir(p: &Path) -> std::io::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
@@ -150,9 +158,7 @@ fn nibdir_name(dir: &Path, root: &Path, slug: &str) -> std::io::Result<String> {
     }
     index.extend(fresh);
     index.insert(key, name.clone());
-    let tmp = dir.join(format!(".projects.json.{}", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&index).unwrap_or_default())?;
-    std::fs::rename(&tmp, &index_path)?;
+    crate::fs_ops::write_whole(&index_path, serde_json::to_vec_pretty(&index).unwrap_or_default())?;
     Ok(name)
 }
 

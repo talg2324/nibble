@@ -28,7 +28,9 @@ fn reply_timeout(req: &Value) -> std::time::Duration {
     }
     let secs = match req.get("cmd").and_then(Value::as_str).unwrap_or("") {
         "askpass" => 600,
-        "ssh.connect" | "ssh.test" => 180,
+        // These wait for ssh: a handshake, a probe, a new daemon's Hello.
+        "ssh.connect" | "ssh.test" | "ssh.root" => 180,
+        "ssh.add" if req.get("test").and_then(Value::as_bool) == Some(true) => 180,
         "forward.add" => 90,
         _ => 30,
     };

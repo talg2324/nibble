@@ -25,20 +25,33 @@ cargo build --quiet --profile fast -p nib -p nibd --manifest-path "$ROOT/Cargo.t
 # refuses the handshake. Rebuild them when nibd's sources are newer than any of them. None built
 # yet: build them once the musl targets are installed, else stay quiet (local use doesn't need
 # them; scripts/build.sh daemons says what to install).
+# A failed build is not retried on every launch: only once the sources change again.
+FAILED="$ROOT/dist/.daemons-failed"
+sources_newer_than() {
+  [ -n "$(find "$ROOT/crates/nibd" "$ROOT/crates/nib-proto" "$ROOT/Cargo.lock" -newer "$1" -type f -print -quit)" ]
+}
 daemons_stale() {
   local d
+  if [ -f "$FAILED" ] && ! sources_newer_than "$FAILED"; then
+    return 1
+  fi
   for d in "$ROOT"/dist/daemons/*/nibd; do
     if [ ! -f "$d" ]; then
       rustup target list --installed 2>/dev/null | grep -q -- '-unknown-linux-musl$'
       return
     fi
-    [ -n "$(find "$ROOT/crates/nibd" "$ROOT/crates/nib-proto" "$ROOT/Cargo.lock" -newer "$d" -type f -print -quit)" ] && return 0
+    sources_newer_than "$d" && return 0
   done
   return 1
 }
 if daemons_stale; then
   echo "nib: nibd sources changed; rebuilding the remote daemons (scripts/build.sh daemons)" >&2
-  "$ROOT/scripts/build.sh" daemons >&2 || echo "nib: remote daemons not rebuilt; ssh remotes may refuse this nib" >&2
+  if "$ROOT/scripts/build.sh" daemons >&2; then
+    rm -f "$FAILED"
+  else
+    mkdir -p "$ROOT/dist" && touch "$FAILED"
+    echo "nib: remote daemons not rebuilt; ssh remotes may refuse this nib (not retried until nibd's sources change; rm $FAILED to retry now)" >&2
+  fi
 fi
 
 export NIB_DAEMONS="${NIB_DAEMONS:-$ROOT/dist/daemons}"

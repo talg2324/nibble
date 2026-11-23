@@ -274,6 +274,8 @@ impl App {
             Key::Esc if h.confirm.is_some() => h.confirm = None,
             // Back to the agents.
             Key::Esc => h.front = false,
+            // Delete the selected conversation (asks first: press again).
+            Key::Delete if !held => return self.ai_history_delete_selected(),
             Key::Tab if !held => {
                 let on = !h.mail;
                 return self.ai_history_show_mail(on);

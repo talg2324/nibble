@@ -110,8 +110,8 @@ pub(super) fn agent_name(c: &Chat) -> Option<String> {
 }
 
 /// A small outlined button that answers what the agent asks.
-fn answer_key<'a>(label: &'static str, color: Color, msg: Msg) -> button::Button<'a, Message> {
-    button(text(label).size(11).color(color)).on_press(Message::Ai(msg)).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
+fn answer_key<'a>(label: impl Into<String>, color: Color, msg: Msg) -> button::Button<'a, Message> {
+    button(text(label.into()).size(11).color(color)).on_press(Message::Ai(msg)).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
         border: Border { color, width: 1.0, radius: 3.0.into() },
         ..Default::default()
     })
@@ -121,14 +121,6 @@ fn answer_key<'a>(label: &'static str, color: Color, msg: Msg) -> button::Button
 fn is_plan_file(path: &str) -> bool {
     let p = path.replace('\\', "/");
     p.contains("/.claude/plans/") && p.ends_with(".md")
-}
-
-/// `answer_key` with a label made at run time.
-fn answer_key_owned<'a>(label: String, color: Color, msg: Msg) -> button::Button<'a, Message> {
-    button(text(label).size(11).color(color)).on_press(Message::Ai(msg)).padding([2, 8]).style(move |_: &iced::Theme, _: button::Status| button::Style {
-        border: Border { color, width: 1.0, radius: 3.0.into() },
-        ..Default::default()
-    })
 }
 
 /// The step still under way, if any (the latest one).
@@ -266,19 +258,21 @@ impl App {
         }
     }
 
-    /// Keys while the accept dialog is up: ⌘↵ accepts the job as done and ends the agent;
-    /// anything else goes back to its chat to keep working with it.
-    pub(super) fn ai_accept_key(&mut self, chord: nib_editor::keymap::KeyChord) -> Task<Message> {
+    /// Keys while the accept dialog is up: ⌘↵ accepts the job as done and ends the agent, ⌘D
+    /// shows its work, Esc puts the question away. Anything else puts it away too, and is not
+    /// used up (`None`): it goes on to the chat, so typing back to the agent loses nothing.
+    pub(super) fn ai_accept_key(&mut self, chord: nib_editor::keymap::KeyChord) -> Option<Task<Message>> {
         use nib_editor::keymap::Key;
         let held = if cfg!(target_os = "macos") { chord.logo } else { chord.ctrl || chord.logo };
         if chord.key == Key::Enter && held {
-            return self.ai_accept(true);
+            return Some(self.ai_accept(true));
         }
         // ⌘D: its work as a pull request, in the diff tab (from where it can still be landed).
         if chord.key == Key::Char('d') && held {
-            return self.ai_accept_diff();
+            return Some(self.ai_accept_diff());
         }
-        self.ai_accept(false)
+        let away = self.ai_accept(false);
+        (chord.key == Key::Esc).then_some(away)
     }
 
     /// Put the question away and show the agent's work in the diff tab.
@@ -375,6 +369,11 @@ impl App {
     /// using is unloaded from memory.
     pub(in crate::app) fn ai_kill(&mut self, i: usize) -> Task<Message> {
         let Some(c) = self.ai.chats.get(i) else { return Task::none() };
+        // Following it: the show ends with it (its tab and marks tidied away).
+        if self.ai_following() == Some(c.key) {
+            let stop = self.ai_follow_stop(true);
+            return Task::batch([stop, self.ai_kill(i)]);
+        }
         let (key, agent, model) = (c.key, c.agent, c.chosen.clone());
         // The daemon thaws a frozen one before it ends it.
         let mut sessions: Vec<_> = c.retired.into_iter().chain(c.switching.as_ref().map(|s| s.0)).collect();
@@ -411,7 +410,7 @@ impl App {
     }
 
     /// Stop what the shown agent is doing. Its conversation stays.
-    pub(super) fn ai_stop(&mut self) {
+    pub(in crate::app) fn ai_stop(&mut self) {
         if let (Session::Ready(id), true) = (&self.ai.session, self.ai.busy) {
             let id = *id;
             self.ai.stopping = true;
@@ -939,7 +938,7 @@ impl App {
                 border: Border { color: if on { accent } else { divider }, width: 1.0, radius: 3.0.into() },
                 ..Default::default()
             });
-        let tip = container(text("worktree-per-feature: toggle to require each change to be a git branch committed to main").size(11).color(fg))
+        let tip = container(text("worktree-per-feature: each agent that changes files does it on a branch of its own, landed on yours as one commit when you accept").size(11).color(fg))
             .padding([4, 8])
             .max_width(320)
             .style(move |_| container::Style { background: Some(panel.into()), border: Border { color: divider, width: 1.0, radius: 3.0.into() }, ..Default::default() });
@@ -1069,7 +1068,13 @@ impl App {
         if let Some(effort) = self.ai_effort_pick() {
             head = head.push(effort);
         }
-        head = head.push(text("mode").size(11).color(dim)).push(modes);
+        // Grok runs with read-only tools whatever the mode: say so instead of offering a choice
+        // that does nothing.
+        if ai.agent == Some(AiAgent::Grok) {
+            head = head.push(text("mode").size(11).color(dim)).push(text("read-only").size(11).color(fg));
+        } else {
+            head = head.push(text("mode").size(11).color(dim)).push(modes);
+        }
         let following = self.ai_following() == Some(ai.key);
         head = head.push(key(if following { "◉ following".into() } else { "◉ follow".into() }, if following { th.accent } else { dim }, Msg::Follow));
         if ai.busy && matches!(ai.session, Session::Ready(_)) {
@@ -1224,7 +1229,7 @@ impl App {
                 (n, true) => format!("send back with {n} comment{plural} + your reply · ↵"),
                 (n, false) => format!("send back with {n} comment{plural} · ↵"),
             };
-            keys = keys.push(answer_key_owned(label, th.warn, Msg::Revise));
+            keys = keys.push(answer_key(label, th.warn, Msg::Revise));
             keys = keys.push(answer_key("approve anyway", dim, Msg::Answer(true)));
         } else {
             keys = keys.push(answer_key("approve · ↵", OK, Msg::Answer(true)));

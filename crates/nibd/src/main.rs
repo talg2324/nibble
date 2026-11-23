@@ -42,6 +42,16 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const USAGE: &str = "\
+usage: nibd [--stdio]     serve one nib window over stdin/stdout (nib starts this itself)
+       nibd --version
+Run by agents that nib started (each says more with --help):
+       nibd mail …        nib-mail: the agents' mailbox
+       nibd work …        nib-work: an agent's branch, work tree and plan
+       nibd review …      nib-review: the user's comments on an agent's work
+       nibd app …         nib-app: the project's apps
+       nibd web …         nib-web: the page of the project's app in the web tab";
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -63,8 +73,12 @@ fn main() -> anyhow::Result<()> {
         Some("app") => std::process::exit(serve::cli(&args[1..])),
         // And the page of the project's app in the window's web tab (see `web`).
         Some("web") => std::process::exit(web::cli(&args[1..])),
+        Some("--help" | "-h" | "help") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
         None | Some("--stdio") => {}
-        Some(other) => anyhow::bail!("unknown argument {other:?}; usage: nibd [--stdio|--version]"),
+        Some(other) => anyhow::bail!("unknown argument {other:?}\n{USAGE}"),
     }
     {
         use std::io::Write;

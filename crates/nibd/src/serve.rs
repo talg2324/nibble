@@ -424,9 +424,7 @@ pub fn read(file: &Path) -> Result<Apps, String> {
 /// Whole or not at all (written beside, then renamed).
 pub fn write(file: &Path, apps: &Apps) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(&json!({ "apps": apps }))?;
-    let tmp = file.with_extension("json.tmp");
-    fs::write(&tmp, text + "\n")?;
-    fs::rename(tmp, file)
+    crate::fs_ops::write_whole(file, text + "\n")
 }
 
 /// Every server of every app as it runs: by key, `after` as keys.
@@ -827,10 +825,7 @@ impl Servers {
                 }
             };
             let Some(name) = file.file_name() else { continue };
-            let tmp = dir.join("res").join(format!(".{}.tmp", name.to_string_lossy()));
-            if fs::write(&tmp, json!({ "out": out, "code": code }).to_string()).is_ok() {
-                let _ = fs::rename(tmp, dir.join("res").join(name));
-            }
+            let _ = crate::fs_ops::write_whole(&dir.join("res").join(name), json!({ "out": out, "code": code }).to_string());
         }
     }
 
@@ -957,9 +952,8 @@ fn ask(dir: &Path, token: &str, args: &[String]) -> (String, i32) {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let name = format!("{nanos:032}-{}-{}.json", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let tmp = dir.join("req").join(format!(".{name}.tmp"));
     let body = json!({ "token": token, "args": args }).to_string();
-    let sent = fs::write(&tmp, body).and_then(|_| fs::rename(&tmp, dir.join("req").join(&name)));
+    let sent = crate::fs_ops::write_whole(&dir.join("req").join(&name), body);
     if let Err(e) = sent {
         return (format!("nib-app: {e}"), 1);
     }
@@ -1012,7 +1006,7 @@ pub fn cli(args: &[String]) -> i32 {
     }
     let dir = std::env::var_os("NIB_MAILBOX").map(PathBuf::from).filter(|d| d.join("outbox").is_dir()).map(|d| d.join("app"));
     let Some(dir) = dir.filter(|d| fs::create_dir_all(d.join("req")).is_ok() && fs::create_dir_all(d.join("res")).is_ok()) else {
-        eprintln!("nib-app: only works inside an agent that nib started (NIB_MAILBOX is not set)");
+        eprintln!("nib-app: only works inside an agent that nib started (NIB_MAILBOX is not set, or holds no outbox/)");
         return 2;
     };
     crate::tokens::private(&dir);
@@ -1040,7 +1034,7 @@ pub fn cli(args: &[String]) -> i32 {
     let (mut out, mut code) = ask(&dir, &token, &args);
     let started = match args.first().map(String::as_str) {
         Some("up" | "open") => Some(args[1..].to_vec()),
-        Some("restart") => Some(args[1..2].to_vec()),
+        Some("restart") => Some(args.iter().skip(1).take(1).cloned().collect()),
         _ => None,
     };
     if let (0, Some(names)) = (code, started) {

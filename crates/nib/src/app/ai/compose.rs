@@ -336,6 +336,21 @@ impl App {
     }
 
     /// A message typed out and sent that starts with `/`.
+    /// `text` is one of nibble's own commands (`/clear`, `/model`, …): run it. Anything else
+    /// (a skill, words): `None`. For while the agent waits for an answer, where words are the
+    /// answer but a command is still a command.
+    pub(super) fn ai_slash_command(&mut self, text: &str) -> Option<Task<Message>> {
+        let rest = text.strip_prefix('/')?;
+        let name = rest.split_whitespace().next().unwrap_or("");
+        match resolve(name, &self.ai_skills()) {
+            Some(Suggest::Cmd(_)) => match self.ai_slash(text) {
+                Slash::Run(t) => Some(t),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub(super) fn ai_slash(&mut self, text: &str) -> Slash {
         let Some(rest) = text.strip_prefix('/') else { return Slash::Text };
         let (name, arg) = rest.split_once(char::is_whitespace).map_or((rest, ""), |(n, a)| (n, a.trim()));

@@ -358,7 +358,7 @@ impl App {
         // paste keys would use the unseen browser's.
         // Cmd/Ctrl 0: the page back to 100%, as in a browser (+ and - are app-wide commands:
         // `run_command` zooms the page with them when a web tab is in front).
-        if command.is_none() && (chord.ctrl || chord.logo) && !chord.alt && chord.key == Key::Char('0') {
+        if command == Some(Command::FontReset) {
             return Some(self.web_zoom_by(0));
         }
         match command {

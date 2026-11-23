@@ -29,7 +29,7 @@ commands! {
     Redo            => "redo",              "Edit",      "Redo";
     Copy            => "copy",              "Edit",      "Copy (line if no selection)";
     Cut             => "cut",               "Edit",      "Cut (line if no selection)";
-    Paste           => "paste",             "Edit",      "Paste from internal clipboard";
+    Paste           => "paste",             "Edit",      "Paste";
     SelectAll       => "select_all",        "Selection", "Select all";
     Indent          => "indent",            "Edit",      "Indent / insert tab";
     Dedent          => "dedent",            "Edit",      "Dedent";
@@ -69,6 +69,7 @@ commands! {
     GoToDefinition  => "go_to_definition",  "Code",      "Go to definition";
     FindReferences  => "find_references",   "Code",      "Find all references";
     RenameSymbol    => "rename_symbol",     "Code",      "Rename symbol (across the project)";
+    CommandPalette  => "command_palette",   "Navigate",  "Commands: find any command by name and run it";
     Find            => "find",              "Navigate",  "Find: in the file or chat with focus (Tab: the whole project, file names too)";
     NavigateBack    => "navigate_back",     "Navigate",  "Go back (after a jump)";
     NavigateForward => "navigate_forward",  "Navigate",  "Go forward";
@@ -89,9 +90,10 @@ commands! {
     GoToTab9        => "go_to_tab_9",       "Tabs",      "Go to tab 9";
     FontBigger      => "font_bigger",       "View",      "Bigger font";
     FontSmaller     => "font_smaller",      "View",      "Smaller font";
+    FontReset       => "font_reset",        "View",      "Font back to the default size (a preview or page: back to 100%)";
     TogglePreview   => "toggle_preview",    "View",      "Preview (Markdown, HTML) / table or text (CSV)";
-    ToggleTerminal  => "toggle_terminal",   "Panels",    "Terminals: show / hide";
-    NewTerminal     => "new_terminal",      "Panels",    "New terminal (hold with H: hide/show terminals, B: toolbar)";
+    ToggleTerminal  => "toggle_terminal",   "Panels",    "Terminal: open one, or go there and back (hold it with H: hide / show terminals, B: toolbar)";
+    NewTerminal     => "new_terminal",      "Panels",    "Another terminal";
     ToggleApps      => "toggle_apps",       "Panels",    "Apps panel: this project's apps (open, stop, register)";
     AppUp           => "app_up",            "Panels",    "Apps: start every approved app, each server in a terminal (apps.json in NIBDIR)";
     AppDown         => "app_down",          "Panels",    "Apps: stop them all";
@@ -105,6 +107,7 @@ commands! {
     NextAgent       => "next_agent",        "Agents",    "Next agent";
     PrevAgent       => "prev_agent",        "Agents",    "Previous agent";
     NewAgent        => "new_agent",         "Agents",    "New agent";
+    StopAgent       => "stop_agent",        "Agents",    "Stop what the shown agent is doing (it stays, with its conversation)";
     KillAgent       => "kill_agent",        "Agents",    "Kill the agent's conversation (a local model is unloaded)";
     FoldAgents      => "fold_agents",       "Agents",    "Fold the agent list: one agent at a time";
     AgentHistory    => "agent_history",     "Agents",    "History: past conversations (search, reopen, replay, delete)";

@@ -4,19 +4,19 @@
 //! the usual conflict instead of overwriting).
 
 use super::{App, Message, Pending};
-use crate::media::Media;
+use crate::media::{Kind, Media};
 use nib_proto::{ClientNotify, Request};
 use std::path::Path;
 use std::sync::Arc;
 
 impl App {
     /// The files nibd should watch: every open tab backed by a file on the daemon's machine that
-    /// can be read again (text, tables, previews, images).
+    /// can be read again (text, tables, previews, images, PDFs).
     fn watch_paths(&self) -> Vec<String> {
         let mut paths: Vec<String> = self
             .tabs
             .iter()
-            .filter(|t| !t.local && matches!(t.media, None | Some(Media::Image { .. } | Media::Loading | Media::Failed(_))))
+            .filter(|t| !t.local && matches!(t.media, None | Some(Media::Image { .. } | Media::Pdf(_) | Media::Loading | Media::Failed(_))))
             .filter_map(|t| Some(t.doc.path.as_ref()?.to_string_lossy().into_owned()))
             .collect();
         paths.sort();
@@ -26,7 +26,7 @@ impl App {
 
     /// After every update: tell nibd when the set of open files changed (or the connection did).
     pub(super) fn sync_watch(&mut self) {
-        if !self.connected || self.disconnected {
+        if !self.live() {
             return;
         }
         let paths = self.watch_paths();
@@ -47,14 +47,16 @@ impl App {
             .tabs
             .iter()
             .filter(|t| !t.local && t.doc.path.as_deref() == Some(Path::new(&path)))
-            .map(|t| (t.id, t.media.is_some(), t.doc.is_modified(), t.doc.disk_mtime_ns))
+            .map(|t| (t.id, t.media.is_some(), t.kind == Kind::Pdf, t.doc.is_modified(), t.doc.disk_mtime_ns))
             .collect();
         let mut tasks = Vec::new();
-        for (tab, media, modified, known) in tabs {
+        for (tab, media, pdf, modified, known) in tabs {
             match mtime_ns {
                 None => tasks.push(self.flash_warn(format!("{name} was deleted on disk; saving writes it again"))),
                 // Already what the tab holds (its own save, or an agent's edit already read).
                 Some(m) if known == Some(m) => {}
+                // A rebuilt PDF (LaTeX, a report): parsed again, where it was being read.
+                Some(_) if pdf => tasks.push(self.request(Request::ReadFile { path: path.clone() }, Pending::ReloadPdf { tab })),
                 Some(_) if media => tasks.push(self.request(Request::ReadFile { path: path.clone() }, Pending::ReloadMedia { tab })),
                 Some(_) if modified => tasks.push(self.flash_warn(format!(
                     "{name} changed on disk; your unsaved edits are kept, saving will ask before overwriting"
@@ -100,7 +102,7 @@ mod tests {
     #[test]
     fn open_files_follow_changes_made_outside_nib() {
         let mut a = app();
-        a.connected = true;
+        a.link = crate::app::Link::Live;
         for name in ["clean.py", "dirty.py"] {
             let mut doc = Document::from_bytes(b"one\n", Some(format!("/tmp/{name}").into()));
             doc.disk_mtime_ns = Some(1);
@@ -141,11 +143,16 @@ mod tests {
         let _ = a.update(Message::Tick);
         changed(&mut a, "/tmp/plot.png", Some(4));
         assert!(a.pending.values().any(|p| matches!(p, Pending::ReloadMedia { .. })));
+        // A PDF (still loading, too) is parsed again as a PDF, not handed to the image decoder.
+        a.put_media("/tmp/report.pdf".into(), Media::Loading, true);
+        let _ = a.update(Message::Tick);
+        changed(&mut a, "/tmp/report.pdf", Some(5));
+        assert!(a.pending.values().any(|p| matches!(p, Pending::ReloadPdf { .. })));
         a.active = 0;
 
         // Closing a tab takes it off the watch list.
         a.active = 0;
         let _ = a.update(Message::Control(nib_editor::Command::CloseTab));
-        assert_eq!(a.watched.as_ref().map(|(_, p)| p.clone()), Some(vec!["/tmp/dirty.py".to_string(), "/tmp/plot.png".to_string()]));
+        assert_eq!(a.watched.as_ref().map(|(_, p)| p.clone()), Some(vec!["/tmp/dirty.py".to_string(), "/tmp/plot.png".to_string(), "/tmp/report.pdf".to_string()]));
     }
 }

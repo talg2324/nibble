@@ -64,10 +64,7 @@ pub fn new(mailbox: &Path, tx: Sender<ServerMsg>) -> Shared {
 
 /// Whole or not at all (written beside, then renamed).
 fn write_whole(dir: &Path, name: &str, text: &str) {
-    let tmp = dir.join(format!(".{name}.tmp"));
-    if fs::write(&tmp, text).is_ok() {
-        let _ = fs::rename(tmp, dir.join(name));
-    }
+    let _ = crate::fs_ops::write_whole(&dir.join(name), text);
 }
 
 impl Relay {
@@ -198,10 +195,9 @@ fn ask(dir: &Path, token: &str, req: &Value) -> Value {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let name = format!("{nanos:032}-{}-{}.json", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let tmp = dir.join("req").join(format!(".{name}.tmp"));
     let mut sent_req = req.clone();
     sent_req["token"] = json!(token);
-    let sent = fs::write(&tmp, sent_req.to_string()).and_then(|_| fs::rename(&tmp, dir.join("req").join(&name)));
+    let sent = crate::fs_ops::write_whole(&dir.join("req").join(&name), sent_req.to_string());
     if let Err(e) = sent {
         return json!({ "ok": false, "error": format!("nib-web: {e}") });
     }

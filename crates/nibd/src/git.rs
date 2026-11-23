@@ -204,6 +204,13 @@ fn run_git(dir: &Path, args: &[&str]) -> (bool, String) {
         let ssh = git(dir, &["config", "core.sshCommand"]).ok().flatten().filter(|s| !s.is_empty());
         cmd.env("GIT_SSH_COMMAND", format!("{} -o BatchMode=yes", ssh.as_deref().unwrap_or("ssh")));
     }
+    // A group of its own, so a timeout ends git's children too (the `ssh` of a fetch): one left
+    // alive keeps the pipes open, and reading them would wait for it forever.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return (false, format!("could not run git: {e}")),
@@ -226,6 +233,8 @@ fn run_git(dir: &Path, args: &[&str]) -> (bool, String) {
             Ok(Some(s)) => break Some(s),
             Ok(None) if started.elapsed() < TIMEOUT => thread::sleep(Duration::from_millis(20)),
             _ => {
+                #[cfg(unix)]
+                let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).stderr(Stdio::null()).status();
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;

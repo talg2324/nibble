@@ -456,7 +456,13 @@ impl Tab {
             lsp_synced: None,
             diff: false,
             web: None,
+            transient: None,
         }
+    }
+
+    /// Opened in passing and not touched since: the next file opened in passing replaces it.
+    pub(super) fn is_transient(&self) -> bool {
+        self.transient == Some(self.doc.version()) && !self.doc.is_modified() && !self.diff && self.web.is_none()
     }
 
     /// Shows something other than the editable text, so typing and cursor keys don't apply.
@@ -493,6 +499,10 @@ impl App {
     pub(super) fn open_path_at(&mut self, path: String, new_tab: bool, goto: Option<nib_proto::Pos>) -> Task<Message> {
         if let Some(i) = self.tabs.iter().position(|t| t.doc.path.as_deref() == Some(Path::new(&path))) {
             self.active = i;
+            // Asked for in a tab of its own: it is one now.
+            if new_tab {
+                self.tabs[i].transient = None;
+            }
             if let Some(pos) = goto {
                 self.goto_in_active(pos);
             }

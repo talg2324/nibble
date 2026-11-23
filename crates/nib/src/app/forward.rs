@@ -15,7 +15,7 @@ impl App {
     /// daemon in WSL (from Windows): WSL2 shares localhost with Windows, nothing is forwarded.
     pub(super) fn forward_via(&self) -> Option<Via> {
         match &self.launch.target {
-            Target::Ssh { ssh, .. } if self.conn.is_some() && !self.disconnected => Some(Via { host: ssh.clone(), label: self.label.clone() }),
+            Target::Ssh { ssh, .. } if self.conn.is_some() && !self.lost() => Some(Via { host: ssh.clone(), label: self.label.clone() }),
             _ => None,
         }
     }
@@ -113,7 +113,7 @@ mod tests {
         a.label = "gpu".into();
         let via = a.forward_via().expect("an ssh window has a remote");
         assert_eq!((via.host.host.as_str(), via.label.as_str()), ("gpu.lab", "gpu"));
-        a.disconnected = true;
+        a.link = crate::app::Link::Lost;
         assert!(a.forward_via().is_none(), "nothing to forward through once it is gone");
     }
 }

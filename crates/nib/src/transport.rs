@@ -169,12 +169,16 @@ pub fn daemon_for(uname: &str) -> std::result::Result<PathBuf, String> {
     bundled_daemon(triple).ok_or_else(|| format!("this nib has no Linux daemon to upload ({triple}). Build them once with scripts/build.sh daemons"))
 }
 
+/// The socket of nib's shared ssh connection to a host: `transport` opens it, `forward` and
+/// `stop_mux` find it by the same option.
+pub const CONTROL_PATH: &str = "ControlPath=~/.ssh/nib-%C";
+
 /// Tell ssh's shared connection to `host` to take no new sessions and exit once the ones it
 /// carries end: a window leaving a host leaves no logged-in connection behind (another window
 /// still connected there keeps its session). Without this the master lingers `ControlPersist`.
 fn stop_mux(host: &SshHost) {
     let _ = command("ssh")
-        .args(["-o", "ControlPath=~/.ssh/nib-%C", "-O", "stop"])
+        .args(["-o", CONTROL_PATH, "-O", "stop"])
         .args(host.args())
         .arg(&host.host)
         .stdin(Stdio::null())
@@ -414,7 +418,7 @@ impl Remote {
                         "-o",
                         "ControlMaster=auto",
                         "-o",
-                        "ControlPath=~/.ssh/nib-%C",
+                        CONTROL_PATH,
                         "-o",
                         "ControlPersist=60",
                     ]);

@@ -178,9 +178,7 @@ pub fn post(dir: &Path, letter: &Letter) -> std::io::Result<()> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("{nanos:032}-{}-{n}", std::process::id());
-    let tmp = dir.join("outbox").join(format!(".{name}.tmp"));
-    fs::write(&tmp, serde_json::to_vec(letter)?)?;
-    fs::rename(tmp, dir.join("outbox").join(format!("{name}.json")))
+    crate::fs_ops::write_whole(&dir.join("outbox").join(format!("{name}.json")), serde_json::to_vec(letter)?)
 }
 
 /// Take every letter out of the outbox, oldest first.
@@ -225,10 +223,7 @@ pub fn waiting(dir: &Path, name: &str) -> bool {
 }
 
 pub fn write_roster(dir: &Path, entries: &[Entry]) {
-    let tmp = dir.join(".roster.tmp");
-    if fs::write(&tmp, serde_json::to_vec_pretty(entries).unwrap_or_default()).is_ok() {
-        let _ = fs::rename(tmp, dir.join("roster.json"));
-    }
+    let _ = crate::fs_ops::write_whole(&dir.join("roster.json"), serde_json::to_vec_pretty(entries).unwrap_or_default());
 }
 
 /// What the agents call the one with id `id`.
@@ -326,7 +321,12 @@ const USAGE: &str = "usage:
 
 /// `nibd mail …`, run by an agent. Returns the exit code; prints to stdout / stderr.
 pub fn cli(args: &[String]) -> i32 {
-    let (Some(dir), Some(me)) = (std::env::var_os("NIB_MAILBOX").map(PathBuf::from), std::env::var("NIB_AGENT").ok()) else {
+    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "help")) {
+        println!("{USAGE}");
+        return 0;
+    }
+    // Empty is not set (as nib-work has it).
+    let (Some(dir), Some(me)) = (std::env::var_os("NIB_MAILBOX").filter(|v| !v.is_empty()).map(PathBuf::from), std::env::var("NIB_AGENT").ok()) else {
         eprintln!("nib-mail: only works inside an agent that nib started (NIB_MAILBOX and NIB_AGENT are not set)");
         return 2;
     };

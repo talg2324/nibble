@@ -72,6 +72,8 @@ pub fn total_cols(table: &Table) -> usize {
 
 #[derive(Default)]
 struct State {
+    /// Wheel movement not yet a whole line / column (`zoom::whole_lines`).
+    wheel: (f32, f32),
     char_w: f32,
     line_h: f32,
     measured_for: Option<Typeface>,
@@ -166,6 +168,11 @@ where
                     mouse::ScrollDelta::Lines { x, y } => (-y * 3.0, -x * 3.0),
                     mouse::ScrollDelta::Pixels { x, y } => (-y / st.line_h, -x / st.char_w),
                 };
+                let (lines, cols) = (crate::zoom::whole_lines(&mut st.wheel.0, lines), crate::zoom::whole_lines(&mut st.wheel.1, cols));
+                if lines == 0.0 && cols == 0.0 {
+                    shell.capture_event();
+                    return;
+                }
                 shell.publish((self.on_event)(TableEvent::Scroll { lines, cols }));
                 shell.capture_event();
             }

@@ -133,7 +133,7 @@ impl App {
         }
         match target {
             Target::Nowhere => self.flash_info("drop files on the file tree (copies them) or on the agents chat (attaches them)"),
-            Target::Tree(_) if !self.connected => self.flash_warn("not connected"),
+            Target::Tree(_) if !self.live() => self.flash_warn(self.not_connected()),
             Target::Tree(dir) => {
                 let items = self.tree_drop_names(&dir, &files);
                 self.tree_unfold(&dir);

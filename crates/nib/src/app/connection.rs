@@ -160,7 +160,7 @@ impl App {
                 // there): the connection is useless. Close it and say so where connections are
                 // shown, rather than leave every panel waiting on it.
                 if let ServerMsg::Response { id, result: Err(e) } = &m {
-                    if !self.connected && matches!(self.pending.get(id), Some(Pending::Hello { .. })) {
+                    if self.link == super::Link::Greeting && matches!(self.pending.get(id), Some(Pending::Hello { .. })) {
                         self.pending.remove(id);
                         return self.refused(e);
                     }
@@ -183,7 +183,7 @@ impl App {
                         Task::batch([ai, browse, servers])
                     }
                     // A root change the daemon refused: it kept the old root, so show that again.
-                    Some(false) if self.connected => {
+                    Some(false) if self.live() => {
                         self.launch.root = self.tilde(&self.root);
                         Task::batch([self.tree_refresh(), self.git_refresh()])
                     }
@@ -195,15 +195,22 @@ impl App {
                 Task::batch([t, after])
             }
             // Already shown (a refused Hello closes its own connection).
-            ConnEvent::Closed(e) if gen == self.gen && self.disconnected => {
+            ConnEvent::Closed(e) if gen == self.gen && self.lost() => {
                 crate::control::log("disc", &e);
                 Task::none()
             }
             ConnEvent::Closed(e) if gen == self.gen => {
                 crate::control::log("disc", &e);
-                self.disconnected = true;
+                self.link = super::Link::Lost;
+                // Forwards through the lost connection's ssh master are dead too; a reconnect
+                // forwards again what is asked for.
+                crate::forward::clear();
                 self.ai_disconnected();
-                self.flash_warn(format!("disconnected: {e} — edits kept in memory"))
+                self.flash_warn(format!(
+                    "disconnected: {e} — edits kept in memory; to reconnect, pick {} in the SSH panel ({})",
+                    self.label,
+                    self.keymap.chords_for(nib_editor::Command::ToggleSsh).first().map_or("toolbar".to_string(), |k| k.to_string())
+                ))
             }
             ConnEvent::Status(s, f) => {
                 if let Some(c) = self.connecting.as_mut().filter(|c| c.gen == gen) {
@@ -232,7 +239,7 @@ impl App {
                 };
                 // Something was typed on the old machine while connecting, and nobody agreed to lose it.
                 let dirty = self.tabs.iter().any(|t| !t.local && t.doc.is_modified());
-                if dirty && !c.discard {
+                if dirty && !c.discard && !self.reconnecting_to(&c.launch) {
                     close_later(conn);
                     let msg = format!("didn't switch to {}: unsaved changes on {} — save them, then connect again", c.launch.label, self.label);
                     if let Some(call) = c.call {
@@ -252,7 +259,7 @@ impl App {
         if let Some(c) = self.conn.take() {
             close_later(c);
         }
-        self.disconnected = true;
+        self.link = super::Link::Lost;
         self.ai_disconnected();
         let label = self.label.clone();
         let why = match e.kind {
@@ -274,6 +281,7 @@ impl App {
     fn switch_to(&mut self, gen: u64, conn: Conn, c: Connecting) -> Task<Message> {
         // The first connection of a window has nothing to clear (and keeps `launch.open`'s tab).
         let first = self.conn.is_none();
+        let again = self.reconnecting_to(&c.launch);
         if let Some(old) = self.conn.replace(conn) {
             close_later(old);
         }
@@ -281,14 +289,17 @@ impl App {
         self.gen = gen;
         self.epoch += 1;
         self.remote_home = None;
-        if !first {
+        if again {
+            self.reset_daemon_state();
+        } else if !first {
             self.reset_machine_state();
         }
         self.root = c.launch.root.clone();
         self.label = c.launch.label.clone();
-        self.connected = false;
-        self.disconnected = false;
-        self.connect_call = c.call;
+        self.link = super::Link::Greeting;
+        if let Some(old) = std::mem::replace(&mut self.connect_call, c.call) {
+            old.err("replaced by another connect");
+        }
         self.ssh_ask_cancel("connected");
         if c.from_panel && self.ssh.open {
             // Home is rarely the project: let the person pick the folder next.
@@ -317,8 +328,8 @@ impl App {
     /// Make `root` (absolute, on the connected machine) the project folder: same daemon, so tabs
     /// and terminals stay; the file tree, git and the language server start over there.
     pub(super) fn change_root(&mut self, root: String) -> Task<Message> {
-        if !self.connected || self.disconnected {
-            return self.flash_warn("not connected");
+        if !self.live() {
+            return self.flash_warn(self.not_connected());
         }
         if root == self.root {
             return Task::none();
@@ -394,6 +405,42 @@ impl App {
         }
     }
 
+    /// "Not connected", with what to do about it (for when something needs the daemon).
+    pub(super) fn not_connected(&self) -> String {
+        let panel = self.keymap.chords_for(nib_editor::Command::ToggleSsh).first().map_or_else(|| "the SSH panel".to_string(), |k| format!("the SSH panel ({k})"));
+        match &self.connecting {
+            Some(c) => format!("not connected yet: still connecting to {}", c.launch.label),
+            None if self.lost() => format!("not connected: the connection to {} was lost — reconnect from {panel}", self.label),
+            None => format!("not connected — connect from {panel}"),
+        }
+    }
+
+    /// Connecting again to where the connection was lost: same machine, same folder. The tabs
+    /// (and their unsaved edits) are still the files there, so they stay.
+    pub(super) fn reconnecting_to(&self, l: &Launch) -> bool {
+        self.lost() && self.launch.label == l.label && self.launch.target == l.target && self.launch.root == l.root
+    }
+
+    /// Reconnecting: only what lived in the old daemon goes (requests, terminals, servers,
+    /// forwards, language servers). Tabs, unsaved edits, the agents panel and the tree stay.
+    fn reset_daemon_state(&mut self) {
+        self.pending.clear();
+        self.sent.clear();
+        self.terms.clear();
+        self.terms_visible = false;
+        self.last_term = None;
+        self.serve_reset();
+        crate::forward::clear();
+        self.code = Default::default();
+        for t in &mut self.tabs {
+            t.lsp_synced = None;
+        }
+        self.armed = None;
+        if matches!(self.focus, Focus::Terminal(_)) {
+            self.focus = Focus::Main;
+        }
+    }
+
     /// Everything that belongs to the machine the window was connected to.
     fn reset_machine_state(&mut self) {
         self.pending.clear();
@@ -416,14 +463,10 @@ impl App {
         self.git_ui = Default::default();
         self.git_ui.open = open;
         self.diff.reset();
-        let open = self.ai.open;
-        self.ai = Default::default();
-        self.ai.open = open;
+        self.ai = self.ai.for_another_machine();
         self.code = Default::default();
         self.preview_tab = None;
-        self.quit_armed = false;
-        self.close_armed = false;
-        self.force_save_armed = false;
+        self.armed = None;
         if !matches!(self.focus, Focus::Ssh | Focus::Toolbar) {
             self.focus = Focus::Main;
         }
@@ -450,7 +493,7 @@ impl App {
             "profile": self.launch.profile,
             "target": target_text(&self.launch.target),
             "root": self.root,
-            "connected": self.connected && !self.disconnected,
+            "connected": self.live(),
             "connecting": self.connecting.as_ref().map(|c| json!({
                 "label": c.launch.label,
                 "profile": c.launch.profile,
@@ -532,10 +575,31 @@ mod tests {
         let _ = a.update(Message::Conn(0, ConnEvent::Closed("gone".into())));
         let _ = a.update(Message::GitPoll(0));
         let _ = a.update(Message::Conn(3, ready()));
-        assert!(!a.disconnected && a.pending.len() == 1 && a.gen == 5);
+        assert!(!a.lost() && a.pending.len() == 1 && a.gen == 5);
         // The current one hanging up does.
         let _ = a.update(Message::Conn(5, ConnEvent::Closed("gone".into())));
-        assert!(a.disconnected);
+        assert!(a.lost());
+    }
+
+    #[test]
+    fn reconnecting_where_the_connection_was_lost_keeps_the_tabs() {
+        let mut a = app();
+        open(&mut a, "/tmp/x.py", true);
+        let _ = a.update(Message::Control(nib_editor::Command::NewTerminal));
+        let _ = a.update(Message::Conn(0, ConnEvent::Closed("gone".into())));
+        assert!(a.lost());
+        let here = a.launch.clone();
+        assert!(a.reconnecting_to(&here));
+        // Not asked to discard (a reconnect never is): the edits come along, the dead terminal not.
+        attempt(&mut a, 6, here, false);
+        let _ = a.update(Message::Conn(6, ready()));
+        assert_eq!(a.gen, 6, "connected");
+        assert!(!a.lost());
+        assert_eq!(a.tabs.len(), 1);
+        assert!(a.tabs[0].doc.is_modified(), "unsaved edits kept");
+        assert!(a.terms.is_empty());
+        // Somewhere else is a switch, as before.
+        assert!(!a.reconnecting_to(&to("@b", "/srv")));
     }
 
     #[test]
