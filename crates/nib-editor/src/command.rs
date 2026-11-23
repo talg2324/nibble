@@ -100,7 +100,7 @@ commands! {
     PrevPane        => "prev_pane",         "Panels",    "Previous pane";
     FocusToolbar    => "focus_toolbar",     "Panels",    "Toolbar: jump to it and back (arrows pick a button, Enter presses it)";
     ToggleGit       => "toggle_git",        "Panels",    "Git panel: history, pull, push, commit, stash";
-    ToggleDiff      => "toggle_diff",       "Panels",    "Diff tab: what changed, like a pull request";
+    ToggleDiff      => "toggle_diff",       "Panels",    "Review tab: what changed, like a pull request";
     ToggleAi        => "toggle_ai",         "Panels",    "Agents tab: show / hide";
     NextAgent       => "next_agent",        "Agents",    "Next agent";
     PrevAgent       => "prev_agent",        "Agents",    "Previous agent";

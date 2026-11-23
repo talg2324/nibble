@@ -13,7 +13,7 @@ from where you sit and nothing alike from where the user sits.
 | What it is | Your harness's helper (Claude Code's Agent / Task tool, and the like), inside your session | Another conversation in the window's **agents tab** |
 | What the user sees | One step in **your** chat (`agent`, with its tool calls under it). **No row in the agent list, nothing in the dashboard count** | Its own row, name, state, chat and steps |
 | Where it works | Your folder, your branch: its edits are your edits | Its own branch and work tree, once it runs `nib-work start` |
-| Who it answers to | You. The user cannot write to it, steer it or stop it by itself | The user. It reports with `nib-mail done`; they review its work in the diff tab and accept it |
+| Who it answers to | You. The user cannot write to it, steer it or stop it by itself | The user. It reports with `nib-mail done`; they review its work in the Review tab and accept it |
 | How you talk to it | Your harness | `nib-mail` (the **nib-agent-mailbox** skill) |
 
 ## Which one the user means

@@ -416,11 +416,11 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
                        with Ollama)
   ai pull MODEL        download an Ollama model (qwen3:8b); state.ai.pulling shows how far
   ai rm MODEL          delete a downloaded Ollama model (no confirmation)
-  diff open [SCOPE]    show the diff tab (state.diff): head, unstaged, staged, everyone, agent:N or an
+  diff open [SCOPE]    show the Review tab (state.diff): head, unstaged, staged, everyone, agent:N or an
                        agent's name (state.diff.scopes lists them), since:N (what agent N changed
                        since its work was last reviewed)
   diff comment [--on PATH[:LINE[-END]] | --on plan:LINE[-END]] TEXT
-                       review the agent's work the diff tab shows: a comment on lines of a file as
+                       review the agent's work the Review tab shows: a comment on lines of a file as
                        it is now, on a file, on lines of the agent's plan (state.diff.plan.text;
                        a file called plan is ./plan), or (no --on) on the work as a whole
   diff reply ID TEXT   answer comment ID; diff resolve|reopen|remove ID
@@ -428,7 +428,7 @@ Talk to a running nib window. Without -p/-s: $NIB_CONTROL if set, else the only 
   ai accept|keep       the shown agent said its job is done (state.ai.chats[].finished): accept it
                        and end the agent (on its own branch: land the branch first, as one
                        commit; `wait` until that is done), or put the question away and keep it
-  ai diff              show the shown agent's work in the diff tab (state.diff), like its pull request
+  ai diff              show the shown agent's work in the Review tab (state.diff), like its pull request
   ai effort LEVEL      the shown agent's thinking level: default or one of its assistant's
                        (state.ai.efforts); taken when its session starts
   ai system-prompt TEXT  replace what the shown agent adds to its system prompt (empty: none)

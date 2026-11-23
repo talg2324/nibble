@@ -19,8 +19,8 @@ const GEAR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24
 /// A branch leaving the trunk.
 const GIT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5v11.5"/><circle cx="18" cy="6.5" r="2.7"/><circle cx="6" cy="18" r="2.7"/><path d="M18 9.2a9 9 0 0 1-9 8.8"/></svg>"#;
 
-/// Two sheets, a plus on one and a minus on the other: the diff tab.
-const DIFF: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M12 4v16M5.8 12h3.4M7.5 10.3v3.4M14.8 12h3.4"/></svg>"#;
+/// A page of text under a magnifying glass: the Review tab (what changed, read like a pull request).
+const REVIEW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 21H5.5A1.5 1.5 0 0 1 4 19.5v-15A1.5 1.5 0 0 1 5.5 3h10A1.5 1.5 0 0 1 17 4.5V8.5"/><path d="M7.5 7.5h6M7.5 11h3M7.5 14.5h2"/><circle cx="15.5" cy="15" r="4"/><path d="M18.5 18l2.5 2.5"/></svg>"#;
 
 /// The letters SSH, drawn in strokes like the other icons: the SSH panel.
 const REMOTE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6.6000000000000005 8.6C6.1000000000000005 7.7 5.2 7.2 4.1 7.2C2.5999999999999996 7.2 1.6 8.1 1.6 9.3C1.6 12.1 6.8 11 6.8 14.3C6.8 15.8 5.6000000000000005 16.8 4.0 16.8C2.8 16.8 1.7999999999999998 16.2 1.2 15.3 M14.4 8.6C13.9 7.7 13.0 7.2 11.9 7.2C10.4 7.2 9.4 8.1 9.4 9.3C9.4 12.1 14.6 11 14.6 14.3C14.6 15.8 13.4 16.8 11.8 16.8C10.6 16.8 9.6 16.2 9.0 15.3 M17.4 7.2V16.8M22.8 7.2V16.8M17.4 12H22.8"/></svg>"#;
@@ -88,8 +88,8 @@ impl Icons {
             terminal_on: handle(TERMINAL, on),
             git: handle(GIT, off),
             git_on: handle(GIT, on),
-            diff: handle(DIFF, off),
-            diff_on: handle(DIFF, on),
+            diff: handle(REVIEW, off),
+            diff_on: handle(REVIEW, on),
             remote: handle(REMOTE, off),
             remote_on: handle(REMOTE, on),
             apps: handle(APPS, off),

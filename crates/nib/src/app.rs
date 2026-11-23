@@ -2092,7 +2092,7 @@ impl App {
         let tabs = self.tabs.iter().enumerate().map(|(i, t)| {
             let name = t.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // The tab a followed agent opened.
-            let name = if t.diff { "± diff".to_string() } else if let Some(page) = t.web { self.web_title(page) } else { name };
+            let name = if t.diff { "Review".to_string() } else if let Some(page) = t.web { self.web_title(page) } else { name };
             let name = if t.doc.path.as_deref().is_some_and(|p| self.ai_follow_tab(p)) { format!("◉ {name}") } else { name };
             let active = i == self.active && !self.ai.shown();
             let fg = if active { th.foreground } else { th.dim };
@@ -2201,7 +2201,7 @@ impl App {
                 Message::Control(Command::ToggleApps),
             ),
             (if self.git_ui.open { &i.git_on } else { &i.git }, self.tip_with_key("Git", Command::ToggleGit), Message::Control(Command::ToggleGit)),
-            (if self.diff_active() { &i.diff_on } else { &i.diff }, self.tip_with_key("Diff: what changed", Command::ToggleDiff), Message::Control(Command::ToggleDiff)),
+            (if self.diff_active() { &i.diff_on } else { &i.diff }, self.tip_with_key("Review: what changed, like a pull request", Command::ToggleDiff), Message::Control(Command::ToggleDiff)),
             (if self.ssh.open { &i.remote_on } else { &i.remote }, self.tip_with_key("SSH: connections", Command::ToggleSsh), Message::Control(Command::ToggleSsh)),
             (if gear_on { &i.gear_on } else { &i.gear }, "Settings".into(), Message::Settings(settings::Msg::ToggleMenu)),
         ]

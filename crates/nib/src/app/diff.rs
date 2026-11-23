@@ -296,7 +296,7 @@ impl App {
     /// `Err`: why not.
     pub(super) fn diff_review_ctl(&mut self, what: &str, target: Option<&str>, body: Option<&str>) -> Result<Task<Message>, String> {
         if agent_of(self.diff.scope).is_none() || !self.diff_active() {
-            return Err("the diff tab is not showing an agent's work (diff open agent:N)".to_string());
+            return Err("the Review tab is not showing an agent's work (diff open agent:N)".to_string());
         }
         let body = || body.map(str::to_string).filter(|b| !b.trim().is_empty()).ok_or("no text given".to_string());
         let id = || target.map(str::to_string).ok_or("which comment?".to_string());

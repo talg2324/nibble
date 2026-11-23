@@ -5,7 +5,7 @@ description: Do a feature request or a bug fix the organized way when nib runs y
 
 # A feature or a bug fix, on your own branch
 
-The user sees your work in nib's diff tab as a pull request: your plan beside your changes.
+The user sees your work in nib's Review tab as a pull request: your plan beside your changes.
 When you say you are done they accept it (your branch lands on theirs as **one commit**, and
 your session ends), look at it first, or write back to you. Other agents may be working in the
 same project at the same time; on your own branch you cannot step on each other.
