@@ -558,7 +558,8 @@ mod tests {
         if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
             return; // no git on this machine
         }
-        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+        // core.autocrlf: Windows runners turn it on globally, which would check work trees out with CRLF.
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
             git(&repo, args).unwrap();
         }
         fs::write(repo.join("app/a.txt"), "one\n").unwrap();
@@ -646,7 +647,8 @@ mod tests {
         if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
             return; // no git on this machine
         }
-        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+        // core.autocrlf: Windows runners turn it on globally, which would check work trees out with CRLF.
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
             git(&repo, args).unwrap();
         }
         fs::write(repo.join("app/a.txt"), "one\n").unwrap();
@@ -759,7 +761,8 @@ mod tests {
         if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
             return; // no git on this machine
         }
-        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+        // core.autocrlf: Windows runners turn it on globally, which would check work trees out with CRLF.
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
             git(&repo, args).unwrap();
         }
         fs::write(repo.join("a.txt"), "one\n").unwrap();
@@ -814,7 +817,8 @@ mod tests {
         if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
             return; // no git on this machine
         }
-        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+        // core.autocrlf: Windows runners turn it on globally, which would check work trees out with CRLF.
+        for args in [&["config", "user.name", "T"][..], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
             git(&repo, args).unwrap();
         }
         fs::write(repo.join("a.txt"), "one\n").unwrap();

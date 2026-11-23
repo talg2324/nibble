@@ -280,15 +280,17 @@ fn ollama_model(model: &str) -> String {
 
 /// One model call, straight to Ollama: greedy and seeded unless the job says otherwise.
 fn generate(job: &Job) -> Result<Map<String, Value>, Failure> {
+    // The job's own mistakes first: a broken job never starts Ollama.
+    let prompt = job.prompt()?;
+    let schema = job.schema()?;
     let gpu = job.gpu()?;
     let addr = ollama::server(&gpu)?;
     let model = ollama_model(job.model());
-    let schema = job.schema()?;
     let mut messages = Vec::new();
     if let Some(system) = job.str("system") {
         messages.push(json!({ "role": "system", "content": system }));
     }
-    messages.push(json!({ "role": "user", "content": job.prompt()? }));
+    messages.push(json!({ "role": "user", "content": prompt }));
     let mut options = Map::new();
     options.insert("temperature".into(), json!(job.num("temperature").unwrap_or(0.0)));
     options.insert("seed".into(), json!(job.num("seed").map_or(0, |s| s as i64)));

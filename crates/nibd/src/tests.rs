@@ -398,7 +398,7 @@ fn scratch_and_nibdir() {
     assert_eq!(std::path::PathBuf::from(n2), nibdir);
     let _ = std::fs::remove_dir_all(&nibdir);
     let _ = std::fs::remove_dir_all(&scratch);
-    std::fs::remove_dir_all(&dir).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

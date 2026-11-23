@@ -285,8 +285,10 @@ mod tests {
         assert!(prepare(&["upload", "1", "/no/such/file.csv"]).unwrap_err().contains("is not a file"));
         assert_eq!(prepare(&["read", "--tab", "8000"]).unwrap(), (json!({ "cmd": "web.read", "tab": "8000" }), None));
         // A picture is asked for itself, and written where the agent said (or in its scratch).
-        let (req, to) = prepare(&["shot", "/tmp/x.png", "--ref", "3"]).unwrap();
-        assert_eq!((req, to), (json!({ "cmd": "web.shot", "ref": "3", "inline": true }), Some(PathBuf::from("/tmp/x.png"))));
+        // A path absolute on every OS (`/tmp/x.png` is not, on Windows).
+        let at = std::env::temp_dir().join("x.png");
+        let (req, to) = prepare(&["shot", &at.to_string_lossy(), "--ref", "3"]).unwrap();
+        assert_eq!((req, to), (json!({ "cmd": "web.shot", "ref": "3", "inline": true }), Some(at)));
         let (req, to) = prepare(&["shot"]).unwrap();
         assert!(req["inline"] == true && to.unwrap().file_name().unwrap().to_string_lossy().starts_with("web-"));
     }
