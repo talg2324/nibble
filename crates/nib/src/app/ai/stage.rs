@@ -395,10 +395,16 @@ impl App {
             let chat = self.ai.seeded(Chat { key, agent, chosen: model.clone(), ..Default::default() });
             self.ai.chats.push(chat);
         }
+        let shown = self.ai.cur == i;
         if self.ai.cur > i {
             self.ai.cur -= 1;
         }
         self.ai.cur = self.ai.cur.min(self.ai.chats.len() - 1);
+        // Another agent takes the place of the one shown: if it said it is done, ask, as
+        // going to it would (one landed, the next one's question comes up).
+        if shown {
+            self.ai.accepting = self.ai.finished.is_some();
+        }
         let (Some(AiAgent::OpenCode), Some(model)) = (agent, model) else { return Task::none() };
         let local = self.ai_models(AiAgent::OpenCode).iter().any(|m| m.id == model && m.warm == Some(true));
         let live = |c: &Chat| matches!(c.session, Session::Starting | Session::Ready(_));

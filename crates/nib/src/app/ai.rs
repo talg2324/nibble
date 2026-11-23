@@ -3416,6 +3416,44 @@ mod tests {
         assert!(a.diff_branch(7).is_none());
     }
 
+    /// Two agents on branches of their own both say they are done; one is landed. The other,
+    /// shown in its place, asks at once, and is landed the same way.
+    #[test]
+    fn landing_one_finished_agent_brings_up_the_next_ones_question() {
+        let accept = if cfg!(target_os = "macos") { "cmd+enter" } else { "ctrl+enter" };
+        let done = || AiEvent::Finished(nib_proto::AiFinished { asked: "Fix it".into(), found: None, did: "Fixed it".into(), ..Default::default() });
+        let landing = |a: &App| a.pending.iter().find_map(|(id, p)| matches!(p, Pending::WorkLand { .. }).then_some(*id));
+        let landed = |a: &mut App| {
+            let req = landing(a).expect("asked to land");
+            let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::GitRan { ok: true, output: "landed".into() }) });
+        };
+        let mut a = chatting();
+        say(&mut a, "first");
+        let _ = a.update(Message::Control(Command::NewAgent));
+        let _ = a.update(Message::Ai(Msg::Use(AiAgent::Claude, None)));
+        let req = opening(&a).unwrap();
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::AiOpened { id: 9 }) });
+        say(&mut a, "second");
+        for n in [7, 9] {
+            let work = nib_proto::AiWork { branch: Some(format!("nib/fix/b{n}")), dir: Some(format!("/w/b{n}")), base: Some("main".into()), plan: None, review: None };
+            event(&mut a, n, AiEvent::Work(work));
+            event(&mut a, n, AiEvent::TurnDone { error: None });
+            event(&mut a, n, done());
+        }
+        // Tab to the first, ⌘↵: landed and ended.
+        key(&mut a, "tab");
+        assert!(a.ai.cur == 0 && a.ai.accepting && matches!(a.ai.session, Session::Ready(7)));
+        key(&mut a, accept);
+        landed(&mut a);
+        assert_eq!(a.ai.chats.len(), 1);
+        // The other one is shown now, and asks.
+        assert!(matches!(a.ai.session, Session::Ready(9)) && a.ai.finished.is_some());
+        assert!(a.ai.accepting, "the next agent's question is up");
+        key(&mut a, accept);
+        landed(&mut a);
+        assert!(!a.ai.chats.iter().any(|c| matches!(c.session, Session::Ready(_))), "both ended");
+    }
+
     #[test]
     fn panic_pauses_every_agent_and_stops_the_marked_ones() {
         let mut a = chatting();
