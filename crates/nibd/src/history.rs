@@ -1,4 +1,4 @@
-//! Past conversations with agents (D-049): kept so they can be found, read again, continued
+//! Past conversations with agents: kept so they can be found, read again, continued
 //! and deleted.
 //!
 //! The daemon writes each conversation down as it happens, where the code and the assistant's

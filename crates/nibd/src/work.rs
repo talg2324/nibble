@@ -1,4 +1,4 @@
-//! Organized work for agents (D-067): `nib-work`, a command beside `nib-mail` that an agent runs
+//! Organized work for agents: `nib-work`, a command beside `nib-mail` that an agent runs
 //! to record its plan and to start a branch of its own in a git work tree of its own, so that
 //! what it does can be shown, reviewed and landed like a pull request.
 //!
@@ -545,7 +545,7 @@ mod tests {
         assert_eq!(slug(&"x".repeat(60)).len(), 40);
     }
 
-    /// Worktree-per-feature (D-080): what an agent left in the shared project folder is not
+    /// Worktree-per-feature: what an agent left in the shared project folder is not
     /// done while it is on; `--carry` moves it to the agent's branch; the hook's guard refuses
     /// edits there; off, the same summary goes through and says what is left uncommitted.
     #[test]

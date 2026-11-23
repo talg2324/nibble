@@ -1,4 +1,4 @@
-//! What a step does to files, for a person (D-057).
+//! What a step does to files, for a person.
 //!
 //! Each step is read into a list of acts once, when it arrives (or when a past conversation is
 //! opened): never stored, and gone with its chat. Agents read and write files with their

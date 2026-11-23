@@ -1,4 +1,4 @@
-//! The agents tab (D-049): several agents at once, shown working instead of chatting.
+//! The agents tab: several agents at once, shown working instead of chatting.
 //!
 //! It takes the editor area like a file tab. Left, the agents: each row says what that agent is
 //! doing right now (state, a clock, two lines of what it's looking at). Right, the one selected:
@@ -227,7 +227,7 @@ pub(super) fn step_json(s: &Step) -> Value {
         "line": s.done.as_ref().and_then(|d| d.line),
         "seconds": s.done.as_ref().map(|d| d.took.as_secs_f64()),
         "clock": step_clock(s).map(|(c, _, _)| c),
-        // What it does to files (D-057), its harness's tools and the shell alike.
+        // What it does to files, its harness's tools and the shell alike.
         "acts": s.acts.iter().map(|a| match a {
             Act::Read { path, from, to } => json!({ "act": "read", "path": path, "from": from, "to": to }),
             Act::Edit { path } => json!({ "act": "edit", "path": path }),
@@ -289,7 +289,7 @@ impl App {
         self.ai.accepting = false;
         let Some(f) = self.ai.finished.clone().filter(|_| yes) else { return Task::none() };
         // Worktree-per-feature on, and some of its work is in the user's tree, where accepting
-        // would leave it uncommitted: not done. It is told to move it, and goes on (D-080).
+        // would leave it uncommitted: not done. It is told to move it, and goes on.
         if self.ai.wpf && !f.stray.is_empty() {
             if let Some(id) = self.ai_shown_session() {
                 let text = format!(
@@ -930,7 +930,7 @@ impl App {
         row![tab(Side::Terminal), tab(Side::Skills), tab(Side::Prompt), self.ai_wpf_switch()].spacing(8).align_y(Alignment::Center).into()
     }
 
-    /// WPF: worktree-per-feature (D-080), filled while on. A switch, not a pane: the fill sets
+    /// WPF: worktree-per-feature, filled while on. A switch, not a pane: the fill sets
     /// it apart from the three tabs.
     fn ai_wpf_switch(&self) -> Element<'_, Message> {
         let th = &self.theme;

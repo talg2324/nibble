@@ -2,7 +2,7 @@
 //!
 //! Transport: any byte stream (child stdio of `ssh host nibd`, `wsl.exe ... nibd`, or local `nibd`).
 //! Framing: `u32` big-endian payload length, then a msgpack payload (`rmp_serde`, named fields so
-//! new optional fields stay backward compatible). See `.claude/PROTOCOL.md` (local notes).
+//! new optional fields stay backward compatible).
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -852,7 +852,7 @@ pub enum ClientNotify {
     /// Freeze (`on`) or thaw every process of the session, mid-command or mid-request,
     /// without it noticing -> `AiEvent::Suspended`. Unix only.
     AiSuspend { id: AiId, on: bool },
-    /// Worktree-per-feature (D-080): `on`, an agent that changes files must do it on a branch of
+    /// Worktree-per-feature: `on`, an agent that changes files must do it on a branch of
     /// its own (`nib-work start`) that lands on the user's branch; the daemon's hints, `nib-mail
     /// done`, `nib-work` and nib's Claude Code hook hold agents to it. Sent after `Hello` and
     /// whenever the user flips it; the daemon takes it as on until told otherwise.

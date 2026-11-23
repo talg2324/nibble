@@ -770,7 +770,7 @@ pub struct Sessions {
     frozen: std::collections::HashSet<AiId>,
     /// The agents' mailbox folder (`mail`), once a session has started.
     mail: Option<PathBuf>,
-    /// Worktree-per-feature (D-080) is off: the user said agents may change the shared project
+    /// Worktree-per-feature is off: the user said agents may change the shared project
     /// folder. Off only when told (`set_worktree_per_feature`).
     wpf_off: bool,
     /// Sessions already told they changed the shared project folder with worktree-per-feature on.
@@ -979,7 +979,7 @@ impl Watch {
     }
 
     /// Session `id` changed `path` in the shared project folder. With worktree-per-feature on
-    /// that is not where its work goes (D-080): it is told so, once, and how to move what it
+    /// that is not where its work goes: it is told so, once, and how to move what it
     /// did onto a branch of its own. Ignored files are not counted.
     fn stray_alarm(&self, id: AiId, path: &Path) {
         let Some(shared) = self.sessions.upgrade() else { return };
@@ -1132,14 +1132,14 @@ fn post_office(sessions: std::sync::Weak<Mutex<Sessions>>) {
 /// letter to the recipient by name is said to it as a message: from another agent (it may be a
 /// question: an idle agent starts a turn for it), or nib's own note while it is working (its
 /// harness shows it after its current step). A letter to `all` is news: it waits in the inbox
-/// and goes with the agent's next message, so it never interrupts or wakes anyone (D-062).
+/// and goes with the agent's next message, so it never interrupts or wakes anyone.
 /// Agents with no task get nothing.
 fn route(shared: &Shared, dir: &Path, letter: mail::Letter) {
     let mut later: Vec<(Arc<PerTurn>, String)> = Vec::new();
     {
         let mut s = shared.lock().unwrap();
-        // To nib: an agent saying its job is done, or what a sub-agent it started is doing
-        // (D-061). Shown in its own chat, delivered to nobody.
+        // To nib: an agent saying its job is done, or what a sub-agent it started is doing.
+        // Shown in its own chat, delivered to nobody.
         if letter.to == mail::NIB {
             let event = match serde_json::from_str::<mail::Report>(&letter.text) {
                 Ok(mail::Report::Finished(f)) => Some(AiEvent::Finished(f)),
@@ -1825,7 +1825,7 @@ fn skills_plugin() -> Option<PathBuf> {
 }
 
 /// The hook in nib's plugin: before Claude Code edits a file, `nib-work guard` says whether
-/// worktree-per-feature allows it (D-080). Its "no" (exit 3) becomes Claude Code's "blocked"
+/// worktree-per-feature allows it. Its "no" (exit 3) becomes Claude Code's "blocked"
 /// (2) with the reason; anything else (not in nib, an older nibd) lets the edit through.
 const PLUGIN_HOOKS: &str = r#"{
   "hooks": {
@@ -1846,7 +1846,7 @@ fn write_plugin_hooks(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
-    // Not offered unless the user opted in at install (D-044).
+    // Not offered unless the user opted in at install.
     let skills: Vec<&AiSkill> = skills.iter().filter(|s| s.name != "nib-upstream").collect();
     if skills.is_empty() {
         return None;
@@ -1879,7 +1879,7 @@ fn link_plugin(dir: &Path, skills: &[AiSkill]) -> Option<PathBuf> {
         }
         Ok(())
     }
-    // Not offered unless the user opted in at install (D-044).
+    // Not offered unless the user opted in at install.
     let skills: Vec<&AiSkill> = skills.iter().filter(|s| s.name != "nib-upstream").collect();
     if skills.is_empty() {
         return None;
@@ -2752,7 +2752,7 @@ fn unix_secs(t: &str) -> Option<i64> {
 pub fn send(sessions: &Shared, id: AiId, text: &str, images: &[AiImage]) {
     let mut s = sessions.lock().unwrap();
     // An agent's first message is its task. With other agents at work, it is told about them
-    // (the others are not told about it: it writes to the ones its work touches, D-062), and
+    // (the others are not told about it: it writes to the ones its work touches), and
     // how to say when the job is done.
     let mut text = text.to_string();
     if let Some(m) = s.meta.get(&id) {
@@ -2887,7 +2887,7 @@ fn with_answers(mut input: Value, answers: &[String]) -> Value {
     input
 }
 
-/// Worktree-per-feature on or off (D-080), for every agent: the hints they are given from now
+/// Worktree-per-feature on or off, for every agent: the hints they are given from now
 /// on, and what `nib-mail done` and `nib-work guard` hold them to.
 pub fn set_worktree_per_feature(sessions: &Shared, on: bool) {
     let mut s = sessions.lock().unwrap();
@@ -3238,7 +3238,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Worktree-per-feature (D-080): the first message says which way to work, and an agent
+    /// Worktree-per-feature: the first message says which way to work, and an agent
     /// that changes the shared project folder while it is on is written to, once.
     #[test]
     fn worktree_per_feature_hints_and_the_letter_when_an_agent_edits_the_shared_tree() {

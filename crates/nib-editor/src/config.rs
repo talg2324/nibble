@@ -80,7 +80,7 @@ pub struct AiConfig {
     /// Seconds the mouse rests on a picture in the chat before it is shown four times bigger.
     #[serde(default = "default_image_zoom_delay")]
     pub image_zoom_delay: f32,
-    /// Worktree-per-feature (D-080): an agent that changes files does it on a branch of its own
+    /// Worktree-per-feature: an agent that changes files does it on a branch of its own
     /// that lands on yours as one commit (`nib-work`), and is held to it. Off: agents change the
     /// project folder and nothing is committed for them. The WPF switch in the agents tab.
     #[serde(default = "yes")]
@@ -861,7 +861,7 @@ root = "~/code"
     #[test]
     fn profiles_are_written_beside_the_others_keeping_comments() {
         let mut doc: toml_edit::DocumentMut = LIVED_IN.parse().unwrap();
-        let lab = Profile { user: Some("tal".into()), port: Some(2222), ..ssh("10.0.0.7") };
+        let lab = Profile { user: Some("ada".into()), port: Some(2222), ..ssh("10.0.0.7") };
         put_profile(&mut doc, "lab", &lab, None).unwrap();
         // Changing a value keeps the comment after it.
         let gpu = Profile { root: "~/projects/other".into(), ..ssh("gpu-box") };
@@ -906,7 +906,7 @@ root = "~/code"
         for name in ["", "-x", ".x", "a b", "a/b"] {
             assert!(check_profile_name(name).is_err(), "{name:?}");
         }
-        let ok = Profile { identity: Some("~/.ssh/my key".into()), jump: Some("me@bastion:22".into()), ..ssh("tal@gpu") };
+        let ok = Profile { identity: Some("~/.ssh/my key".into()), jump: Some("me@bastion:22".into()), ..ssh("ada@gpu") };
         assert!(ok.check().is_ok());
         let Target::Ssh { ssh, .. } = Profile { port: Some(2222), ..ok.clone() }.target().unwrap() else { panic!() };
         assert_eq!(ssh.args(), ["-p", "2222", "-i", "~/.ssh/my key", "-J", "me@bastion:22"]);

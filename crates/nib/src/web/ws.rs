@@ -1,6 +1,6 @@
 //! A websocket client for one job: talking to the Firefox nib started, on this machine's
 //! loopback. Text messages only, no TLS, no extensions. Written here instead of taking a crate
-//! because the whole of it is this file (D-071).
+//! because the whole of it is this file.
 //!
 //! The peer is a process we started on a port it chose, so the handshake's accept key is not
 //! checked and the mask (required of clients by the protocol) need not be unpredictable.

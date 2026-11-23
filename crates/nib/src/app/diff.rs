@@ -5,7 +5,7 @@
 //! s scope, Space stages or unstages the file, m commits, Enter opens the line in the editor.
 //!
 //! An agent's work is reviewed here: comments on lines of its changes and on blocks of its plan
-//! (the pane beside them; Tab gives it the keys), all in one review that nibd keeps (D-070).
+//! (the pane beside them; Tab gives it the keys), all in one review that nibd keeps.
 
 use super::comment::{Comment, Draft, Reply};
 use super::plan::{self, Plan, PlanMsg};
@@ -613,8 +613,8 @@ impl App {
     }
 
     /// A key for the plan pane, which has the keys while one of its rows is picked or a comment
-    /// is being written in it. Tab picks a row, or lets go; then, as where a plan is approved
-    /// (D-068): ↑ / ↓ move, ⇧ takes in more rows, ↵ (or c) writes a comment on them; and as on
+    /// is being written in it. Tab picks a row, or lets go; then, as where a plan is approved:
+    /// ↑ / ↓ move, ⇧ takes in more rows, ↵ (or c) writes a comment on them; and as on
     /// a comment in the changes: r answers the one under the rows picked, x resolves it or
     /// opens it again, ⌫ takes back one not sent yet. `None`: the key isn't the pane's.
     fn diff_plan_key(&mut self, chord: KeyChord, text: Option<&str>) -> Option<Task<Message>> {

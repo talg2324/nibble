@@ -1,4 +1,4 @@
-//! PDF tabs (D-049): opening, rendering pages in the background, links, zoom and keys. The model
+//! PDF tabs: opening, rendering pages in the background, links, zoom and keys. The model
 //! and the pane are in `crate::pdf`.
 
 use super::viewers::open_external;

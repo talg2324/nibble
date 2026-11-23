@@ -422,7 +422,7 @@ mod tests {
     use super::*;
 
     fn host() -> SshHost {
-        SshHost { host: "gpu.lab".into(), user: Some("tal".into()), port: Some(2222), identity: None, jump: None }
+        SshHost { host: "gpu.lab".into(), user: Some("ada".into()), port: Some(2222), identity: None, jump: None }
     }
 
     fn args(c: &Command) -> Vec<String> {
@@ -438,7 +438,7 @@ mod tests {
         let a = args(&mux_command(&host(), "forward", 8765, 8765));
         assert!(has(&a, &["-O", "forward", "-L", "127.0.0.1:8765:localhost:8765"]), "{a:?}");
         assert!(has(&a, &["-o", crate::transport::CONTROL_PATH]) && has(&a, &["-o", "BatchMode=yes"]) && has(&a, &["-o", "StrictHostKeyChecking=yes"]), "{a:?}");
-        assert!(has(&a, &["-l", "tal", "-p", "2222"]), "the profile's options: the socket's name is made of them: {a:?}");
+        assert!(has(&a, &["-l", "ada", "-p", "2222"]), "the profile's options: the socket's name is made of them: {a:?}");
         assert_eq!(a.last().map(String::as_str), Some("gpu.lab"));
         let a = args(&mux_command(&host(), "cancel", 8766, 8765));
         assert!(has(&a, &["-O", "cancel", "-L", "127.0.0.1:8766:localhost:8765"]), "{a:?}");

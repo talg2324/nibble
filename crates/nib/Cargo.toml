@@ -38,7 +38,7 @@ ratex-types = "0.1.16"
 ratex-svg = { version = "0.1.16", features = ["embed-fonts"] }
 # Mermaid diagrams in Markdown, to SVG in pure Rust (no browser), with Mermaid's own layout.
 merman = { version = "0.11", default-features = false, features = ["all-diagrams", "svg"] }
-# PDF viewer: pure-Rust rasterizer (D-049).
+# PDF viewer: pure-Rust rasterizer.
 hayro = "0.9"
 arboard = "3.7.0"
 # The window's handle, to ask the OS where a file was dropped (winit doesn't say).

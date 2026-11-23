@@ -27,7 +27,7 @@
 #
 # [profiles.lab]
 # ssh = "10.0.0.7"         # or a hostname, or user@host
-# user = "tal"             # optional, ssh only: -l
+# user = "ada"             # optional, ssh only: -l
 # port = 2222              # -p
 # identity = "~/.ssh/lab"  # -i
 # jump = "bastion"         # -J

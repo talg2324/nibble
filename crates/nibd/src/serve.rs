@@ -1112,18 +1112,18 @@ mod tests {
         let d = temp("file");
         let file = d.join("apps.json");
         assert_eq!(read(&file), Ok(Apps::new()), "no file: no apps");
-        let text = r#"{ "apps": { "clarity": {
-            "title": "Clarity", "page": { "server": "frontend", "path": "/" },
+        let text = r#"{ "apps": { "tidepool": {
+            "title": "Tidepool", "page": { "server": "frontend", "path": "/" },
             "servers": {
-              "backend":  { "cmd": "uv run clarity-desktop serve --no-open --port 8765", "port": 8765 },
-              "frontend": { "cmd": "uv run clarity-desktop frontend --port 8766", "port": 8766, "after": ["backend"],
+              "backend":  { "cmd": "uv run tidepool serve --no-open --port 8765", "port": 8765 },
+              "frontend": { "cmd": "uv run tidepool frontend --port 8766", "port": 8766, "after": ["backend"],
                             "env": { "API": "http://127.0.0.1:8765" }, "cwd": "web" } },
             "origin": { "by": "agent:claude-3", "at": 1795000000 } } } }"#;
         fs::write(&file, text).unwrap();
         let got = read(&file).unwrap();
-        let c = &got["clarity"];
-        assert_eq!(c.def.servers["backend"], def("uv run clarity-desktop serve --no-open --port 8765", Some(8765), &[]));
-        assert_eq!((c.def.title.as_deref(), c.def.page.as_ref().map(|p| p.server.as_str()), c.def.servers["frontend"].cwd.as_deref()), (Some("Clarity"), Some("frontend"), Some("web")));
+        let c = &got["tidepool"];
+        assert_eq!(c.def.servers["backend"], def("uv run tidepool serve --no-open --port 8765", Some(8765), &[]));
+        assert_eq!((c.def.title.as_deref(), c.def.page.as_ref().map(|p| p.server.as_str()), c.def.servers["frontend"].cwd.as_deref()), (Some("Tidepool"), Some("frontend"), Some("web")));
         assert_eq!(c.def.servers["frontend"].env["API"], "http://127.0.0.1:8765");
         assert_eq!((c.origin.as_ref().unwrap().by.as_str(), c.approved.as_deref()), ("agent:claude-3", None));
         write(&file, &got).unwrap();

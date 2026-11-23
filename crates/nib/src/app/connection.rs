@@ -352,7 +352,7 @@ impl App {
         self.hello(&l)
     }
 
-    /// `/home/tal/x` -> `~/x` on the connected machine, when its home is known.
+    /// `/home/ada/x` -> `~/x` on the connected machine, when its home is known.
     pub(super) fn tilde(&self, abs: &str) -> String {
         match &self.remote_home {
             Some(h) if abs == h => "~".into(),
@@ -519,7 +519,7 @@ fn profile_for(t: &nib_editor::Target) -> Option<nib_editor::Profile> {
     })
 }
 
-/// How a target reads to people: `tal@gpu-box:2222`, `wsl Ubuntu`, `this machine`.
+/// How a target reads to people: `ada@gpu-box:2222`, `wsl Ubuntu`, `this machine`.
 pub(super) fn target_text(t: &nib_editor::Target) -> String {
     match t {
         nib_editor::Target::Local { .. } => "this machine".into(),

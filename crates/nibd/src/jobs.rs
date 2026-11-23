@@ -17,7 +17,7 @@
 //!   create or change), `keep_session`
 //!
 //! A run started from inside an agent nib runs (`$NIB_MAILBOX`, `$NIB_AGENT`) shows in that
-//! agent's chat as it happens (D-061): a step for the run, its tool calls nested in it. In a batch
+//! agent's chat as it happens: a step for the run, its tool calls nested in it. In a batch
 //! only the step for each job, so thousands of jobs don't bury the chat.
 
 use crate::{ai, mail, ollama};
@@ -215,7 +215,7 @@ pub fn fill(text: &str, vars: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// How much of a run its owner's chat is shown (D-061).
+/// How much of a run its owner's chat is shown.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Show {
     /// The run and every tool call in it.
@@ -387,7 +387,7 @@ fn permissions(allow: &[String], write: &[String]) -> Value {
     })
 }
 
-/// A run as seen from its owner's chat (D-061): the agent nib runs that started it, through the
+/// A run as seen from its owner's chat: the agent nib runs that started it, through the
 /// mailbox. `None` when it wasn't started from inside one.
 struct Owner {
     dir: PathBuf,

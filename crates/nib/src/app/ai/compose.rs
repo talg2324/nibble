@@ -37,7 +37,7 @@ pub(super) const COMMANDS: &[SlashCmd] = &[
 const MAX_PATHS: usize = 8;
 /// Most rows the menu shows at once; it scrolls with the choice.
 const MAX_ROWS: usize = 10;
-/// nib's skills that are opt-in (D-044): offered only once installed where an assistant looks.
+/// nib's skills that are opt-in: offered only once installed where an assistant looks.
 const OPT_IN: &[&str] = &["nib-upstream"];
 
 #[derive(Debug, Clone, PartialEq)]

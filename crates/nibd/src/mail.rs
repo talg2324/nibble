@@ -1,4 +1,4 @@
-//! The agents' mailbox (D-049): how agents working in the same project at once tell each other
+//! The agents' mailbox: how agents working in the same project at once tell each other
 //! what they are doing, whatever assistant each one is.
 //!
 //! An agent sends with `nib-mail send NAME "text"` (the `nib-agent-mailbox` skill says when).
@@ -149,7 +149,7 @@ fn write_launchers(bin: &Path, exe: &Path) -> std::io::Result<()> {
 /// delivered to nobody.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Report {
-    /// What a `nib ai run` sub-agent is doing (D-061): shown as a step of the owner's (the run,
+    /// What a `nib ai run` sub-agent is doing: shown as a step of the owner's (the run,
     /// with the sub-agent's tool calls nested in it).
     Step(AiStep),
     StepDone(AiStepDone),
@@ -241,7 +241,7 @@ pub fn mode_of(dir: &Path, id: &str) -> Option<String> {
     roster(dir).into_iter().find(|e| e.id == id).map(|e| e.mode).filter(|m| !m.is_empty())
 }
 
-/// Worktree-per-feature (D-080) as the daemon last told the agents' commands: on unless the
+/// Worktree-per-feature as the daemon last told the agents' commands: on unless the
 /// mailbox's `wpf` file says `off`.
 pub fn wpf(dir: &Path) -> bool {
     fs::read_to_string(dir.join("wpf")).map_or(true, |s| s.trim() != "off")
@@ -425,7 +425,7 @@ pub fn run_in(dir: &Path, me: &str, root: Option<&Path>, args: &[String]) -> (St
                 return (format!("nib-mail done: {n} words; say it in at most {} (all three parts together) and run it again", AiFinished::WORDS), 1);
             }
             // What it changed in the shared project folder is not on a branch: accepting commits
-            // none of it. With worktree-per-feature on, that is not done (D-080).
+            // none of it. With worktree-per-feature on, that is not done.
             f.stray = root.map(|r| stray(dir, me, r)).unwrap_or_default();
             if !f.stray.is_empty() && wpf(dir) {
                 return (

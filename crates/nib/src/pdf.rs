@@ -1,4 +1,4 @@
-//! PDF files (D-049): parsing, links and the outline, page rendering with hayro (off the UI
+//! PDF files: parsing, links and the outline, page rendering with hayro (off the UI
 //! thread), and the viewer pane. hayro draws a page as a picture; the links and the outline are
 //! read from the file's objects here.
 

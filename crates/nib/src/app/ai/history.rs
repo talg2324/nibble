@@ -1,4 +1,4 @@
-//! The history tab (D-049): this project's past conversations with agents.
+//! The history tab: this project's past conversations with agents.
 //!
 //! The daemon keeps them (it writes each one down as it happens, where the assistant's own
 //! session lives). Here they are listed, the latest first; typing searches what was asked, said,

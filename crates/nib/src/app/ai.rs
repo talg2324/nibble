@@ -461,7 +461,7 @@ pub struct Panel {
     last: Option<(AiAgent, Option<String>)>,
     /// `[ai] pick_model`: a new agent opens the dropdown (off: it starts with `last`).
     pick_model: bool,
-    /// `[ai] worktree_per_feature` (D-080): agents change files only on a branch of their own
+    /// `[ai] worktree_per_feature`: agents change files only on a branch of their own
     /// that lands on the user's; the daemon is told (`ClientNotify::AiWorktreePerFeature`).
     pub(super) wpf: bool,
     /// The terminal installing / signing in an assistant: its key, and which one.
@@ -3343,7 +3343,7 @@ mod tests {
         assert!(a.ai.finished.is_none());
     }
 
-    /// Worktree-per-feature (D-080): an agent whose summary says files of its are uncommitted
+    /// Worktree-per-feature: an agent whose summary says files of its are uncommitted
     /// in the user's tree is not ended by ⌘↵ while it is on: it is sent back to move them. Off,
     /// it is ended as before (and the dialog said what stays).
     #[test]

@@ -1,4 +1,4 @@
-//! Files dragged onto the window from the desktop (D-052). Dropped on the file tree they are
+//! Files dragged onto the window from the desktop. Dropped on the file tree they are
 //! copied into the folder under the mouse, on the daemon's machine (so over SSH too). Dropped on
 //! the agents chat, pictures go with the next message like pasted ones, and text files are
 //! attached as `@` mentions, read here.

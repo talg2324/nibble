@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live end-to-end check of worktree-per-feature (D-080) with a real agent: a throwaway git repo
+# Live end-to-end check of worktree-per-feature with a real agent: a throwaway git repo
 # with a bug, a real nib (headless) driven by `nib ctl`, a real Claude Code agent asked to fix it,
 # its "done" accepted as ⌘↵ would. Passes when the fix landed on the repo's branch as one commit
 # and nothing is left uncommitted or checked out beside it. Spends model tokens: run by hand.

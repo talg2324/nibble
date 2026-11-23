@@ -214,7 +214,7 @@ fn load_profiles() -> Result<Vec<(String, Profile)>, String> {
     Config::load().map(|c| c.profiles.into_iter().collect()).map_err(|e| format!("{e:#}"))
 }
 
-/// A profile name from a host: `tal@gpu.lab` -> `gpu.lab`.
+/// A profile name from a host: `ada@gpu.lab` -> `gpu.lab`.
 fn name_for(host: &str) -> String {
     let h = host.rsplit_once('@').map_or(host, |(_, h)| h);
     let n: String = h.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
@@ -584,7 +584,7 @@ impl App {
         self.connect(l, false, !again, None, true)
     }
 
-    /// `~/x` -> `/home/tal/x` on the connected machine (the daemon expands `~` only at Hello).
+    /// `~/x` -> `/home/ada/x` on the connected machine (the daemon expands `~` only at Hello).
     fn untilde(&self, p: &str) -> String {
         match (&self.remote_home, p.strip_prefix('~')) {
             (Some(h), Some(rest)) => format!("{h}{rest}"),
@@ -1532,8 +1532,8 @@ mod tests {
     #[test]
     fn fields_from_requests() {
         let mut p = Profile { root: "~".into(), ..Default::default() };
-        apply_fields(&mut p, &json!({ "cmd": "ssh.add", "name": "x", "host": "gpu", "port": 2222, "user": "tal" })).unwrap();
-        assert_eq!((p.ssh.as_deref(), p.port, p.user.as_deref()), (Some("gpu"), Some(2222), Some("tal")));
+        apply_fields(&mut p, &json!({ "cmd": "ssh.add", "name": "x", "host": "gpu", "port": 2222, "user": "ada" })).unwrap();
+        assert_eq!((p.ssh.as_deref(), p.port, p.user.as_deref()), (Some("gpu"), Some(2222), Some("ada")));
         apply_fields(&mut p, &json!({ "user": null, "port": "22" })).unwrap();
         assert_eq!((p.user.as_deref(), p.port), (None, Some(22)));
         assert!(apply_fields(&mut p, &json!({ "hots": "typo" })).is_err());
@@ -1549,11 +1549,11 @@ mod tests {
 
     #[test]
     fn hosts_typed_in_the_box() {
-        let p = parse_host("tal@gpu.lab:2222").unwrap();
-        assert_eq!((p.ssh.as_deref(), p.port, p.root.as_str()), (Some("tal@gpu.lab"), Some(2222), "~"));
+        let p = parse_host("ada@gpu.lab:2222").unwrap();
+        assert_eq!((p.ssh.as_deref(), p.port, p.root.as_str()), (Some("ada@gpu.lab"), Some(2222), "~"));
         assert!(parse_host("-oProxyCommand=x").is_err());
         assert!(parse_host("two words").is_err());
-        assert_eq!(name_for("tal@gpu.lab"), "gpu.lab");
+        assert_eq!(name_for("ada@gpu.lab"), "gpu.lab");
         assert_eq!(name_for("10.0.0.7"), "10.0.0.7");
     }
 
@@ -1590,14 +1590,14 @@ mod tests {
 
     #[test]
     fn the_browser_hides_dot_folders_until_asked_and_knows_the_parent() {
-        let mut b = Browse { dir: "/home/tal".into(), ..Default::default() };
+        let mut b = Browse { dir: "/home/ada".into(), ..Default::default() };
         b.entries = vec![(".cache".into(), false), ("code".into(), false), ("Codex".into(), true)];
         assert_eq!(b.shown().len(), 2);
         b.filter = "cod".into();
         assert_eq!(b.shown().iter().map(|e| e.0.as_str()).collect::<Vec<_>>(), ["code", "Codex"]);
         b.filter = ".c".into();
         assert_eq!(b.shown().len(), 1);
-        assert_eq!((b.path_of("code").as_str(), b.parent().as_deref()), ("/home/tal/code", Some("/home")));
+        assert_eq!((b.path_of("code").as_str(), b.parent().as_deref()), ("/home/ada/code", Some("/home")));
         b.dir = "/home".into();
         assert_eq!(b.parent().as_deref(), Some("/"));
         b.dir = "/".into();
@@ -1616,10 +1616,10 @@ mod tests {
         assert_eq!(a.ssh.input.as_str(), "", "and doesn't type");
         type_str(&mut a, "2"); // host: gpu-box2
         key(&mut a, "down");
-        type_str(&mut a, "tal"); // user
+        type_str(&mut a, "ada"); // user
         let _ = a.ssh_edit_confirm();
         let changes = a.ssh.edit.as_ref().unwrap().confirm.clone().unwrap();
-        assert_eq!(changes, ["host: gpu-box → gpu-box2", "user: (not set) → tal"]);
+        assert_eq!(changes, ["host: gpu-box → gpu-box2", "user: (not set) → ada"]);
         key(&mut a, "n");
         key(&mut a, "down");
         assert_eq!(a.ssh.edit.as_ref().unwrap().sel, 2, "user is the last field shown");

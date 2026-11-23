@@ -4,7 +4,7 @@
 //! under `runtime/queries`, pinned to the same Helix tag as helix-core); more are loaded at
 //! runtime from the config dir (`grammars/<name>.dylib` + `queries/<name>/`, put there by
 //! `nib grammar add`). Either way nib drives `tree-house` (Helix's tree-sitter layer) directly,
-//! not `helix_core::syntax::Loader`, which needs a whole Helix runtime dir. D-004, D-059.
+//! not `helix_core::syntax::Loader`, which needs a whole Helix runtime dir.
 
 use helix_core::{ChangeSet, Operation, Rope, RopeSlice};
 use std::ops::Range;

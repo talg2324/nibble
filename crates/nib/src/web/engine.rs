@@ -1,6 +1,6 @@
 //! The thread that owns this window's browser and answers every `web.*` request.
 //!
-//! One browser per window, one of its tabs per web tab (D-071). Everything the browser says
+//! One browser per window, one of its tabs per web tab. Everything the browser says
 //! arrives on the same queue as the requests, so the thread never sleeps: while it waits for an
 //! answer it keeps handling events, which matters because the browser holds every request a
 //! page makes until this thread has judged it (the local-only rule, `local.rs`).

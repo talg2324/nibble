@@ -4,8 +4,8 @@
 //! The browser is the one the operating system opens links with, when nib can drive it:
 //! Firefox (over WebDriver BiDi) or a Chromium browser — Chrome, Edge, Brave, Chromium (over
 //! the DevTools protocol). Safari cannot be run unseen or driven this way, so with it as the
-//! default, or any other, nib takes the first of those that is installed. nib installs none
-//! (D-071): without one, the web tab and the agents' page requests are not there, and pages
+//! default, or any other, nib takes the first of those that is installed. nib installs none:
+//! without one, the web tab and the agents' page requests are not there, and pages
 //! open in the system's browser instead.
 
 use anyhow::{bail, Context, Result};
@@ -447,8 +447,8 @@ mod tests {
 
     #[test]
     fn a_profile_is_named_after_the_project_folder() {
-        assert_eq!(slug("/Users/tal/src/clarity-desktop"), "clarity-desktop");
-        assert_eq!(slug("/Users/tal/src/my project/"), "my_project");
+        assert_eq!(slug("/Users/ada/src/tidepool"), "tidepool");
+        assert_eq!(slug("/Users/ada/src/my project/"), "my_project");
         assert_eq!(slug("C:\\src\\app"), "app");
         assert_eq!(slug("/"), "project");
     }

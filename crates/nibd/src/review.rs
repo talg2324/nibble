@@ -1,5 +1,5 @@
-//! The user's review of an agent's work (D-067, after Crit): comments on lines of its diff and
-//! of its plan (D-070), sent to it in rounds; it answers each one (`nib-review reply`) and the
+//! The user's review of an agent's work (after Crit): comments on lines of its diff and
+//! of its plan, sent to it in rounds; it answers each one (`nib-review reply`) and the
 //! user resolves them.
 //!
 //! Kept beside the agent's branch record, in the session's mailbox folder

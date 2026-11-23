@@ -292,7 +292,7 @@ pub const HAS_NODE: &str = r#"(n) => {
 pub const WHERE: &str = "() => new Promise(r => setTimeout(() => r(JSON.stringify({ url: location.href, title: document.title, ready: document.readyState })), 0))";
 
 /// What a web tab is called: the page's title up to its first ` - `, ` | `, ` · ` or ` — `
-/// ("MarketWatcher Backend - Swagger UI" is "MarketWatcher Backend"), at most 40 characters;
+/// ("Tidepool API - Swagger UI" is "Tidepool API"), at most 40 characters;
 /// with no title, where it is served (`localhost:6006`).
 pub fn tab_name(title: &str, url: &str) -> String {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -422,14 +422,14 @@ mod tests {
     #[test]
     fn a_tab_is_named_after_its_app() {
         assert_eq!(tab_name("TensorBoard", "http://127.0.0.1:6006/"), "TensorBoard");
-        assert_eq!(tab_name("MarketWatcher Backend - Swagger UI", "http://127.0.0.1:8765/docs"), "MarketWatcher Backend");
+        assert_eq!(tab_name("Tidepool API - Swagger UI", "http://127.0.0.1:8765/docs"), "Tidepool API");
         assert_eq!(tab_name("Untitled.ipynb | JupyterLab", "http://localhost:8888/lab"), "Untitled.ipynb");
-        assert_eq!(tab_name("Clarity · Results", "http://localhost:8766/"), "Clarity");
+        assert_eq!(tab_name("Tidepool · Results", "http://localhost:8766/"), "Tidepool");
         assert_eq!(tab_name("  ", "http://127.0.0.1:6006/#x"), "localhost:6006");
         assert_eq!(tab_name("", "http://localhost/"), "localhost:80");
         assert_eq!(tab_name(&"x".repeat(90), "http://localhost/").chars().count(), 40);
         // A hyphen inside a word is not a separator.
-        assert_eq!(tab_name("clarity-desktop", "http://localhost/"), "clarity-desktop");
+        assert_eq!(tab_name("tidepool", "http://localhost/"), "tidepool");
     }
 
     #[test]

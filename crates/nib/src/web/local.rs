@@ -1,6 +1,6 @@
 //! The one rule for what the web tab may show: pages served by this machine, nothing else.
 //!
-//! It is a security boundary (D-072), so it is fixed code with no configuration: the tab must not
+//! It is a security boundary, so it is fixed code with no configuration: the tab must not
 //! become a browser, and an agent that reads pages must not be led onto the web by a page. The
 //! engine applies it to every address it is asked to open and to every document Firefox is
 //! about to request (`engine.rs`); nothing else decides.

@@ -20,7 +20,7 @@ a page from the internet, say so to the user.
 nib-app open myapp           # the app's servers, if they are not running (the nib-app skill)
 nib-web open 8766            # the port; or a path: nib-web open localhost:8766/settings
 nib-web read                 # the page as text; what can be acted on is marked [N name]
-nib-web fill 3 "tal@example.com"
+nib-web fill 3 "ada@example.com"
 nib-web click 5
 nib-web wait "Saved"         # until the page says so (not: sleep)
 nib-web read                 # again: the numbers are new

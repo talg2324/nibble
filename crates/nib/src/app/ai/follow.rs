@@ -1,4 +1,4 @@
-//! Follow (D-049, D-058): watch one agent the way you would watch a colleague at the next desk.
+//! Follow: watch one agent the way you would watch a colleague at the next desk.
 //!
 //! While an agent is followed, what it does drives the editor, at a pace a person can follow:
 //! the file it reads comes forward and a cursor walks down the lines it reads, tinting them; an
@@ -6,7 +6,7 @@
 //! in, then glows for a moment. A cursor with the agent's name on a flag does it. The tab
 //! following opened closes when the agent moves on (unless it was open before, or has unsaved
 //! changes). A shell command that reads or writes a file (`cat`, `sed -n`, a heredoc, `sed -i`)
-//! shows that file the same way (D-057); any other command brings the agents tab forward.
+//! shows that file the same way; any other command brings the agents tab forward.
 //!
 //! The agent is usually faster than the show: what it does is queued as beats and played one
 //! after the other, faster the longer the queue. The edit is typed into the tab, not the file;

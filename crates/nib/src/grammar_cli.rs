@@ -1,4 +1,4 @@
-//! `nib grammar`: add languages to nib without rebuilding it (D-059).
+//! `nib grammar`: add languages to nib without rebuilding it.
 //!
 //! `nib grammar add rust` looks the language up in Helix's `languages.toml` at the tag nib's
 //! queries come from (`nib_syntax::HELIX_TAG`), fetches its grammar at the pinned commit,

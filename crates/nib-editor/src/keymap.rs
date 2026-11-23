@@ -1,6 +1,6 @@
-//! Chord -> Command table. Defaults follow VSCode (D-024): `mod` = Cmd on macOS, Ctrl elsewhere.
+//! Chord -> Command table. Defaults follow VSCode: `mod` = Cmd on macOS, Ctrl elsewhere.
 //! User overrides come from `[keys]` in config.toml, written by hand or by the shortcut editor
-//! (Settings > Keyboard Shortcuts, D-009). The keymap keeps defaults and overrides apart so the UI
+//! (Settings > Keyboard Shortcuts). The keymap keeps defaults and overrides apart so the UI
 //! can show which bindings are nibble's and which are the user's.
 
 use crate::Command;
