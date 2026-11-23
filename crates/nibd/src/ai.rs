@@ -2901,7 +2901,7 @@ pub fn set_worktree_per_feature(sessions: &Shared, on: bool) {
 /// done, by whether worktree-per-feature is on.
 fn finish_hint(wpf: bool) -> &'static str {
     if wpf {
-        "\n\n(nib: worktree-per-feature is on. If this asks you to change files, follow the nib-work skill: record your plan (`nib-work plan`), run `nib-work start SLUG`, and make every change in the work tree it prints, never in this project folder. When it is done and checked, run `nib-mail done` as the last thing you do (nib-finished skill): the user then lands your branch as one commit. A question or research with no change asked for: just answer.)"
+        "\n\n(nib: worktree-per-feature is on. If this asks you to change files, follow the nib-work skill: plan first (when the request leaves choices open, hand the plan over in plan mode for the user to approve; when it is already clear, record it with `nib-work plan`), run `nib-work start SLUG`, and make every change in the work tree it prints, never in this project folder. When it is done and checked, run `nib-mail done` as the last thing you do (nib-finished skill): the user then lands your branch as one commit. A question or research with no change asked for: just answer.)"
     } else {
         "\n\n(nib: worktree-per-feature is off: change files here, in the project folder; nothing is committed for you, and accepting your work commits nothing. If this is a clear job with an end, then when you have done it and checked it, run `nib-mail done` as the last thing you do (nib-finished skill), so the user sees it is finished.)"
     }

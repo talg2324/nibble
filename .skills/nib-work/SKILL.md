@@ -42,22 +42,43 @@ Change nothing yet.
 
 ## B. Plan
 
+**First decide: does the user approve this plan, or do you go on?** In any mode, and in auto
+mode too, **hand the plan over for approval** when the request leaves choices the user would
+want a say in:
+
+- several reasonable ways to do it, or a design to pick (what the interface looks like, which
+  library, where it lives);
+- a scope that is not clear: "make it better", "add X" with no details, "grow this into …";
+- behaviour or a look the user will see and has not described;
+- a large change, or one across many parts.
+
+The user values this: they comment on the plan line by line in the chat and you iterate before
+any code is written. **When in doubt, hand it over.** Go on without approval only when the
+request is already clear: it says what to change and where, a bug with a clear cause, a
+decision the user already made, a small mechanical change. And only in `mode: auto`; in any
+other mode the user approves every plan.
+
 Write the plan as Markdown: a `# title` that says what will be done (it names your work),
 what you found, the changes you will make and where, and how you will check them. Short: what
 a reviewer needs to hold your changes against.
 
+**To hand it over** (Claude Code): load the plan tools if they are deferred
+(`ToolSearch` with `select:EnterPlanMode,ExitPlanMode`), call `EnterPlanMode`, research, then
+`ExitPlanMode` with the plan. nib shows it rendered in the chat; the user approves it or sends
+it back with comments. Sent back: answer every comment, revise, and hand in the whole plan
+again. nib records the plan you hand over as your plan. A harness with no plan to approve
+(Codex, OpenCode): record the plan (below), show it in your reply, and wait.
+
+**To go on without approval**, record it:
+
 ```sh
-nib-work status          # the mode you work in is on the last line
+nib-work status          # the mode you work in is on its `mode:` line
 nib-work plan FILE       # or: nib-work plan -   (reads the plan from stdin)
 ```
 
 - Put the file in `$NIB_SCRATCH`, not in the project.
-- **`mode: auto`** — the plan needs no approval: record it and go on.
-- **Any other mode** — the user approves the plan first, the way your harness asks for that
-  (plan mode's approval; otherwise show the plan in your reply and wait). nib records a plan
-  you ask approval for; run `nib-work plan` anyway if you changed it afterwards.
-- The plan changed while you worked? Run `nib-work plan` again: the user always sees the
-  current one.
+- The plan changed while you worked (or after it was approved)? Run `nib-work plan` again:
+  the user always sees the current one.
 
 ## C. Branch, do it, check it
 
