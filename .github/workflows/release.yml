@@ -1,18 +1,31 @@
-# A tag vX.Y on a commit of main publishes GitHub Release vX.Y with:
+# Releases. Two kinds of tag, both on a commit of main and matching the workspace version in
+# Cargo.toml (v0.4 and v0.4-rc.N <-> 0.4.0):
+#
+#   vX.Y-rc.N   a release candidate: builds everything, publishes it as a GitHub *prerelease*, then
+#               smoke-tests it on macOS, Linux and Windows (the real installer, then e2e.sh).
+#               `releases/latest` never points at a prerelease, so the public installers never get
+#               it; `NIB_VERSION=vX.Y-rc.N` asks for it by name.
+#   vX.Y        on the commit of a published rc: *promotes* it. No build: the rc's archives, renamed
+#               to vX.Y, become the release, marked latest. With no rc on its commit: a full build.
+#               Either way the smoke test runs again, through `releases/latest`.
+#
+#   git tag v0.4-rc.1 && git push origin v0.4-rc.1    (smoke red: fix on main, tag v0.4-rc.2)
+#   git tag v0.4 v0.4-rc.1 && git push origin v0.4
+#
+# A release has:
 #   nibble-vX.Y-<triple>.tar.gz / .zip   the client (nib + nibd + .skills) for macOS, Linux, Windows
 #   nibd-vX.Y-<musl triple>.tar.gz       the static Linux daemon for SSH / WSL remotes (any distro)
-#   nib-grammars-vX.Y-<triple>.tar.gz    prebuilt grammars `nib grammar add` downloads (no compiler)
-#   install.sh, install.ps1              when the tagged commit has scripts/install/install.{sh,ps1}
-#   SHA256SUMS
-# The tag must match the workspace version in Cargo.toml (v0.4 <-> 0.4.0).
+#   nib-grammars-vX.Y-<triple>.tar.gz    prebuilt grammars `nib grammar add` downloads (no compiler);
+#                                        named for vX.Y in an rc too, since that is the name nib asks for
+#   install.sh, install.ps1, SHA256SUMS
 #
 # "Run workflow" (Actions tab) on any branch builds everything and keeps the archives as the
-# run's artifacts, without publishing a release.
+# run's artifacts, without publishing anything.
 name: release
 
 on:
   push:
-    tags: ['v[0-9]+.[0-9]+']
+    tags: ['v[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+-rc.[0-9]+']
   workflow_dispatch:
 
 permissions:
@@ -25,29 +38,50 @@ jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.v.outputs.version }}
+      version: ${{ steps.v.outputs.version }}           # vX.Y, vX.Y-rc.N, or vX.Y-dev.<sha>
+      base: ${{ steps.v.outputs.base }}                 # vX.Y
+      prerelease: ${{ steps.v.outputs.prerelease }}     # true for an rc
+      promote_from: ${{ steps.v.outputs.promote_from }} # the rc a final tag promotes, or empty
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           ws="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            tag="$GITHUB_REF_NAME"
-            if [[ "${tag#v}.0" != "$ws" ]]; then
-              echo "::error::tag $tag does not match the workspace version $ws in Cargo.toml"; exit 1
-            fi
-            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-              echo "::error::tag $tag is not on a commit of main"; exit 1
-            fi
-            echo "version=$tag" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=v${ws%.0}-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          base="v${ws%.0}"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            echo "version=$base-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          tag="$GITHUB_REF_NAME"
+          if [[ "${tag%-rc.*}" != "$base" ]]; then
+            echo "::error::tag $tag does not match the workspace version $ws in Cargo.toml"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $tag is not on a commit of main"; exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" == *-rc.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          # A published rc of this version on this very commit: promote it instead of building.
+          rc=""
+          for t in $(gh release list --limit 100 --json tagName,isPrerelease -q '.[] | select(.isPrerelease) | .tagName' | grep -E "^${tag//./\\.}-rc\.[0-9]+$" | sort -V); do
+            if [[ "$(git rev-list -n 1 "$t")" == "$GITHUB_SHA" ]]; then rc="$t"; fi
+          done
+          echo "promote_from=$rc" >> "$GITHUB_OUTPUT"
+          if [[ -n "$rc" ]]; then echo "promoting $rc to $tag"; else echo "no rc on this commit: a full build"; fi
 
   daemon:
     needs: check
+    if: needs.check.outputs.promote_from == ''
     name: nibd ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -73,6 +107,7 @@ jobs:
 
   client:
     needs: check
+    if: needs.check.outputs.promote_from == ''
     name: nibble ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     # Linux: built on Ubuntu 22.04 (glibc 2.35), so it runs on distros from 2022 on.
@@ -106,7 +141,7 @@ jobs:
       - run: |
           nib="dist/${{ matrix.target }}/nib"; [[ -f "$nib.exe" ]] && nib="$nib.exe"
           "$nib" grammar build "dist/grammars/${{ matrix.target }}"
-      - run: scripts/build/package.sh grammars ${{ matrix.target }} ${{ needs.check.outputs.version }}
+      - run: scripts/build/package.sh grammars ${{ matrix.target }} ${{ needs.check.outputs.base }}
       - uses: actions/upload-artifact@v4
         with:
           name: nibble-${{ matrix.target }}
@@ -115,7 +150,7 @@ jobs:
 
   release:
     needs: [check, daemon, client]
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && needs.check.outputs.promote_from == ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -133,4 +168,135 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.check.outputs.version }}
-        run: gh release create "$TAG" assets/* --verify-tag --title "nibble $TAG" --generate-notes
+          PRE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          if [[ "$PRE" == true ]]; then kind=--prerelease; else kind=--latest; fi
+          gh release create "$TAG" assets/* --verify-tag --title "nibble $TAG" --generate-notes "$kind"
+
+  # vX.Y on a published rc's commit: the rc's archives, renamed (file and top folder) to vX.Y.
+  # The binaries are the ones the rc's smoke test ran; they already say 0.4.0.
+  promote:
+    needs: check
+    if: needs.check.outputs.promote_from != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RC: ${{ needs.check.outputs.promote_from }}
+      TAG: ${{ needs.check.outputs.version }}
+    steps:
+      - run: |
+          mkdir rc out work
+          gh release download "$RC" -D rc
+          for f in rc/*; do
+            name="$(basename "$f")"
+            new="${name//-$RC-/-$TAG-}"
+            rm -rf work && mkdir work
+            case "$name" in
+              SHA256SUMS) ;;
+              *-"$RC"-*.tar.gz)
+                tar -xzf "$f" -C work
+                mv "work/${name%.tar.gz}" "work/${new%.tar.gz}"
+                tar -czf "out/$new" -C work "${new%.tar.gz}" ;;
+              *-"$RC"-*.zip)
+                unzip -q "$f" -d work
+                mv "work/${name%.zip}" "work/${new%.zip}"
+                (cd work && zip -qr "../out/$new" "${new%.zip}") ;;
+              *) cp "$f" "out/$name" ;;
+            esac
+          done
+          (cd out && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          gh release create "$TAG" out/* --verify-tag --title "nibble $TAG" \
+            --notes "Promoted from $RC (same binaries, smoke-tested)." --generate-notes --latest
+
+  # The published release, installed the way a user would on a fresh machine, then driven.
+  # rc: asked for by name. Final: through releases/latest, which checks the redirect too.
+  smoke:
+    needs: [check, release, promote]
+    if: >-
+      always() && github.ref_type == 'tag' &&
+      (needs.release.result == 'success' || needs.promote.result == 'success')
+    name: smoke ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, container: '' }
+          - { os: ubuntu-latest, container: 'ubuntu:22.04' }
+          - { os: windows-latest, container: '' }
+    env:
+      TAG: ${{ needs.check.outputs.version }}
+      PRE: ${{ needs.check.outputs.prerelease }}
+      REL: https://github.com/${{ github.repository }}/releases/download/${{ needs.check.outputs.version }}
+      LATEST: https://github.com/${{ github.repository }}/releases/latest/download
+    steps:
+      # A bare Ubuntu 22.04: only what a desktop has (X libraries) and what e2e.sh itself uses.
+      - if: matrix.container != ''
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git python3 xvfb \
+            libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libgl1 libfontconfig1
+      # Only for scripts/test/e2e.sh; nothing is built.
+      - uses: actions/checkout@v5
+      - name: install, version, grammar
+        if: runner.os != 'Windows'
+        run: |
+          if [[ "$PRE" == true ]]; then
+            curl -fsSL "$REL/install.sh" | NIB_VERSION="$TAG" bash -s -- --yes --remotes
+            export NIB_GRAMMARS_URL="$REL"
+          else
+            curl -fsSL "$LATEST/install.sh" | bash -s -- --yes --remotes
+          fi
+          N="$HOME/.local/share/nib/nib"
+          "$N" --version
+          grep -q "commit ${GITHUB_SHA::7}" "$HOME/.local/share/nib/BUILD_INFO" \
+            || { echo "::error::installed a different build:"; cat "$HOME/.local/share/nib/BUILD_INFO"; exit 1; }
+          out="$("$N" grammar add python 2>&1)"; echo "$out"
+          grep -q "added python (prebuilt)" <<< "$out" || { echo "::error::python was not installed from the release's bundle"; exit 1; }
+      - name: e2e.sh on the installed nib
+        if: runner.os != 'Windows'
+        run: NIB="$HOME/.local/share/nib/nib" scripts/test/e2e.sh
+      - name: install, version, grammar, headless edit (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:PRE -eq 'true') {
+            & ([scriptblock]::Create((irm "$env:REL/install.ps1"))) -Yes -Remotes -Version $env:TAG
+            $env:NIB_GRAMMARS_URL = $env:REL
+          } else {
+            & ([scriptblock]::Create((irm "$env:LATEST/install.ps1"))) -Yes -Remotes
+          }
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\nib'
+          $N = Join-Path $dir 'nib.exe'
+          if (-not (Test-Path $N)) { throw 'the installer did not install nib.exe' }
+          & $N --version
+          $info = Get-Content (Join-Path $dir 'BUILD_INFO') -Raw
+          if ($info -notmatch "commit $($env:GITHUB_SHA.Substring(0, 7))") { throw "installed a different build: $info" }
+          $out = (& $N grammar add python 2>&1 | Out-String); $out
+          if ($out -notmatch 'added python \(prebuilt\)') { throw "python was not installed from the release's bundle" }
+          # nib --headless: open a file, type, save and quit through nib ctl; check the file.
+          $t = Join-Path $env:RUNNER_TEMP 'smoke'
+          New-Item -ItemType Directory -Force $t | Out-Null
+          $f = Join-Path $t 'a.py'
+          Set-Content -NoNewline $f "import os`n"
+          $p = Start-Process $N -ArgumentList '--headless', $f -RedirectStandardOutput (Join-Path $t 'out.txt') -RedirectStandardError (Join-Path $t 'err.txt') -PassThru
+          $up = $false
+          foreach ($i in 1..60) { & $N ctl -p $p.Id wait 2 *> $null; if ($LASTEXITCODE -eq 0) { $up = $true; break }; Start-Sleep 1 }
+          if (-not $up) { Get-Content (Join-Path $t 'err.txt') -ErrorAction SilentlyContinue; throw 'nib --headless never answered nib ctl' }
+          & $N ctl -p $p.Id run move_doc_end
+          & $N ctl -p $p.Id type 'x = 1'
+          & $N ctl -p $p.Id run save
+          & $N ctl -p $p.Id wait 20
+          & $N ctl -p $p.Id run quit
+          $p.WaitForExit(30000) | Out-Null
+          $got = Get-Content $f -Raw
+          if ($got -notmatch 'x = 1') { throw "the edit was not saved: $got" }

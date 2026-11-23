@@ -3,7 +3,9 @@
 #   irm https://github.com/talg2324/nibble/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm https://github.com/talg2324/nibble/releases/latest/download/install.ps1))) -Yes -Remotes
 #   & ([scriptblock]::Create((irm https://github.com/talg2324/nibble/releases/latest/download/install.ps1))) -Uninstall
+#   $env:NIB_VERSION = 'v0.4-rc.1'; irm …/install.ps1 | iex     # that release (also -Version TAG)
 #
+# "Latest" never means a prerelease (a release candidate, vX.Y-rc.N): those only by name.
 # Installs the latest release into %LOCALAPPDATA%\Programs\nib and puts that folder on your user
 # PATH. Running it again updates in place. It runs inside your PowerShell session (iex), so it
 # never calls `exit`.
@@ -15,11 +17,12 @@ param(
     [switch]$NoModifyPath,
     [switch]$Upstream,
     [switch]$NoUpstream,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [string]$Version = $env:NIB_VERSION
 )
 
 function Install-Nib {
-    param($Yes, $Prefix, $Remotes, $NoRemotes, $NoModifyPath, $Upstream, $NoUpstream, $Uninstall)
+    param($Yes, $Prefix, $Remotes, $NoRemotes, $NoModifyPath, $Upstream, $NoUpstream, $Uninstall, $Version)
 
     $Repo = 'talg2324/nibble'
     $Triple = 'x86_64-pc-windows-msvc'
@@ -163,7 +166,11 @@ function Install-Nib {
     $arch = $env:PROCESSOR_ARCHITECTURE
     $os = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption
     if (-not $os) { $os = 'Windows' }
-    try { $Tag = LatestTag } catch { say "  $RED✗$R Couldn't reach GitHub to find the latest release (https://github.com/$Repo/releases)."; return }
+    if ($Version) {
+        $Tag = if ($Version.StartsWith('v')) { $Version } else { "v$Version" }
+    } else {
+        try { $Tag = LatestTag } catch { say "  $RED✗$R Couldn't reach GitHub to find the latest release (https://github.com/$Repo/releases)."; return }
+    }
     $have = $null
     if (Test-Path (Join-Path $Dir 'nib.exe')) { $have = (& (Join-Path $Dir 'nib.exe') --version 2>$null | Select-Object -First 1) }
     $sshHosts = 0
@@ -354,7 +361,7 @@ function Install-Nib {
 $enc = [Console]::OutputEncoding
 try {
     [Console]::OutputEncoding = [Text.Encoding]::UTF8
-    Install-Nib -Yes $Yes -Prefix $Prefix -Remotes $Remotes -NoRemotes $NoRemotes -NoModifyPath $NoModifyPath -Upstream $Upstream -NoUpstream $NoUpstream -Uninstall $Uninstall
+    Install-Nib -Yes $Yes -Prefix $Prefix -Remotes $Remotes -NoRemotes $NoRemotes -NoModifyPath $NoModifyPath -Upstream $Upstream -NoUpstream $NoUpstream -Uninstall $Uninstall -Version $Version
 } finally {
     [Console]::OutputEncoding = $enc
     Write-Host -NoNewline "$([char]27)[0m"

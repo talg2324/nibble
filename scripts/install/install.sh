@@ -4,14 +4,17 @@
 #   curl -fsSL https://github.com/talg2324/nibble/releases/latest/download/install.sh | bash
 #   curl -fsSL …/install.sh | bash -s -- --yes --remotes
 #   curl -fsSL …/install.sh | bash -s -- --uninstall
+#   curl -fsSL …/install.sh | NIB_VERSION=v0.4-rc.1 bash      # that release (also --version TAG)
 #
 # Installs the latest release into ~/.local/share/nib, with `nib` and `nibd` in ~/.local/bin.
+# "Latest" never means a prerelease (a release candidate, vX.Y-rc.N): those only by name.
 # Running it again updates in place. Bash 3.2 compatible (macOS /bin/bash).
 set -u
 
 REPO="talg2324/nibble"
 PREFIX="${NIB_PREFIX:-$HOME/.local}"
 YES=0; UNINSTALL=0
+VERSION="${NIB_VERSION:-}"   # a release tag; empty = the latest
 # -1 = not decided yet (ask, or take the default)
 OPT_REMOTES=-1; OPT_PATH=-1; OPT_UPSTREAM=-1
 MARK="# added by the nib installer"
@@ -22,6 +25,7 @@ nibble installer
 
   --yes, -y            no questions; take the defaults (also when there is no terminal)
   --prefix DIR         install under DIR (default: ~/.local)
+  --version TAG        that release (v0.4, v0.4-rc.1) instead of the latest; also NIB_VERSION
   --[no-]remotes       the Linux daemon, for opening projects on Linux machines over SSH
   --no-modify-path     leave your shell's rc file alone
   --[no-]upstream      the nib-upstream skill (off unless asked)
@@ -33,6 +37,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -y|--yes) YES=1 ;;
     --prefix) [ $# -ge 2 ] || { echo "--prefix needs a folder" >&2; exit 2; }; PREFIX="$2"; shift ;;
+    --version) [ $# -ge 2 ] || { echo "--version needs a tag (v0.4)" >&2; exit 2; }; VERSION="$2"; shift ;;
     --remotes) OPT_REMOTES=1 ;;        --no-remotes) OPT_REMOTES=0 ;;
     --no-modify-path) OPT_PATH=0 ;;
     --upstream) OPT_UPSTREAM=1 ;;      --no-upstream) OPT_UPSTREAM=0 ;;
@@ -500,7 +505,11 @@ main() {
   banner
   detect
   if [ $UNINSTALL = 1 ]; then uninstall; return; fi
-  TAG=$(latest_tag) || die "Couldn't reach GitHub to find the latest release (https://github.com/$REPO/releases)."
+  if [ -n "$VERSION" ]; then
+    case "$VERSION" in v*) TAG="$VERSION" ;; *) TAG="v$VERSION" ;; esac
+  else
+    TAG=$(latest_tag) || die "Couldn't reach GitHub to find the latest release (https://github.com/$REPO/releases)."
+  fi
   defaults
   show_machine
   if [ $YES = 0 ]; then choose; else

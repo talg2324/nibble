@@ -77,7 +77,7 @@ The installer shows what it found (your machine, the coding agents you have) and
 - nibble's [agent skills](#skills), in `~/.claude/skills` and `~/.agents/skills`;
 - if you choose it, the Linux daemons nibble uploads to [SSH remotes](#nib-nibd-and-friends) (and, from Windows, into WSL); on by default when `~/.ssh/config` has hosts or Windows has WSL distros.
 
-Run the same line again to update in place; your settings stay. Options go after `bash -s --` (`--yes`, `--remotes`, `--prefix DIR`, `--uninstall`; `--help` lists them all); on Windows they are `-Yes`, `-Remotes`, `-Uninstall`, … (see the top of `install.ps1`). The Linux build runs on glibc 2.35 or later (distros from 2022 on).
+Run the same line again to update in place; your settings stay. Options go after `bash -s --` (`--yes`, `--remotes`, `--prefix DIR`, `--version TAG`, `--uninstall`; `--help` lists them all); on Windows they are `-Yes`, `-Remotes`, `-Version TAG`, `-Uninstall`, … (see the top of `install.ps1`). The installers take the latest release, never a release candidate; `--version v0.5-rc.1` (or `NIB_VERSION=v0.5-rc.1`) installs one by name. The Linux build runs on glibc 2.35 or later (distros from 2022 on).
 
 Rather download by hand? Each [release](https://github.com/talg2324/nibble/releases) has the archives the installer uses: `nibble-<version>-<platform>` (nib, nibd and the skills), `nibd-<version>-<linux platform>` (the daemon for remotes) and `nib-grammars-<version>-<platform>` (the [languages](#adding-a-language) offered on first run, prebuilt). The macOS binaries are not notarized, so a copy downloaded in a browser needs `xattr -dr com.apple.quarantine` on its folder; the installer does that for you.
 
