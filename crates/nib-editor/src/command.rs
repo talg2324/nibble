@@ -92,7 +92,7 @@ commands! {
     FontSmaller     => "font_smaller",      "View",      "Smaller font";
     FontReset       => "font_reset",        "View",      "Font back to the default size (a preview or page: back to 100%)";
     TogglePreview   => "toggle_preview",    "View",      "Preview (Markdown, HTML) / table or text (CSV)";
-    ToggleTerminal  => "toggle_terminal",   "Panels",    "Terminal: open one, or go there and back (hold it with H: hide / show terminals, B: toolbar)";
+    ToggleTerminal  => "toggle_terminal",   "Panels",    "Terminals: open one, or show / hide them (hold it with H: hide / show terminals, B: toolbar)";
     NewTerminal     => "new_terminal",      "Panels",    "Another terminal";
     ToggleApps      => "toggle_apps",       "Panels",    "Apps panel: this project's apps (open, stop, register)";
     AppUp           => "app_up",            "Panels",    "Apps: start every approved app, each server in a terminal (apps.json in NIBDIR)";

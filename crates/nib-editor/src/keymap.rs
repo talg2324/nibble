@@ -269,7 +269,7 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
         ("shift+f12", FindReferences),
         ("f2", RenameSymbol),
         ("mod+f2", ChangeAllOccurrences),
-        // Tap: open one, or go there and back; with Shift ("Ctrl+~" on US keyboards): another.
+        // Tap: open one, or show / hide them; with Shift ("Ctrl+~" on US keyboards): another.
         ("ctrl+`", ToggleTerminal),
         ("ctrl+shift+`", NewTerminal),
         ("mod+/", ToggleComment),

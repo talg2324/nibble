@@ -1468,8 +1468,9 @@ impl App {
         self.remove_term(key);
     }
 
-    /// Ctrl+`: open a terminal if there is none, show the terminals if hidden, otherwise
-    /// switch between the editor and the last-used terminal. The strip button shows/hides.
+    /// Ctrl+`: open a terminal if there is none, show the terminals (keyboard in the last-used
+    /// one) if hidden, hide them if the keyboard is in one, otherwise go to the last-used one.
+    /// The strip button shows/hides.
     fn toggle_terminal(&mut self, from_button: bool) -> Task<Message> {
         // Another app's servers are not terminals to come back to here.
         let Some(first) = self.terms_here().next().map(|t| t.key) else {
@@ -1479,13 +1480,11 @@ impl App {
         if !self.terms_visible {
             self.terms_visible = true;
             self.set_focus(Focus::Terminal(back_to));
-        } else if from_button {
+        } else if from_button || matches!(self.focus, Focus::Terminal(_)) {
             self.terms_visible = false;
             self.focus = Focus::Main;
-        } else if self.focus == Focus::Main {
-            self.set_focus(Focus::Terminal(back_to));
         } else {
-            self.focus = Focus::Main;
+            self.set_focus(Focus::Terminal(back_to));
         }
         Task::none()
     }
@@ -2753,11 +2752,16 @@ mod tests {
         tap(&mut a, "ctrl+`");
         assert_eq!(a.terms.len(), 1);
         assert_eq!(a.focus, term(&a, 0));
-        // Again: back to the editor, then to the same terminal; never a second one.
+        // Again: hides it (keyboard back in the editor), then shows the same one; never a second.
         tap(&mut a, "ctrl+`");
-        assert_eq!((a.terms.len(), a.focus), (1, Focus::Main));
+        assert_eq!((a.terms.len(), a.focus, a.terms_visible), (1, Focus::Main, false));
         tap(&mut a, "ctrl+`");
-        assert_eq!((a.terms.len(), a.focus), (1, term(&a, 0)));
+        assert_eq!((a.terms.len(), a.focus, a.terms_visible), (1, term(&a, 0), true));
+        // Shown with the keyboard elsewhere: a tap goes to the terminal, it doesn't hide it.
+        cycle(&mut a, 2, false); // A -> Toolbar -> Main
+        assert_eq!(a.focus, Focus::Main);
+        tap(&mut a, "ctrl+`");
+        assert_eq!((a.focus, a.terms_visible), (term(&a, 0), true));
         tap(&mut a, "ctrl+shift+`"); // "Ctrl+~"
         tap(&mut a, "ctrl+shift+`");
         assert_eq!(a.terms.len(), 3);
