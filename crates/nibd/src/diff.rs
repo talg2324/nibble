@@ -105,7 +105,64 @@ pub fn changed(dir: &Path) -> Changed {
 
 /// The diff of `scope` at `dir`. `known`: the stamp the client has (see `Request::Diff`).
 /// `agents`: for the agents' scopes, where the work of each one asked about is.
+/// What the diff of the shared work tree depends on, cheaply: `git status` (v2 names HEAD and
+/// each changed file's staged blob) and the time and size of each file it lists. Unchanged: the
+/// diff is the one last made, so it needn't be made again.
+fn fingerprint(dir: &Path) -> Option<u64> {
+    let (out, top) = std::thread::scope(|s| {
+        let top = s.spawn(|| text(dir, &["rev-parse", "--show-toplevel"]));
+        let out = git(dir, None, &["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", "--ignore-submodules=dirty"]);
+        (out, top.join().ok().flatten())
+    });
+    let (out, top) = (out?, PathBuf::from(top?));
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    out.hash(&mut h);
+    let out = String::from_utf8_lossy(&out);
+    for rec in out.split('\0') {
+        // The path is the record's last field (`1`/`u`: 9th/11th, `2`: 10th then the origin, `?`).
+        let path = match rec.as_bytes().first() {
+            Some(b'1') => rec.splitn(9, ' ').nth(8),
+            Some(b'2') => rec.splitn(10, ' ').nth(9),
+            Some(b'u') => rec.splitn(11, ' ').nth(10),
+            Some(b'?') => rec.get(2..),
+            _ => None,
+        };
+        if let Some(m) = path.and_then(|p| std::fs::symlink_metadata(top.join(p)).ok()) {
+            (m.len(), m.modified().ok()).hash(&mut h);
+        }
+    }
+    Some(h.finish())
+}
+
 pub fn diff(dir: &Path, scope: DiffScope, known: Option<u64>, agents: &[(AiId, DiffTarget)]) -> DiffSet {
+    /// Per work tree and scope: the fingerprint the last diff was made at (`None`: not taken),
+    /// that diff's stamp, and whether it was news to the client.
+    type Seen = std::sync::Mutex<std::collections::HashMap<(PathBuf, DiffScope), (Option<u64>, u64, bool)>>;
+    static SEEN: std::sync::OnceLock<Seen> = std::sync::OnceLock::new();
+    let seen = || SEEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if !(matches!(scope, DiffScope::Head | DiffScope::Unstaged | DiffScope::Staged) && agents.is_empty()) {
+        return diff_now(dir, scope, known, agents);
+    }
+    let key = (dir.to_path_buf(), scope);
+    let last = seen().get(&key).copied();
+    // While the work tree keeps changing (an agent at work), the fingerprint would only add its
+    // time to each diff: skip it until a diff comes back with nothing new. It is taken before
+    // the diff, never during it: a file saved meanwhile then makes the next one differ.
+    let fp = match last {
+        Some((_, _, true)) => None,
+        _ => fingerprint(dir),
+    };
+    if let (Some(fp), Some(known), Some((Some(last_fp), stamp, _))) = (fp, known, last) {
+        if fp == last_fp && known == stamp {
+            return DiffSet { stamp, files: None, repo: true };
+        }
+    }
+    let set = diff_now(dir, scope, known, agents);
+    seen().insert(key, (fp, set.stamp, known != Some(set.stamp)));
+    set
+}
+
+fn diff_now(dir: &Path, scope: DiffScope, known: Option<u64>, agents: &[(AiId, DiffTarget)]) -> DiffSet {
     // What git printed for the shared work tree, and for each agent's own.
     let shared = match scope {
         DiffScope::Agent(_) if matches!(agents.first(), Some((_, DiffTarget::Tree { .. }))) => None,

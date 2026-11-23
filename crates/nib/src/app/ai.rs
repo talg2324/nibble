@@ -1252,7 +1252,7 @@ impl App {
         self.ai.return_to = Some(self.focus).filter(|f| !matches!(f, Focus::Ai | Focus::Toolbar));
         self.focus = Focus::Ai;
         match self.ai.session {
-            Session::None if self.ai.setup.is_none() => self.ai_check(None),
+            Session::None if self.ai.setup.is_none() => self.ai_recheck(),
             _ => Task::none(),
         }
     }
@@ -1263,7 +1263,7 @@ impl App {
         self.ai.tab = None;
         self.ai.pick_sel = None;
         // What's installed (and its models) may have changed since.
-        self.ai_check(None)
+        self.ai_recheck()
     }
 
     /// Worktree-per-feature on or off: the daemon is told (the agents' hints and checks follow
@@ -1433,6 +1433,28 @@ impl App {
             Ok(_) => return self.flash_warn("unexpected answer from nibd"),
             Err(e) => return self.flash_warn(format!("AI assistants: {}", e.msg)),
         };
+        self.ai_take_agents(then, agents)
+    }
+
+    /// Ask again which assistants there are, but start on the ones already known when one of
+    /// them is ready: what is installed seldom changes, and asking takes most of a second
+    /// (`opencode models`). The answer refreshes the list; the session being under way by then,
+    /// it starts nothing more. One gone meanwhile fails to start, and that asks again. No list
+    /// yet, or nothing ready in it: the answer is waited for, as with `ai_check`.
+    pub(super) fn ai_recheck(&mut self) -> Task<Message> {
+        let known = self.ai.agents.clone().filter(|list| list.iter().any(|i| i.ready()));
+        let start = known.map(|list| self.ai_take_agents(None, list));
+        let check = self.ai_check(None);
+        match start {
+            Some(start) => Task::batch([start, check]),
+            None => check,
+        }
+    }
+
+    /// `agents` is what the daemon's machine has: keep it, and start a chat if one is due
+    /// (`then`: the assistant just set up).
+    fn ai_take_agents(&mut self, then: Option<AiAgent>, agents: Vec<AiAgentInfo>) -> Task<Message> {
+        let ai = &mut self.ai;
         let ready = |a: AiAgent| agents.iter().any(|i| i.agent == a && i.ready());
         ai.setup_failed = then.filter(|a| !ready(*a));
         let running = matches!(ai.session, Session::Ready(_) | Session::Starting);
@@ -2933,8 +2955,12 @@ mod tests {
             let _ = a.update(Message::KeyUp(Key::Char(c)));
         }
     }
+    /// The start in flight that still counts: one a later start replaced is answered and closed.
     fn opening(a: &App) -> Option<ReqId> {
-        a.pending.iter().find_map(|(id, p)| matches!(p, Pending::AiOpen { .. }).then_some(*id))
+        a.pending.iter().find_map(|(id, p)| match p {
+            Pending::AiOpen { chat, generation } => a.ai.chats.iter().any(|c| c.key == *chat && c.generation == *generation).then_some(*id),
+            _ => None,
+        })
     }
     fn event(a: &mut App, id: AiId, event: AiEvent) {
         let _ = a.on_server(ServerMsg::Notify(ServerNotify::AiEvent { id, event }));
@@ -3114,8 +3140,13 @@ mod tests {
         assert!(a.ai.picking && a.ai.turns.is_empty(), "a blank agent, asking who it is");
         let _ = a.update(Message::Control(Command::NewAgent));
         assert_eq!(a.ai.chats.len(), 2, "a blank one is reused, not piled up");
+        // It starts at once on the assistants already known; picking one then starts it anew.
+        let started = opening(&a).expect("the new one starts on the assistants known");
         let _ = a.update(Message::Ai(Msg::Use(AiAgent::Claude, None)));
-        let req = opening(&a).expect("the new one starts");
+        let req = a.pending.iter().find_map(|(id, p)| (matches!(p, Pending::AiOpen { .. }) && *id != started).then_some(*id)).expect("the pick starts it");
+        // The start the pick replaced answers late: its session is closed, not taken.
+        let _ = a.on_server(ServerMsg::Response { id: started, result: Ok(Response::AiOpened { id: 8 }) });
+        assert!(matches!(a.ai.chats[1].session, Session::Starting));
         let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::AiOpened { id: 9 }) });
         assert!(matches!(a.ai.chats[1].session, Session::Ready(9)) && matches!(a.ai.chats[0].session, Session::Ready(7)));
         // The first agent answers while the second is shown.
@@ -3143,6 +3174,35 @@ mod tests {
         assert!(matches!(a.ai.session, Session::Ready(9)) && a.ai.input == "x");
         let _ = a.update(Message::Control(Command::KillAgent));
         assert!(a.ai.chats.len() == 1 && matches!(a.ai.session, Session::None) && a.ai.turns.is_empty());
+    }
+
+    #[test]
+    fn a_new_agent_starts_on_the_assistants_known_while_they_are_asked_again() {
+        let mut a = chatting();
+        say(&mut a, "first");
+        a.ai.pick_model = false;
+        let _ = a.update(Message::Control(Command::NewAgent));
+        assert_eq!((a.ai.chats.len(), a.ai.cur), (2, 1));
+        let req = opening(&a).expect("no waiting for the re-check: it starts on what is known");
+        assert_eq!(checking(&a).map(|(_, then)| then), Some(None), "and asks again meanwhile");
+        // The re-check answers while it starts: nothing starts twice.
+        agents(&mut a, vec![info(AiAgent::Claude, true, Some(true)), info(AiAgent::Codex, true, Some(true))]);
+        assert_eq!(a.pending.values().filter(|p| matches!(p, Pending::AiOpen { .. })).count(), 1);
+        assert_eq!(a.ai.agents.as_ref().map(Vec::len), Some(2), "the list is the new one");
+        let _ = a.on_server(ServerMsg::Response { id: req, result: Ok(Response::AiOpened { id: 9 }) });
+        assert!(matches!(a.ai.session, Session::Ready(9)) && a.ai.agent == Some(AiAgent::Claude));
+    }
+
+    #[test]
+    fn with_nothing_known_ready_a_new_agent_waits_for_the_answer() {
+        let mut a = app();
+        let _ = a.update(Message::Control(Command::ToggleAi));
+        agents(&mut a, none_ready());
+        a.ai.pick_model = false;
+        let _ = a.update(Message::Control(Command::NewAgent));
+        assert!(opening(&a).is_none() && checking(&a).is_some(), "nothing to start on: it waits");
+        agents(&mut a, vec![info(AiAgent::Claude, true, Some(true))]);
+        assert!(opening(&a).is_some(), "the answer starts it, as before");
     }
 
     #[test]

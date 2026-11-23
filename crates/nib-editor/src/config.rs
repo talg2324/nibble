@@ -646,6 +646,10 @@ impl Config {
     /// Read config.toml, let `f` change it, and write it back (created if missing), preserving
     /// everything `f` didn't touch. Atomic: a crash mid-write never leaves a truncated config.
     fn edit(f: impl FnOnce(&mut toml_edit::DocumentMut) -> anyhow::Result<()>) -> anyhow::Result<PathBuf> {
+        // One read-modify-write at a time: the settings, the AI panel's choices and profiles are
+        // saved from threads of their own, and two at once would lose one's change.
+        static EDITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = EDITING.lock().unwrap_or_else(|e| e.into_inner());
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("no config location (HOME unset)"))?;
         let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,

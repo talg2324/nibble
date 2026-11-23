@@ -113,6 +113,8 @@ pub enum Msg {
     OpenConfigFile,
     ReloadConfig,
     SaveTick(u64),
+    /// The settings writer answered (`save_in_order`): where it wrote, or why it couldn't.
+    Saved(Result<PathBuf, String>),
     Noop,
     WindowFound(window::Id),
     Monitor(Option<Size>),
@@ -511,11 +513,12 @@ impl App {
             Msg::ReloadConfig => return self.reload_config(),
             Msg::SaveTick(seq) => {
                 if seq == self.settings.save_seq {
-                    if let Err(e) = self.save_now() {
-                        return self.flash_warn(e);
-                    }
+                    // Written off this thread: a busy disk would otherwise hold up the window.
+                    return Task::perform(save_in_order(self.user_settings()), |r| Message::Settings(Msg::Saved(r)));
                 }
             }
+            Msg::Saved(Ok(path)) => self.refresh_config_tab(&path),
+            Msg::Saved(Err(e)) => return self.flash_warn(e),
             Msg::Noop => {}
             Msg::WindowFound(id) => {
                 self.settings.window.id = Some(id);
@@ -1451,5 +1454,30 @@ mod tests {
     fn every_command_has_a_category_slot() {
         let n: usize = by_category().iter().map(|(_, v)| v.len()).sum();
         assert_eq!(n, Command::ALL.len());
+    }
+}
+
+/// Write `settings` into config.toml on the settings writer, a thread of its own that takes
+/// saves in the order they come, so a later save is never overwritten by an earlier one.
+fn save_in_order(settings: UserSettings) -> impl std::future::Future<Output = Result<PathBuf, String>> {
+    type Job = (UserSettings, iced::futures::channel::oneshot::Sender<Result<PathBuf, String>>);
+    static WRITER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> = std::sync::OnceLock::new();
+    let writer = WRITER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::spawn(move || {
+            let keys: Vec<&str> = UI_COLORS.iter().map(|u| u.key).collect();
+            for (settings, reply) in rx {
+                let _ = reply.send(Config::save_settings(&settings, &keys).map_err(|e| format!("couldn't save settings: {e}")));
+            }
+        });
+        std::sync::Mutex::new(tx)
+    });
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    let sent = writer.lock().unwrap().send((settings, tx)).is_ok();
+    async move {
+        if !sent {
+            return Err("couldn't save settings: the settings writer is gone".to_string());
+        }
+        rx.await.unwrap_or_else(|_| Err("couldn't save settings: the settings writer is gone".to_string()))
     }
 }

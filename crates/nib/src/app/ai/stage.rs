@@ -349,9 +349,9 @@ impl App {
         if self.ai.pick_model {
             return self.ai_pick();
         }
-        // Straight to the message box: the chat starts once the assistants are known.
+        // Straight to the message box: the chat starts on the assistants known (once they are).
         self.ai.picking = false;
-        self.ai_check(None)
+        self.ai_recheck()
     }
 
     /// A new agent with `draft` already in its message box, the caret at its end, for the user
