@@ -156,22 +156,23 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v5
+      # Not `assets/`: the checkout has one (the logo, the README's pictures).
       - uses: actions/download-artifact@v4
         with:
-          path: assets
+          path: release-assets
           merge-multiple: true
       - run: |
           for f in scripts/install/install.sh scripts/install/install.ps1; do
-            if [[ -f "$f" ]]; then cp "$f" assets/; fi
+            if [[ -f "$f" ]]; then cp "$f" release-assets/; fi
           done
-          (cd assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          (cd release-assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.check.outputs.version }}
           PRE: ${{ needs.check.outputs.prerelease }}
         run: |
           if [[ "$PRE" == true ]]; then kind=--prerelease; else kind=--latest; fi
-          gh release create "$TAG" assets/* --verify-tag --title "nibble $TAG" --generate-notes "$kind"
+          gh release create "$TAG" release-assets/* --verify-tag --title "nibble $TAG" --generate-notes "$kind"
 
   # vX.Y on a published rc's commit: the rc's archives, renamed (file and top folder) to vX.Y.
   # The binaries are the ones the rc's smoke test ran; they already say 0.4.0.
