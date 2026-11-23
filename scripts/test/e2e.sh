@@ -69,6 +69,8 @@ s = [socket.socket() for _ in range(3)]
 for x in s: x.bind(('127.0.0.1', 0))
 print(*[x.getsockname()[1] for x in s])")"
 answers() { python3 -c "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), 1)" "$1" 2>/dev/null; }
+# On a failure: the servers' terminals, so the log says why (a command not found, a slow start).
+show_srv() { for s in one two; do echo "--- pair/$s:"; "$NIB" ctl -s "$SOCK" app log pair "$s" --lines 15 2>&1 | tail -15; done; }
 srv() { "$NIB" ctl -s "$SOCK" app list | python3 -c "import json, sys; print(' '.join(a['name'] + '/' + s['name'] + '=' + s['state'] for a in json.load(sys.stdin)['apps'] for s in a['servers']))"; }
 closed() { for _ in $(seq 50); do answers "$1" || return 0; sleep 0.1; done; return 1; }
 # Apps the user approved, as their own click in the Apps panel leaves them in apps.json (nib ctl
@@ -111,15 +113,16 @@ echo "{ \"servers\": { \"s\": { \"cmd\": \"python3 -m http.server $P3 --bind 127
 ctl app rm mine
 [ "$(srv)" = "held/held=stopped pair/one=stopped pair/two=stopped" ] || { echo "FAIL: apps defined: $(srv)"; exit 1; }
 ctl app up
-for _ in $(seq 150); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
-[ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up: $(srv)"; exit 1; }
+# Up to a minute: a fresh machine's first login shell and first python3 can be slow.
+for _ in $(seq 600); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+[ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up: $(srv)"; show_srv; exit 1; }
 answers "$P1" && answers "$P2" || { echo "FAIL: a ready server's port does not answer"; exit 1; }
 python3 -c "import sys, urllib.request; sys.exit(0 if b'hello' in urllib.request.urlopen('http://127.0.0.1:$P1/index.html').read() else 1)" || { echo "FAIL: server one does not serve the project"; exit 1; }
 for _ in $(seq 50); do "$NIB" ctl -s "$SOCK" app log pair one | grep -qF 'GET /index.html' && break; sleep 0.1; done
 "$NIB" ctl -s "$SOCK" app log pair one --lines 5 | grep -qF 'GET /index.html' || { echo "FAIL: app log"; exit 1; }
 ctl app restart pair one
-for _ in $(seq 150); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
-[ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: server restarted: $(srv)"; exit 1; }
+for _ in $(seq 600); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+[ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: server restarted: $(srv)"; show_srv; exit 1; }
 ctl app down
 [ "$(srv)" = "held/held=stopped pair/one=stopped pair/two=stopped" ] || { echo "FAIL: apps down: $(srv)"; exit 1; }
 closed "$P1" && closed "$P2" || { echo "FAIL: a stopped server still listens"; exit 1; }

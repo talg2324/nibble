@@ -217,7 +217,8 @@ function Install-Nib {
             else { say ("   $box $FG{0,-17}$D$h$R$EL" -f $it.label) }
         }
         say "$EL"
-        say "  $A↑↓$D move  ${A}space$D toggle  ${A}enter$D install  ${A}q$D quit$R$EL"
+        # The keys only when they can be pressed (-1: -Yes, nothing to choose).
+        if ($cur -ge 0) { say "  $A↑↓$D move  ${A}space$D toggle  ${A}enter$D install  ${A}q$D quit$R$EL" }
     }
 
     if ($Interactive) {
@@ -266,6 +267,8 @@ function Install-Nib {
             if (Test-Path $new) { Remove-Item -Recurse -Force $new }
             $x = Join-Path $tmp 'x'
             Expand-Archive -Path $zip -DestinationPath $x
+            # Its parent (%LOCALAPPDATA%\Programs) is not there on a fresh Windows.
+            New-Item -ItemType Directory -Force (Split-Path $new) | Out-Null
             Move-Item (Join-Path $x "nibble-$Tag-$Triple") $new
             if ($opt.remotes) {
                 foreach ($t in $DaemonTriples) {
