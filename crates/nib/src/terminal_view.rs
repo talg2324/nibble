@@ -136,6 +136,97 @@ pub fn link_at(screen: &vt100::Screen, row: u16, col: u16) -> Option<Link> {
 
 const PAD: f32 = 6.0;
 
+/// Block elements (U+2580–259F) and light / heavy box-drawing lines, as rectangles filling
+/// `cell` in the text colour, each with its alpha. A font draws them only as tall as its own
+/// glyphs, so rows taller than the font (ours are 1.25×) show gaps in block art and between
+/// `│`s; terminals draw them themselves for that reason. `line` is a light line's thickness.
+/// `None`: draw `ch` as text (rounded corners, double and dashed lines are left to the font).
+fn cell_shapes(ch: char, cell: Rectangle, line: f32) -> Option<Vec<(Rectangle, f32)>> {
+    let Rectangle { x, y, width: w, height: h } = cell;
+    // (x0, y0, x1, y1) as fractions of the cell
+    let frac = |x0: f32, y0: f32, x1: f32, y1: f32| Rectangle { x: x + x0 * w, y: y + y0 * h, width: (x1 - x0) * w, height: (y1 - y0) * h };
+    let solid = |r: &[(f32, f32, f32, f32)]| Some(r.iter().map(|&(a, b, c, d)| (frac(a, b, c, d), 1.0)).collect());
+    let (ul, ur, ll, lr) = ((0.0, 0.0, 0.5, 0.5), (0.5, 0.0, 1.0, 0.5), (0.0, 0.5, 0.5, 1.0), (0.5, 0.5, 1.0, 1.0));
+    let cp = ch as u32;
+    match cp {
+        0x2580 => solid(&[(0.0, 0.0, 1.0, 0.5)]),
+        // ▁ … █: the lower n eighths
+        0x2581..=0x2588 => {
+            let n = (cp - 0x2580) as f32 / 8.0;
+            solid(&[(0.0, 1.0 - n, 1.0, 1.0)])
+        }
+        // ▉ … ▏: the left n eighths
+        0x2589..=0x258F => {
+            let n = (8 - (cp - 0x2588)) as f32 / 8.0;
+            solid(&[(0.0, 0.0, n, 1.0)])
+        }
+        0x2590 => solid(&[(0.5, 0.0, 1.0, 1.0)]),
+        0x2591..=0x2593 => Some(vec![(cell, (cp - 0x2590) as f32 / 4.0)]),
+        0x2594 => solid(&[(0.0, 0.0, 1.0, 0.125)]),
+        0x2595 => solid(&[(0.875, 0.0, 1.0, 1.0)]),
+        0x2596 => solid(&[ll]),
+        0x2597 => solid(&[lr]),
+        0x2598 => solid(&[ul]),
+        0x2599 => solid(&[ul, ll, lr]),
+        0x259A => solid(&[ul, lr]),
+        0x259B => solid(&[ul, ur, ll]),
+        0x259C => solid(&[ul, ur, lr]),
+        0x259D => solid(&[ur]),
+        0x259E => solid(&[ur, ll]),
+        0x259F => solid(&[ur, ll, lr]),
+        _ => {
+            // Box drawing: the weight of each arm (left, right, up, down); 1 light, 2 heavy.
+            let [l, r, u, d]: [u8; 4] = match ch {
+                '─' => [1, 1, 0, 0],
+                '━' => [2, 2, 0, 0],
+                '│' => [0, 0, 1, 1],
+                '┃' => [0, 0, 2, 2],
+                '┌' => [0, 1, 0, 1],
+                '┏' => [0, 2, 0, 2],
+                '┐' => [1, 0, 0, 1],
+                '┓' => [2, 0, 0, 2],
+                '└' => [0, 1, 1, 0],
+                '┗' => [0, 2, 2, 0],
+                '┘' => [1, 0, 1, 0],
+                '┛' => [2, 0, 2, 0],
+                '├' => [0, 1, 1, 1],
+                '┣' => [0, 2, 2, 2],
+                '┤' => [1, 0, 1, 1],
+                '┫' => [2, 0, 2, 2],
+                '┬' => [1, 1, 0, 1],
+                '┳' => [2, 2, 0, 2],
+                '┴' => [1, 1, 1, 0],
+                '┻' => [2, 2, 2, 0],
+                '┼' => [1, 1, 1, 1],
+                '╋' => [2, 2, 2, 2],
+                '╴' => [1, 0, 0, 0],
+                '╵' => [0, 0, 1, 0],
+                '╶' => [0, 1, 0, 0],
+                '╷' => [0, 0, 0, 1],
+                _ => return None,
+            };
+            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+            // Each arm runs from the cell's edge to just past its centre, so arms join.
+            let t = |weight: u8| line * weight as f32;
+            let m = t(l.max(r).max(u).max(d)) / 2.0;
+            let mut out = Vec::new();
+            if l > 0 {
+                out.push((Rectangle { x, y: cy - t(l) / 2.0, width: cx + m - x, height: t(l) }, 1.0));
+            }
+            if r > 0 {
+                out.push((Rectangle { x: cx - m, y: cy - t(r) / 2.0, width: x + w - (cx - m), height: t(r) }, 1.0));
+            }
+            if u > 0 {
+                out.push((Rectangle { x: cx - t(u) / 2.0, y, width: t(u), height: cy + m - y }, 1.0));
+            }
+            if d > 0 {
+                out.push((Rectangle { x: cx - t(d) / 2.0, y: cy - m, width: t(d), height: y + h - (cy - m) }, 1.0));
+            }
+            Some(out)
+        }
+    }
+}
+
 fn color(c: vt100::Color, default: Color) -> Color {
     match c {
         vt100::Color::Default => default,
@@ -303,6 +394,8 @@ where
         let (rows, cols) = (rows.get(), cols.get());
         let ox = b.x + PAD;
         let oy = b.y + PAD;
+        // A light box-drawing line: about as thick as the font's own strokes.
+        let line = (self.font_size / 13.0).round().max(1.0);
         let mk = |content: String| text::Text {
             content,
             bounds: Size::new(f32::INFINITY, lh),
@@ -341,6 +434,16 @@ where
                     let w = if cell.is_wide() { 2.0 } else { 1.0 };
                     quad(renderer, Rectangle { x: ox + c as f32 * cw, y, width: cw * w, height: lh }, bg);
                 }
+                let s = cell.contents();
+                let mut chars = s.chars();
+                let at = Rectangle { x: ox + c as f32 * cw, y, width: cw, height: lh };
+                if let Some(shapes) = chars.next().filter(|_| chars.next().is_none()).and_then(|ch| cell_shapes(ch, at, line)) {
+                    flush(renderer, &mut run, run_start, run_fg);
+                    for (rect, a) in shapes {
+                        quad(renderer, rect, Color { a: fg.a * a, ..fg });
+                    }
+                    continue;
+                }
                 if fg != run_fg {
                     flush(renderer, &mut run, run_start, run_fg);
                     run_fg = fg;
@@ -348,7 +451,6 @@ where
                 if run.is_empty() {
                     run_start = c;
                 }
-                let s = cell.contents();
                 if s.is_empty() {
                     run.push(' ');
                 } else {
@@ -462,7 +564,32 @@ pub fn key_bytes(chord: &nib_editor::KeyChord, text: Option<&str>, app_cursor: b
 
 #[cfg(test)]
 mod tests {
-    use super::link_at;
+    use super::{cell_shapes, link_at};
+    use iced::Rectangle;
+
+    #[test]
+    fn blocks_and_lines_fill_the_cell() {
+        let cell = Rectangle { x: 10.0, y: 20.0, width: 8.0, height: 20.0 };
+        let one = |ch| {
+            let s = cell_shapes(ch, cell, 1.0).expect("a shape");
+            assert_eq!(s.len(), 1, "{ch}");
+            s[0]
+        };
+        assert_eq!(one('█'), (cell, 1.0), "full block: the whole cell, row height not font height");
+        assert_eq!(one('▀').0, Rectangle { height: 10.0, ..cell });
+        assert_eq!(one('▄').0, Rectangle { y: 30.0, height: 10.0, ..cell });
+        assert_eq!(one('▖').0, Rectangle { x: 10.0, y: 30.0, width: 4.0, height: 10.0 });
+        assert_eq!(one('▒').1, 0.5);
+        assert_eq!(cell_shapes('▙', cell, 1.0).unwrap().len(), 3);
+        // A vertical line runs the whole row, so the rows above and below meet it.
+        let bar = cell_shapes('│', cell, 1.0).unwrap();
+        let (top, bottom) = (bar.iter().map(|r| r.0.y).fold(f32::MAX, f32::min), bar.iter().map(|r| r.0.y + r.0.height).fold(0.0, f32::max));
+        assert_eq!((top, bottom), (20.0, 40.0));
+        assert_eq!(cell_shapes('┼', cell, 1.0).unwrap().len(), 4);
+        assert_eq!(cell_shapes('━', cell, 1.0).unwrap()[0].0.height, 2.0, "heavy is twice light");
+        assert!(cell_shapes('a', cell, 1.0).is_none());
+        assert!(cell_shapes('╭', cell, 1.0).is_none(), "rounded corners stay font text");
+    }
 
     #[test]
     fn alt_is_meta_off_macos() {
