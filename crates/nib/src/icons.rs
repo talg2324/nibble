@@ -15,7 +15,6 @@ const NETWORK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24
 const TERMINAL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="1.5"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5"/></svg>"#;
 
 /// The terminal, with a plus: another one.
-const TERMINAL_NEW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="1.5"/><path d="M12 8.5v7M8.5 12h7"/></svg>"#;
 
 const GEAR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>"#;
 
@@ -62,7 +61,6 @@ pub struct Icons {
     pub folder_on: svg::Handle,
     pub network_on: svg::Handle,
     pub terminal_on: svg::Handle,
-    pub terminal_new: svg::Handle,
     pub git: svg::Handle,
     pub git_on: svg::Handle,
     pub diff: svg::Handle,
@@ -90,7 +88,6 @@ impl Icons {
             folder_on: handle(FOLDER, on),
             network_on: handle(NETWORK, on),
             terminal_on: handle(TERMINAL, on),
-            terminal_new: handle(TERMINAL_NEW, off),
             git: handle(GIT, off),
             git_on: handle(GIT, on),
             diff: handle(REVIEW, off),

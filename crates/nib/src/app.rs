@@ -2361,7 +2361,6 @@ impl App {
                 self.tip_with_key("Terminals: show / hide", Command::ToggleTerminal),
                 Message::Control(Command::ToggleTerminal),
             ),
-            (&i.terminal_new, self.tip_with_key("New terminal", Command::NewTerminal), Message::Control(Command::NewTerminal)),
             (
                 // Lit while the panel is open or any app runs.
                 if self.apps.open || self.serve.list.iter().any(|a| a.running()) { &i.apps_on } else { &i.apps },
@@ -3035,8 +3034,7 @@ mod tests {
         tap(&mut a, "right");
         tap(&mut a, "right");
         tap(&mut a, "right"); // clamps at the last button
-        assert_eq!(a.toolbar_sel, 8);
-        tap(&mut a, "left");
+        assert_eq!(a.toolbar_sel, 7);
         tap(&mut a, "left");
         tap(&mut a, "left");
         tap(&mut a, "left");
