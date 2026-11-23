@@ -320,12 +320,14 @@ impl App {
         let (start, items, _) = self.ai_menu_items();
         let Some(s) = items.get(i) else { return Task::none() };
         if let (Suggest::Cmd(c), true) = (s, run) {
-            self.ai.input.clear();
+            self.ai.clear_input();
             return self.ai_command(c.name, "");
         }
-        complete(&mut self.ai.input, start, s);
-        self.ai.back = 0;
-        self.ai.anchor = None;
+        let chat = &mut *self.ai;
+        chat.history.record(&chat.input, chat.caret(), None);
+        complete(&mut chat.input, start, s);
+        chat.back = 0;
+        chat.anchor = None;
         Task::none()
     }
 
@@ -356,7 +358,7 @@ impl App {
         let (name, arg) = rest.split_once(char::is_whitespace).map_or((rest, ""), |(n, a)| (n, a.trim()));
         match resolve(name, &self.ai_skills()) {
             Some(Suggest::Cmd(c)) => {
-                self.ai.input.clear();
+                self.ai.clear_input();
                 Slash::Run(self.ai_command(c.name, arg))
             }
             // Sent as a message, its name spelled out (`ai_outgoing` puts the skill in).

@@ -31,6 +31,7 @@ impl Chat {
 
     /// The caret to `i`; `extend`: the selection grows (or starts) with it, else it goes.
     pub(super) fn move_to(&mut self, i: usize, extend: bool) {
+        self.history.close();
         if !extend {
             self.anchor = None;
         } else if self.anchor.is_none() {
@@ -44,8 +45,16 @@ impl Chat {
         self.back = 0;
     }
 
-    /// Take out what's selected, if anything is.
+    /// Take out what's selected, if anything is (one undo step).
     pub(super) fn delete_selection(&mut self) -> bool {
+        if self.selection().is_none() {
+            return false;
+        }
+        self.history.record(&self.input, self.caret(), None);
+        self.take_selection()
+    }
+
+    fn take_selection(&mut self) -> bool {
         let Some((a, b)) = self.selection() else { return false };
         self.input.replace_range(a..b, "");
         self.anchor = None;
@@ -57,9 +66,28 @@ impl Chat {
         self.back = self.input.len() - i.min(self.input.len());
     }
 
-    /// `s` typed (or pasted) at the caret, in place of what's selected; the caret ends up after it.
+    /// `s` pasted (or put in) at the caret, in place of what's selected; the caret ends up
+    /// after it. One undo step.
     pub(super) fn insert(&mut self, s: &str) {
-        self.delete_selection();
+        self.put(s, false);
+    }
+
+    /// `s` typed: one character joins the typing before it in one undo step, a word at a time.
+    pub(super) fn type_text(&mut self, s: &str) {
+        self.put(s, true);
+    }
+
+    fn put(&mut self, s: &str, typed: bool) {
+        if s.is_empty() {
+            return;
+        }
+        let mut one = s.chars();
+        let typed = match (one.next(), one.next()) {
+            (Some(c), None) if typed && self.selection().is_none() => Some(c),
+            _ => None,
+        };
+        self.history.record(&self.input, self.caret(), typed);
+        self.take_selection();
         self.anchor = None;
         let i = self.caret();
         self.input.insert_str(i, s);
@@ -74,8 +102,40 @@ impl Chat {
         self.anchor = None;
         let i = self.caret();
         let (a, b) = (i.min(to), i.max(to));
+        if a == b {
+            return;
+        }
+        self.history.record(&self.input, i, None);
         self.input.replace_range(a..b, "");
         self.set_caret(a);
+    }
+
+    /// The message gone (sent, or taken as an answer): an empty box with a history of its own.
+    pub(super) fn clear_input(&mut self) {
+        self.input.clear();
+        self.back = 0;
+        self.anchor = None;
+        self.history = Default::default();
+    }
+
+    /// Back one step (Cmd+Z); nothing to undo leaves the box as it is.
+    pub(super) fn undo(&mut self) {
+        if let Some((text, caret)) = self.history.undo(&self.input, self.caret()) {
+            self.restore(text, caret);
+        }
+    }
+
+    /// Forward again one step undone (Cmd+Shift+Z).
+    pub(super) fn redo(&mut self) {
+        if let Some((text, caret)) = self.history.redo(&self.input, self.caret()) {
+            self.restore(text, caret);
+        }
+    }
+
+    fn restore(&mut self, text: String, caret: usize) {
+        self.input = text;
+        self.anchor = None;
+        self.set_caret(caret);
     }
 }
 
@@ -195,5 +255,41 @@ mod tests {
         assert_eq!((c.input.as_str(), c.selection()), ("", None));
         c.insert("abc");
         assert_eq!(c.selection(), None, "a selection doesn't come back after the text is replaced");
+    }
+
+    #[test]
+    fn undoes_and_redoes() {
+        let mut c = Chat::default();
+        c.undo();
+        assert_eq!(c.input, "", "nothing to undo");
+        for ch in "fix the bug".chars() {
+            c.type_text(&ch.to_string());
+        }
+        c.undo();
+        assert_eq!((c.input.as_str(), c.caret()), ("fix the", 7), "a word at a time");
+        c.undo();
+        c.undo();
+        assert_eq!(c.input, "");
+        c.redo();
+        c.redo();
+        assert_eq!(c.input, "fix the");
+        c.type_text("!");
+        c.redo();
+        assert_eq!(c.input, "fix the!", "a new edit drops what was undone");
+        c.move_to(4, false);
+        c.move_to(7, true);
+        c.delete_selection();
+        assert_eq!(c.input, "fix !");
+        c.insert("pasted\ntext");
+        c.undo();
+        assert_eq!(c.input, "fix !");
+        c.undo();
+        assert_eq!((c.input.as_str(), c.caret(), c.selection()), ("fix the!", 7, None), "the cut comes back");
+        c.delete_to(word_left(&c.input, c.caret()));
+        c.undo();
+        assert_eq!(c.input, "fix the!");
+        c.clear_input();
+        c.undo();
+        assert_eq!(c.input, "", "a sent message doesn't come back");
     }
 }

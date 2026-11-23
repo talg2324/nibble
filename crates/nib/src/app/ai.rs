@@ -25,7 +25,7 @@ mod wait;
 
 use super::viewers::PreviewImage;
 use super::plan::{Outcome, Plan, PlanMsg};
-use super::line_input::LineInput;
+use super::line_input::{History, LineInput};
 use super::{App, Focus, Message, Pending};
 use crate::links;
 use crate::math;
@@ -134,6 +134,8 @@ pub struct Chat {
     back: usize,
     /// Where the selection started, the same way; `None`: nothing selected.
     anchor: Option<usize>,
+    /// Undo / redo for the message being typed; starts over once it is sent.
+    history: History,
     /// Sent while the session was starting: goes out once it's ready.
     queued: Option<String>,
     /// A reply is streaming in, or the agent is at work.
@@ -898,9 +900,7 @@ impl App {
             (n, true) => format!("Sent the plan back with {n} comment{}.", if n == 1 { "" } else { "s" }),
             (n, false) => format!("{reply}\n\n(and {n} comment{} on the plan)", if n == 1 { "" } else { "s" }),
         };
-        self.ai.input.clear();
-        self.ai.back = 0;
-        self.ai.anchor = None;
+        self.ai.clear_input();
         self.ai.turns.push(Turn::new(Who::User, said));
         self.ai_answer(false, Some(message));
         self.ai_scroll_to_end()
@@ -2298,14 +2298,14 @@ impl App {
         // It is waiting for leave: what is typed is the answer (a question's), or a no with what
         // to do instead.
         if self.ai.ask.as_ref().is_some_and(|a| !a.questions.is_empty()) {
-            self.ai.input.clear();
+            self.ai.clear_input();
             return self.ai_question_enter(Some(text));
         }
         if self.ai.asked_plan().is_some() {
             return self.ai_revise();
         }
         if self.ai.ask.is_some() {
-            self.ai.input.clear();
+            self.ai.clear_input();
             self.ai.turns.push(Turn::new(Who::User, text.clone()));
             self.ai_answer(false, Some(text));
             return self.ai_scroll_to_end();
@@ -2331,7 +2331,7 @@ impl App {
             };
         };
         let gifs = self.ai_gif_mentions(&text).map(|e| self.flash_warn(format!("GIF not attached: {e}")));
-        self.ai.input.clear();
+        self.ai.clear_input();
         self.ai.error = None;
         let shown = match self.ai.images.len() {
             0 => text.clone(),
@@ -2556,9 +2556,11 @@ impl App {
                     }
                     Some(Command::Paste) => return paste(),
                     Some(c) if super::app_wide(c) => return self.exec(c),
+                    Some(Command::Undo) => self.ai.undo(),
+                    Some(Command::Redo) => self.ai.redo(),
                     _ if !held => {
                         let typed: String = text.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
-                        self.ai.insert(&typed);
+                        self.ai.type_text(&typed);
                     }
                     _ => {}
                 }
