@@ -118,7 +118,7 @@ for _ in $(seq 600); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/t
 [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up: $(srv)"; show_srv; exit 1; }
 answers "$P1" && answers "$P2" || { echo "FAIL: a ready server's port does not answer"; exit 1; }
 python3 -c "import sys, urllib.request; sys.exit(0 if b'hello' in urllib.request.urlopen('http://127.0.0.1:$P1/index.html').read() else 1)" || { echo "FAIL: server one does not serve the project"; exit 1; }
-for _ in $(seq 50); do "$NIB" ctl -s "$SOCK" app log pair one | grep -qF 'GET /index.html' && break; sleep 0.1; done
+for _ in $(seq 300); do "$NIB" ctl -s "$SOCK" app log pair one | grep -qF 'GET /index.html' && break; sleep 0.1; done
 "$NIB" ctl -s "$SOCK" app log pair one --lines 5 | grep -qF 'GET /index.html' || { echo "FAIL: app log"; exit 1; }
 ctl app restart pair one
 for _ in $(seq 600); do [ "$(srv)" = "held/held=port-taken pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
@@ -129,8 +129,8 @@ closed "$P1" && closed "$P2" || { echo "FAIL: a stopped server still listens"; e
 answers "$P3" || { echo "FAIL: stopping the apps stopped what held the taken port"; exit 1; }
 # Running again when the window quits: they go with it.
 ctl app up pair
-for _ in $(seq 150); do [ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
-[ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up again: $(srv)"; exit 1; }
+for _ in $(seq 600); do [ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] && break; sleep 0.1; done
+[ "$(srv)" = "held/held=stopped pair/one=ready pair/two=ready" ] || { echo "FAIL: apps up again: $(srv)"; show_srv; exit 1; }
 ctl run quit; wait $SPID
 closed "$P1" && closed "$P2" || { echo "FAIL: a server outlived the window"; exit 1; }
 ! pgrep -f -- "http.server ($P1|$P2) " >/dev/null || { echo "FAIL: a server process outlived the window"; exit 1; }
@@ -281,7 +281,7 @@ grep -qF -- "-N -L 127.0.0.1:$L2:localhost:$F1" "$TMP/fssh/log" || { echo "FAIL:
 # A ready server's port comes here; stopped, it goes.
 approved_apps "$SOCK" "{ \"far\": { \"page\": { \"server\": \"web\", \"path\": \"/\" }, \"servers\": { \"web\": { \"cmd\": \"python3 -m http.server $F2 --bind 127.0.0.1\", \"port\": $F2 } } } }"
 ctl app up
-for _ in $(seq 150); do GOT=$(fwd forward list); [ -n "$GOT" ] && break; sleep 0.1; done
+for _ in $(seq 600); do GOT=$(fwd forward list); [ -n "$GOT" ] && break; sleep 0.1; done   # a slow first start, as above
 L3=${GOT##*=}
 [ "$GOT" = "@far:$F2=$L3" ] || { echo "FAIL: a ready server's port was not forwarded: $GOT"; exit 1; }
 ctl app down

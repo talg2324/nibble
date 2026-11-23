@@ -288,7 +288,9 @@ jobs:
           $t = Join-Path $env:RUNNER_TEMP 'smoke'
           New-Item -ItemType Directory -Force $t | Out-Null
           $f = Join-Path $t 'a.py'
-          Set-Content -NoNewline $f "import os`n"
+          Write-Host "smoke file: t=[$t] f=[$f]"
+          # .NET, not Set-Content / Get-Content: their argument binding took the text for the path.
+          [IO.File]::WriteAllText($f, "import os`n")
           $p = Start-Process $N -ArgumentList '--headless', $f -RedirectStandardOutput (Join-Path $t 'out.txt') -RedirectStandardError (Join-Path $t 'err.txt') -PassThru
           $up = $false
           foreach ($i in 1..60) { & $N ctl -p $p.Id wait 2 *> $null; if ($LASTEXITCODE -eq 0) { $up = $true; break }; Start-Sleep 1 }
@@ -299,5 +301,5 @@ jobs:
           & $N ctl -p $p.Id wait 20
           & $N ctl -p $p.Id run quit
           $p.WaitForExit(30000) | Out-Null
-          $got = Get-Content $f -Raw
+          $got = [IO.File]::ReadAllText($f)
           if ($got -notmatch 'x = 1') { throw "the edit was not saved: $got" }
