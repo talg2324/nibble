@@ -1100,8 +1100,12 @@ pub enum ServerNotify {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AiEvent {
     /// The assistant is up (Claude Code reports this when the first message arrives): the model
-    /// it runs.
-    Started { model: String },
+    /// it runs, and how hard it thinks when that is known (what "default" turned out to be).
+    Started {
+        model: String,
+        #[serde(default)]
+        effort: Option<String>,
+    },
     /// More of the reply being written.
     Text(String),
     /// The reply is complete. `error`: why it stopped early (rate limit, network, ...).

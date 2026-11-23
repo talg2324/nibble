@@ -126,8 +126,11 @@ pub struct Chat {
     agent: Option<AiAgent>,
     /// The model the chat runs (one of the agent's `models`); `None`: the one it's set up with.
     chosen: Option<String>,
-    /// What the assistant said it runs (Claude Code says, the others don't).
+    /// What the assistant said it runs (Claude Code and Codex say, the others don't).
     model: Option<String>,
+    /// The thinking level its session runs at, when the assistant (or its settings) says: what
+    /// "default" turned out to be.
+    running_effort: Option<String>,
     turns: Vec<Turn>,
     input: String,
     /// The caret, as bytes from the end of `input` (see `caret`).
@@ -215,19 +218,20 @@ pub enum Side {
 /// One entry of the thinking dropdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effort {
-    /// The assistant's own setting.
-    Default,
+    /// The assistant's own setting; and the level that is, once its session says.
+    Default(Option<String>),
     Level(String),
 }
 
 impl Effort {
-    fn of(e: &Option<String>) -> Effort {
-        e.clone().map_or(Effort::Default, Effort::Level)
+    /// `e` picked; `running`: the level the session runs at, shown beside "default".
+    fn of(e: &Option<String>, running: Option<String>) -> Effort {
+        e.clone().map_or(Effort::Default(running), Effort::Level)
     }
 
     fn level(self) -> Option<String> {
         match self {
-            Effort::Default => None,
+            Effort::Default(_) => None,
             Effort::Level(l) => Some(l),
         }
     }
@@ -236,7 +240,8 @@ impl Effort {
 impl std::fmt::Display for Effort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Effort::Default => f.write_str("default"),
+            Effort::Default(None) => f.write_str("default"),
+            Effort::Default(Some(l)) => write!(f, "default · {l}"),
             Effort::Level(l) => f.write_str(l),
         }
     }
@@ -1846,6 +1851,7 @@ impl App {
             "fold": ai.fold,
             "side": ai.drawer.map_or("none", Side::name),
             "effort": ai.effort,
+            "effort_running": ai.running_effort,
             "efforts": self.ai_efforts(),
             "prompt": ai.prompt.text().trim_end(),
             "panic": ai.panic.as_ref().map(|(rows, _)| rows.iter().map(|(key, marked)| json!({ "chat": ai.chats.iter().position(|c| c.key == *key), "marked": marked })).collect::<Vec<_>>()),
@@ -1941,6 +1947,7 @@ impl App {
         self.ai.since = Some(Instant::now());
         self.ai.agent = Some(agent);
         self.ai.model = None;
+        self.ai.running_effort = None;
         let model = self.ai.chosen.clone();
         // What the `/` menu offers this assistant (asked each chat: skills come and go).
         self.ai.local_skills = compose::local_skills();
@@ -2119,7 +2126,10 @@ impl App {
         let root = self.root.clone();
         let ai = &mut self.ai;
         match event {
-            AiEvent::Started { model } => ai.model = Some(model),
+            AiEvent::Started { model, effort } => {
+                ai.model = Some(model);
+                ai.running_effort = effort;
+            }
             AiEvent::Text(t) => {
                 // A message sent while it worked (a steer) gets its own reply after the turn's end.
                 ai.busy = true;
@@ -2832,7 +2842,12 @@ impl App {
                 });
                 row![switch, b, tail].spacing(4).align_y(Alignment::Center).into()
             };
-            let mut models = column![model_row(0, "Default".into(), None)].spacing(1);
+            // Once the session says which model Default is, the row says it too.
+            let default = match ai.model.as_ref().filter(|_| in_use && ai.chosen.is_none()) {
+                Some(id) => format!("Default · {}", listed.iter().find(|m| &m.id == id).map_or(id.as_str(), |m| m.name.as_str())),
+                None => "Default".into(),
+            };
+            let mut models = column![model_row(0, default, None)].spacing(1);
             for (i, m) in listed.iter().copied().enumerate() {
                 models = models.push(model_row(i + 1, m.name.clone(), Some(m)));
             }
@@ -4255,6 +4270,18 @@ mod tests {
         let mut r = Panel::new(cfg.clone());
         assert!(!r.adopt_switches(&cfg));
         assert!(r.adopt_switches(&nib_editor::config::AiConfig { worktree_per_feature: true, ..cfg }) && r.wpf);
+    }
+
+    #[test]
+    fn default_says_what_the_session_runs() {
+        let mut a = chatting();
+        assert_eq!(a.ai_model_label(), "default model");
+        event(&mut a, 7, AiEvent::Started { model: "claude-opus-5-5".into(), effort: Some("medium".into()) });
+        assert_eq!(a.ai_model_label(), "claude-opus-5-5");
+        assert_eq!(Effort::of(&a.ai.effort, a.ai.running_effort.clone()).to_string(), "default · medium");
+        assert_eq!(Effort::of(&Some("high".into()), a.ai.running_effort.clone()).to_string(), "high", "a level picked shows as itself");
+        assert_eq!(Effort::Default(None).to_string(), "default", "unknown: plain default");
+        assert_eq!(a.ai_state_json()["effort_running"], json!("medium"));
     }
 
     #[test]

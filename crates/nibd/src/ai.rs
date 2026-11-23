@@ -1267,6 +1267,30 @@ impl Tuning {
 
 }
 
+/// The thinking level a Claude Code session in `root` runs at: the one nib passes (`--effort`),
+/// else what its settings say, highest first: managed settings, `CLAUDE_CODE_EFFORT_LEVEL`, the
+/// project's `.claude/settings.local.json` and `.claude/settings.json`, the user's
+/// `settings.json`. `None`: nothing sets it, so it runs at its own built-in level, which it
+/// doesn't report.
+fn claude_effort(tuning: &Tuning, root: &Path) -> Option<String> {
+    let managed = if cfg!(target_os = "macos") { "/Library/Application Support/ClaudeCode/managed-settings.json" } else { "/etc/claude-code/managed-settings.json" };
+    let user = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home().map(|h| h.join(".claude"))).map(|d| d.join("settings.json"));
+    let project = [root.join(".claude/settings.local.json"), root.join(".claude/settings.json")];
+    let env = std::env::var("CLAUDE_CODE_EFFORT_LEVEL").ok();
+    effort_from(tuning.effort.as_deref(), Some(Path::new(managed)), env.as_deref(), project.iter().map(PathBuf::as_path).chain(user.as_deref()))
+}
+
+/// `claude_effort` with where it looks given: `passed` first, then `managed`'s `effortLevel`,
+/// then `env`, then each of `files`' in turn. Only a level Claude Code takes counts.
+fn effort_from<'a>(passed: Option<&str>, managed: Option<&Path>, env: Option<&str>, files: impl Iterator<Item = &'a Path>) -> Option<String> {
+    let valid = |e: &str| AiAgent::Claude.efforts().contains(&e).then(|| e.to_string());
+    let read = |f: &Path| -> Option<String> {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(f).ok()?).ok()?;
+        valid(v.get("effortLevel")?.as_str()?)
+    };
+    passed.and_then(valid).or_else(|| managed.and_then(read)).or_else(|| env.and_then(valid)).or_else(|| files.into_iter().find_map(read))
+}
+
 /// Codex has no `--plugin-dir` equivalent. Give it the bundled skills' metadata and paths so it
 /// can read the relevant SKILL.md on demand, without copying skills into the user's home/repo.
 fn codex_skill_catalog(skills: &[AiSkill]) -> String {
@@ -1560,12 +1584,13 @@ fn open_claude(exe: &Path, model: Option<&str>, tuning: &Tuning, tools: bool, mo
     let errors = stderr_tail(child.stderr.take().expect("piped"));
     let asks = Asks::default();
     let reader_asks = asks.clone();
+    let effort = claude_effort(tuning, root);
     thread::spawn(move || {
         let send = |event: AiEvent| {
             watch.see(id, &event);
             tx.send(ServerMsg::Notify(ServerNotify::AiEvent { id, event })).is_ok()
         };
-        let mut turn = Turn { asks: reader_asks, ..Turn::default() };
+        let mut turn = Turn { asks: reader_asks, effort, ..Turn::default() };
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
@@ -1596,6 +1621,8 @@ struct Turn {
     limits: Vec<AiLimit>,
     /// See `Session::Stream`.
     asks: Asks,
+    /// The thinking level it runs at, as far as nib can tell (`claude_effort`).
+    effort: Option<String>,
     /// The steps of sub-agents running in the background: their launch came back at once, and
     /// a `task_notification` ends them.
     background: HashSet<String>,
@@ -1637,7 +1664,7 @@ impl Turn {
         let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         match v.get("type").and_then(Value::as_str) {
             Some("system") if s(v, "subtype").as_deref() == Some("init") => {
-                s(v, "model").map(|model| vec![AiEvent::Started { model }]).unwrap_or_default()
+                s(v, "model").map(|model| vec![AiEvent::Started { model, effort: self.effort.clone() }]).unwrap_or_default()
             }
             Some("stream_event") => {
                 let Some(e) = v.get("event") else { return vec![] };
@@ -2618,6 +2645,11 @@ impl PerTurn {
                                 failure = Some("Codex did not return its model".into());
                                 break;
                             };
+                            // What a "default" model or level turned out to be.
+                            if purpose == Run::Chat {
+                                let effort = me.tuning.effort.clone().or_else(|| v.pointer("/result/reasoningEffort").and_then(Value::as_str).map(str::to_string));
+                                let _ = send(AiEvent::Started { model: model.to_string(), effort });
+                            }
                             let mut items: Vec<Value> = pictures.iter().map(|p| serde_json::json!({ "type": "localImage", "path": p })).collect();
                             items.push(serde_json::json!({ "type": "text", "text": prompt }));
                             let mut params = serde_json::json!({ "threadId": thread_id, "input": items, "model": me.model, "effort": me.tuning.effort });
@@ -3392,11 +3424,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_effort_order() {
+        let dir = std::env::temp_dir().join(format!("nibd-effort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let (local, user, managed) = (file("local.json", r#"{"effortLevel":"low"}"#), file("user.json", r#"{"effortLevel":"medium"}"#), file("managed.json", r#"{"effortLevel":"max"}"#));
+        let (bad, none) = (file("bad.json", r#"{"effortLevel":"huge"}"#), file("none.json", "{}"));
+        let missing = dir.join("missing.json");
+        fn files<'a>(fs: &[&'a PathBuf]) -> impl Iterator<Item = &'a Path> {
+            fs.iter().map(|p| p.as_path()).collect::<Vec<_>>().into_iter()
+        }
+        assert_eq!(effort_from(Some("high"), Some(&managed), Some("low"), files(&[&local])).as_deref(), Some("high"), "what nib passes wins");
+        assert_eq!(effort_from(None, Some(&managed), Some("low"), files(&[&local])).as_deref(), Some("max"), "then managed settings");
+        assert_eq!(effort_from(None, Some(&missing), Some("xhigh"), files(&[&local])).as_deref(), Some("xhigh"), "then the environment");
+        assert_eq!(effort_from(None, None, None, files(&[&missing, &bad, &none, &local, &user])).as_deref(), Some("low"), "then the first file that sets a level it takes");
+        assert_eq!(effort_from(Some("ultra"), None, Some("nope"), files(&[&none])), None, "nothing sets it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn stream_json_to_events() {
         let mut t = Turn::default();
         assert_eq!(
             read(&mut t, r#"{"type":"system","subtype":"init","model":"claude-opus-5-5"}"#),
-            vec![AiEvent::Started { model: "claude-opus-5-5".into() }]
+            vec![AiEvent::Started { model: "claude-opus-5-5".into(), effort: None }]
         );
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#;
         assert!(read(&mut t, start).is_empty(), "the first block needs no break");

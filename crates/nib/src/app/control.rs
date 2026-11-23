@@ -254,7 +254,7 @@ impl App {
                     call.err(format!("ai effort needs one of: default, {}", levels.join(", ")));
                     return Task::none();
                 }
-                let e = if level == "default" { super::ai::Effort::Default } else { super::ai::Effort::Level(level.clone()) };
+                let e = if level == "default" { super::ai::Effort::Default(None) } else { super::ai::Effort::Level(level.clone()) };
                 let t = self.handle(Message::Ai(super::ai::Msg::Effort(e)));
                 call.ok(json!({ "effort": level }));
                 t

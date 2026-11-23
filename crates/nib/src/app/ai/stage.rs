@@ -992,9 +992,11 @@ impl App {
         }
         let th = &self.theme;
         let (fg, dim, panel, divider, sel) = (th.foreground, th.dim, th.panel, th.divider, th.selection);
-        let options: Vec<Effort> = std::iter::once(Effort::Default).chain(levels.iter().map(|l| Effort::Level(l.to_string()))).collect();
+        // Default says the level it turned out to be, once the session has said.
+        let running = self.ai.running_effort.clone();
+        let options: Vec<Effort> = std::iter::once(Effort::Default(running.clone())).chain(levels.iter().map(|l| Effort::Level(l.to_string()))).collect();
         // One picked for another assistant shows as the default, which is what this one gets.
-        let current = Effort::of(&self.ai.effort.clone().filter(|e| levels.contains(e)));
+        let current = Effort::of(&self.ai.effort.clone().filter(|e| levels.contains(e)), running);
         let pick = pick_list(options, Some(current), |e| Message::Ai(Msg::Effort(e)))
             .text_size(11)
             .padding([2, 8])

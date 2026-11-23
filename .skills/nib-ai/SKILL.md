@@ -187,7 +187,7 @@ steps show when each ends); Grok only reads for now.
 | `ai follow` / `ai unfollow` | the editor follows the shown agent: its file comes forward, its edit is selected, the tab closes when it moves on (`state.ai.follow`) |
 | `ai skills` / `ai terminal` / `ai system` / `ai noside` | what the pane beside the steps shows (`state.ai.side`); `noside` hides it and gives the chat the width |
 | `ai wpf [on\|off]` | worktree-per-feature, the WPF switch in the agents header (`state.ai.worktree_per_feature`; no argument flips it; remembered in config.toml). On: agents change files only on a branch of their own (`nib-work`) that lands as one commit. Only when the user asked |
-| `ai effort LEVEL` | the shown agent's thinking level: `default` or one of `state.ai.efforts` (they depend on the assistant) |
+| `ai effort LEVEL` | the shown agent's thinking level: `default` or one of `state.ai.efforts` (they depend on the assistant). Once its session starts, `state.ai.model` and `state.ai.effort_running` say what a default turned out to be (`effort_running` is `null` when nothing sets it) |
 | `ai system-prompt TEXT` | replace what the shown agent adds to its assistant's system prompt (`state.ai.prompt`; empty: none). Both are taken when its session starts; before the first message a change restarts it |
 | `run agent_history` | the history tab: this project's past conversations, latest first (`state.ai.history.items`: `title`, `name`, `agent`, `steps`, `files`, `hit`). `type TEXT` there searches them |
 | `ai reopen N` / `ai replay N` | reopen item N of that list as an agent (a message then continues it), or reopen it and walk the editor through its steps |
