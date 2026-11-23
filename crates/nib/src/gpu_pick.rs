@@ -157,7 +157,7 @@ fn probe_all() -> (String, String, Vec<String>) {
 
 /// (name, device type, backend) of every adapter one candidate sees; empty if the probe failed.
 fn probe(c: &Candidate) -> Vec<(String, String, String)> {
-    let Ok(exe) = std::env::current_exe() else { return Vec::new() };
+    let Ok(exe) = crate::app_bundle::exe() else { return Vec::new() };
     let mut cmd = Command::new(exe);
     cmd.arg(PROBE_ARG).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     for k in ["ICED_BACKEND", "WGPU_BACKEND", "GALLIUM_DRIVER"] {

@@ -325,7 +325,7 @@ impl Process {
         let _ = std::fs::write(fox.profile.join(OWNER_FILE), json!({ "nib": me, "firefox": fox.child.id() }).to_string());
         // Whatever happens to this process (a crash, a kill, a window closed in a way that
         // skips our own cleanup), the watcher stops Firefox once we are gone.
-        if let Ok(nib) = std::env::current_exe() {
+        if let Ok(nib) = crate::app_bundle::exe() {
             let _ = Command::new(nib)
                 .arg(WATCH_ARG)
                 .arg(me.to_string())

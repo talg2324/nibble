@@ -5,6 +5,7 @@
 
 mod ai_cli;
 mod app;
+mod app_bundle;
 mod color_picker;
 mod control;
 mod diff_view;
@@ -186,6 +187,10 @@ fn main() -> Result<()> {
     };
     if headless && bench {
         bail!("--headless and --bench don't mix");
+    }
+    // macOS: a window runs from nibble.app, so the Dock shows nibble and its icon (app_bundle.rs).
+    if !headless {
+        app_bundle::enter();
     }
     // The system font database takes ~100 ms to load: start it now, alongside the setup below
     // (the first use of `font_system` waits for it; `fonts::pin` still runs where it did).
@@ -375,7 +380,8 @@ fn log_panics() {
 }
 
 /// The window's own icon: the title bar and Alt-Tab on Windows, _NET_WM_ICON on X11. (The exe's
-/// icon resource, build.rs, covers Explorer and the taskbar; Wayland and macOS ignore this.)
+/// icon resource, build.rs, covers Explorer and the taskbar; Wayland ignores this, and macOS takes
+/// the Dock's from nibble.app, app_bundle.rs.)
 fn window_icon() -> Option<iced::window::Icon> {
     // The largest image in the .ico (256 px).
     let img = image::load_from_memory_with_format(include_bytes!("../../../assets/icon.ico"), image::ImageFormat::Ico)
@@ -411,9 +417,10 @@ fn detach_own_console() {
 #[cfg(not(windows))]
 fn detach_own_console() {}
 
-/// macOS: the window is a bare binary, not an app bundle, so the system names it after the file,
-/// "nib", in the menu bar, the Dock and Cmd-Tab. The app is called nibble. (Windows takes the name
-/// from nib.rc, Linux from the window's app id.)
+/// macOS, when the window could not be moved into nibble.app (app_bundle.rs) and runs as a bare
+/// binary: the system names it after the file, "nib". The app is called nibble. This names the
+/// menu bar's app menu; the Dock keeps "nib". (Windows takes the name from nib.rc, Linux from the
+/// window's app id.)
 ///
 /// The process name gives the app menu its items (About / Hide / Quit nibble). The name the system
 /// shows comes from LaunchServices, which has no public call for an unbundled app: this is the one

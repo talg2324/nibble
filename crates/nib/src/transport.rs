@@ -293,7 +293,7 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 
 fn local_nibd() -> Result<PathBuf> {
     let name = if cfg!(windows) { "nibd.exe" } else { "nibd" };
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(exe) = crate::app_bundle::exe() {
         let sib = exe.with_file_name(name);
         if sib.exists() {
             return Ok(sib);
@@ -368,7 +368,7 @@ pub fn ssh_command(host: &SshHost, env: &SshEnv, extra: &[&str]) -> Command {
     if env.batch {
         c.args(["-o", "BatchMode=yes"]);
     }
-    match (&env.askpass, std::env::current_exe()) {
+    match (&env.askpass, crate::app_bundle::exe()) {
         (Some(a), Ok(exe)) if !env.batch => {
             c.env("SSH_ASKPASS", exe)
                 .env("SSH_ASKPASS_REQUIRE", "force")
@@ -440,7 +440,7 @@ fn daemons_dirs() -> Vec<PathBuf> {
     if let Some(h) = std::env::var_os("HOME") {
         v.push(PathBuf::from(h).join(".local/share/nib/daemons"));
     }
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(exe) = crate::app_bundle::exe() {
         if let Some(dir) = exe.parent() {
             v.push(dir.join("daemons"));
             v.push(dir.join("../share/nib/daemons"));
@@ -615,7 +615,7 @@ fn upload(r: &Remote, uname: &str, progress: &dyn Fn(String, Option<f32>)) -> Re
 /// nib's skills on this machine (next to this binary; in a checkout, the nearest `.skills` above
 /// it), to go up with nibd: a hash of their contents and them as a tar archive.
 fn local_skills() -> Option<(String, Vec<u8>)> {
-    let dir = std::env::current_exe().ok()?.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir())?;
+    let dir = crate::app_bundle::exe().ok()?.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir())?;
     let mut files = Vec::new();
     collect_files(&dir, "", &mut files);
     if files.is_empty() {

@@ -1630,7 +1630,7 @@ fn added_languages() -> Vec<String> {
 fn add_languages(langs: Vec<String>) -> impl std::future::Future<Output = Result<String, String>> {
     let (tx, rx) = iced::futures::channel::oneshot::channel();
     std::thread::spawn(move || {
-        let r = std::env::current_exe()
+        let r = crate::app_bundle::exe()
             .and_then(|nib| std::process::Command::new(nib).arg("grammar").arg("add").args(&langs).output())
             .map_err(|e| format!("couldn't run nib grammar add: {e}"))
             .and_then(|o| {

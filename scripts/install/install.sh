@@ -365,17 +365,28 @@ do_skills() {
   done
   mv "$newstate" "$STATE"
 }
+# macOS: nibble.app, for Finder, Launchpad and Spotlight. Its script starts the installed binary,
+# which runs its window from a nibble.app of its own, beside it (crates/nib/src/app_bundle.rs).
+# Linux: nibble.desktop, named for the window's app id ("nibble"), so docks match the two.
 do_icon() {
   if [ "$OS" = Darwin ]; then
-    local app="$HOME/Applications/nib.app"
-    rm -rf "$app" && mkdir -p "$app/Contents/MacOS"
+    local app="$HOME/Applications/nibble.app"
+    rm -rf "$HOME/Applications/nib.app"   # an earlier installer's
+    rm -rf "$app" && mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    local icon=""
+    if [ -f "$HOME_DIR/nibble.icns" ]; then
+      cp "$HOME_DIR/nibble.icns" "$app/Contents/Resources/nibble.icns"
+      icon="  <key>CFBundleIconFile</key><string>nibble</string>"
+    fi
     cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>nib</string>
+  <key>CFBundleName</key><string>nibble</string>
+  <key>CFBundleDisplayName</key><string>nibble</string>
   <key>CFBundleIdentifier</key><string>com.github.talg2324.nibble</string>
   <key>CFBundleExecutable</key><string>nib</string>
+$icon
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${TAG#v}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
@@ -387,16 +398,18 @@ EOF
   else
     local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
     mkdir -p "$apps"
+    rm -f "$apps/nib.desktop"   # an earlier installer's
     {
       echo "[Desktop Entry]"
       echo "Type=Application"
-      echo "Name=nib"
+      echo "Name=nibble"
       echo "Comment=nibble, an editor for working with agents"
       echo "Exec=$HOME_DIR/nib %F"
       [ -f "$HOME_DIR/icon.svg" ] && echo "Icon=$HOME_DIR/icon.svg"
+      echo "StartupWMClass=nibble"
       echo "Terminal=false"
       echo "Categories=Development;TextEditor;"
-    } > "$apps/nib.desktop"
+    } > "$apps/nibble.desktop"
   fi
 }
 do_check() { "$HOME_DIR/nib" --version; }
@@ -413,7 +426,7 @@ install() {
     step "Add to PATH" "one line in $(tilde "$RC")" do_path
   fi
   step "Agent skills" "into ~/.claude/skills, ~/.agents/skills$([ $OPT_UPSTREAM = 1 ] && echo ", with nib-upstream")" do_skills
-  step "App icon"     "$([ "$OS" = Darwin ] && echo "~/Applications/nib.app" || echo "nib.desktop")" do_icon
+  step "App icon"     "$([ "$OS" = Darwin ] && echo "~/Applications/nibble.app" || echo "nibble.desktop")" do_icon
   step "Check"        "nib --version" do_check
   rule
   [ -s "$TMPD/notes" ] && { say ""; sed 's/^/  /' "$TMPD/notes"; }
@@ -457,8 +470,8 @@ un_path() {
   done
 }
 un_icon() {
-  rm -rf "$HOME/Applications/nib.app"
-  rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nib.desktop"
+  rm -rf "$HOME/Applications/nibble.app" "$HOME/Applications/nib.app"
+  rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nibble.desktop" "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nib.desktop"
 }
 un_program() { rm -rf "$HOME_DIR"; }
 
@@ -475,7 +488,7 @@ uninstall() {
   step "Agent skills" "the ones it installed and you didn't edit" un_skills
   step "Commands"     "nib, nibd in $(tilde "$BIN")" un_links
   step "PATH line"    "the line marked by the installer" un_path
-  step "App icon"     "nib.app / nib.desktop" un_icon
+  step "App icon"     "nibble.app / nibble.desktop" un_icon
   step "Program"      "$(tilde "$HOME_DIR")" un_program
   rule
   [ -s "$TMPD/notes" ] && { say ""; sed 's/^/  /' "$TMPD/notes"; }

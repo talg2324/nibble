@@ -79,7 +79,7 @@ fn resolve(name: &str, skills: &[AiSkill]) -> Option<Suggest> {
 /// nib's own skills (next to the binary, or in the checkout it was built in) and the user's
 /// (`skills/` next to `config.toml`), on this machine.
 pub(super) fn local_skills() -> Vec<AiSkill> {
-    let nib = std::env::current_exe().ok().and_then(|exe| exe.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir()));
+    let nib = crate::app_bundle::exe().ok().and_then(|exe| exe.ancestors().skip(1).map(|d| d.join(".skills")).find(|d| d.is_dir()));
     let user = nib_editor::config::Config::path().and_then(|p| Some(p.parent()?.join("skills")));
     let mut out: Vec<AiSkill> = nib.map(|d| nib_proto::skills::list(&d, SkillGroup::Nib)).unwrap_or_default();
     out.retain(|s| !OPT_IN.contains(&s.name.as_str()));
