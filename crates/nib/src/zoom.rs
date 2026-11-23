@@ -314,6 +314,8 @@ mod tests {
         }
         assert_eq!(whole_steps(&mut pending), 1);
         assert!((pending - 5.0 / PIXELS_PER_STEP).abs() < 1e-6);
-        assert!(zooms(Modifiers::SHIFT) && zooms(Modifiers::CTRL) && zooms(Modifiers::LOGO) && !zooms(Modifiers::ALT));
+        assert!(zooms(Modifiers::SHIFT) && zooms(Modifiers::CTRL) && !zooms(Modifiers::ALT));
+        // Cmd zooms on macOS; elsewhere the Logo key is the system's.
+        assert_eq!(zooms(Modifiers::LOGO), cfg!(target_os = "macos"));
     }
 }

@@ -2731,9 +2731,10 @@ mod tests {
         }
         assert_eq!(a.tabs[0].doc.to_bytes(), before);
         assert_eq!(a.focus, term(&a, 0));
-        // An app-wide one still works from the terminal.
-        down(&mut a, "mod+b");
-        assert!(a.tree.open);
+        // An app-wide one on an app chord (Cmd on macOS, Ctrl+Shift elsewhere) still works from
+        // the terminal; mod+b is plain Ctrl+B off macOS, which is the shell's.
+        down(&mut a, "mod+shift+p");
+        assert!(a.palette.is_some());
     }
 
     /// Answer every outstanding PtyOpen like the daemon would.
