@@ -390,22 +390,36 @@ pub(crate) fn run_for(mut cmd: Command, limit: Duration) -> Option<String> {
 /// Every assistant, in `AiAgent::ALL` order, with the models of each one installed. Quick: a
 /// look at `PATH` and a few files each, and `opencode models` (local) when it's there.
 pub fn agents(root: Option<&Path>) -> Vec<AiAgentInfo> {
-    AiAgent::ALL
-        .iter()
-        .map(|&agent| {
-            let exe = find(agent);
-            let installed = exe.is_some();
-            AiAgentInfo {
-                agent,
-                installed,
-                signed_in: if installed { signed_in(agent) } else { None },
-                can_install: can_install(agent),
-                models: exe.map(|e| models(agent, &e, root)).unwrap_or_default(),
-                gpus: if agent == AiAgent::OpenCode { ollama::gpus() } else { Vec::new() },
-                ollama: (agent == AiAgent::OpenCode).then(ollama::info),
-            }
-        })
-        .collect()
+    // Each assistant, and OpenCode's models, GPUs and Ollama, looked at all at once: the slow
+    // ones start a program (`opencode models`, `sysctl`) or ask Ollama over HTTP.
+    thread::scope(|s| {
+        let handles: Vec<_> = AiAgent::ALL
+            .iter()
+            .map(|&agent| {
+                s.spawn(move || {
+                    let local = agent == AiAgent::OpenCode;
+                    thread::scope(|s| {
+                        let gpus = local.then(|| s.spawn(ollama::gpus));
+                        let ollama = local.then(|| s.spawn(ollama::info));
+                        let exe = find(agent);
+                        let installed = exe.is_some();
+                        let signed = installed.then(|| s.spawn(move || signed_in(agent)));
+                        let models = exe.map(|e| models(agent, &e, root)).unwrap_or_default();
+                        AiAgentInfo {
+                            agent,
+                            installed,
+                            signed_in: signed.and_then(|h| h.join().ok()).flatten(),
+                            can_install: can_install(agent),
+                            models,
+                            gpus: gpus.and_then(|h| h.join().ok()).unwrap_or_default(),
+                            ollama: ollama.and_then(|h| h.join().ok()),
+                        }
+                    })
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("looking at an assistant panicked")).collect()
+    })
 }
 
 /// The setup terminal: install the assistant if it's missing (OpenCode: and Ollama), sign it in if

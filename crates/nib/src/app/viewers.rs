@@ -234,7 +234,7 @@ impl PreviewImage {
         if is_svg(url) {
             Some(PreviewImage::Svg(svg::Handle::from_memory(data)))
         } else {
-            media::decode(&data).ok().and_then(|d| d.frames.into_iter().next()).map(|f| PreviewImage::Raster(f.handle))
+            media::decode_first(&data).ok().and_then(|d| d.frames.into_iter().next()).map(|f| PreviewImage::Raster(f.handle))
         }
     }
 

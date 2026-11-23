@@ -186,6 +186,11 @@ fn main() -> Result<()> {
     if headless && bench {
         bail!("--headless and --bench don't mix");
     }
+    // The system font database takes ~100 ms to load: start it now, alongside the setup below
+    // (the first use of `font_system` waits for it; `fonts::pin` still runs where it did).
+    if !headless {
+        std::thread::spawn(|| drop(iced::advanced::graphics::text::font_system().read()));
+    }
     let (keymap, mut warnings) = Keymap::with_overrides(&cfg.keys);
     let (theme, theme_warnings) = theme::Theme::from_config(&cfg.theme);
     warnings.extend(theme_warnings);

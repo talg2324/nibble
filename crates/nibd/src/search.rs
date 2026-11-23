@@ -41,8 +41,13 @@ pub fn search(root: &Path, query: &str, max: usize) -> SearchResults {
             continue;
         }
         let text = String::from_utf8_lossy(&data);
-        for (n, line) in text.lines().enumerate() {
-            let hay = if exact { std::borrow::Cow::Borrowed(line) } else { std::borrow::Cow::Owned(line.to_ascii_lowercase()) };
+        // Lowered once for the whole file: ASCII lowering keeps every byte where it was, so its
+        // lines and offsets are the text's own. Most files don't have the query at all.
+        let lower = if exact { std::borrow::Cow::Borrowed(&*text) } else { std::borrow::Cow::Owned(text.to_ascii_lowercase()) };
+        if !lower.contains(&needle) {
+            continue;
+        }
+        for (n, (line, hay)) in text.lines().zip(lower.lines()).enumerate() {
             let Some(at) = hay.find(&needle) else { continue };
             if out.lines.len() >= max {
                 out.truncated = true;

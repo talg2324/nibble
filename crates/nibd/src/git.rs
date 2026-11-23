@@ -32,26 +32,31 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Option<String>> {
 }
 
 pub fn info(dir: &Path) -> GitInfo {
-    let top = match git(dir, &["rev-parse", "--show-toplevel"]) {
+    // Independent of each other: run at once (each is a process start, ~10 ms).
+    let get = |args: &'static [&'static str]| move || git(dir, args);
+    let (top, branch, last, user_name, user_email) = thread::scope(|s| {
+        let h = [
+            s.spawn(get(&["symbolic-ref", "--short", "-q", "HEAD"])),
+            s.spawn(get(&["log", "-1", LOG_FORMAT])),
+            s.spawn(get(&["config", "user.name"])),
+            s.spawn(get(&["config", "user.email"])),
+        ];
+        let top = git(dir, &["rev-parse", "--show-toplevel"]);
+        let [a, b, c, d] = h.map(|h| h.join().ok().and_then(Result::ok).flatten().filter(|s| !s.is_empty()));
+        (top, a, b, c, d)
+    });
+    let top = match top {
         Err(_) => return GitInfo::NoGit,
         Ok(None) => return GitInfo::NotRepo,
         Ok(Some(top)) => top,
     };
-    let get = |args: &[&str]| git(dir, args).ok().flatten().filter(|s| !s.is_empty());
     let name = Path::new(&top)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or(top);
     // `symbolic-ref` also names the branch of a repository with no commits yet.
-    let branch = get(&["symbolic-ref", "--short", "-q", "HEAD"]);
-    let last_commit = get(&["log", "-1", LOG_FORMAT]).and_then(|s| parse_commit(&s));
-    GitInfo::Repo(GitRepo {
-        name,
-        branch,
-        user_name: get(&["config", "user.name"]),
-        user_email: get(&["config", "user.email"]),
-        last_commit,
-    })
+    let last_commit = last.and_then(|s| parse_commit(&s));
+    GitInfo::Repo(GitRepo { name, branch, user_name, user_email, last_commit })
 }
 
 const LOG_FORMAT: &str = "--format=%h%x1f%s%x1f%an%x1f%ct";
@@ -69,8 +74,13 @@ fn parse_commit(line: &str) -> Option<GitCommit> {
 /// The newest `log_limit` commits and what `git status` lists. Both empty outside a repository.
 pub fn details(dir: &Path, log_limit: u32) -> (Vec<GitCommit>, Vec<GitChange>) {
     let get = |args: &[&str]| git(dir, args).ok().flatten().unwrap_or_default();
-    let commits = get(&["log", "-n", &log_limit.to_string(), LOG_FORMAT]).lines().filter_map(parse_commit).collect();
-    (commits, parse_status(&get(&["status", "--porcelain=v1", "-z"])))
+    let n = log_limit.to_string();
+    // Independent of each other: run at once.
+    let (log, status) = thread::scope(|s| {
+        let status = s.spawn(|| get(&["status", "--porcelain=v1", "-z"]));
+        (get(&["log", "-n", &n, LOG_FORMAT]), status.join().unwrap_or_default())
+    });
+    (log.lines().filter_map(parse_commit).collect(), parse_status(&status))
 }
 
 /// `git status --porcelain=v1 -z`: `XY path` records separated by NUL; a rename or copy is
@@ -217,11 +227,20 @@ pub struct TreeState {
 
 /// `None`: `dir` is not in a work tree (or there is no git).
 pub fn tree_state(dir: &Path) -> Option<TreeState> {
-    // `dir` relative to the top, with a trailing slash; empty at the top.
-    let prefix = git(dir, &["rev-parse", "--show-prefix"]).ok().flatten()?;
+    let range = "HEAD...@{upstream}";
     let get = |args: &[&str]| git(dir, args).ok().flatten().unwrap_or_default();
+    // Independent of each other: run at once (each is a process start, ~10 ms).
+    let (prefix, status, upstream, counts) = thread::scope(|s| {
+        let status = s.spawn(|| get(&["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"]));
+        let upstream = s.spawn(|| get(&["diff", "--name-only", "-z", "--relative", range]));
+        let counts = s.spawn(|| get(&["rev-list", "--left-right", "--count", range]));
+        let prefix = git(dir, &["rev-parse", "--show-prefix"]);
+        let j = |h: thread::ScopedJoinHandle<'_, String>| h.join().unwrap_or_default();
+        (prefix, j(status), j(upstream), j(counts))
+    });
+    // `dir` relative to the top, with a trailing slash; empty at the top.
+    let prefix = prefix.ok().flatten()?;
     let mut st = TreeState { changes: Vec::new(), ignored: HashSet::new(), upstream: Vec::new(), ahead: 0, behind: 0 };
-    let status = get(&["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"]);
     for mut c in parse_status(&status) {
         let Some(rel) = c.path.strip_prefix(&prefix) else { continue };
         let rel = rel.trim_end_matches('/').to_string();
@@ -235,13 +254,11 @@ pub fn tree_state(dir: &Path) -> Option<TreeState> {
             st.changes.push(c);
         }
     }
-    let range = "HEAD...@{upstream}";
-    st.upstream = get(&["diff", "--name-only", "-z", "--relative", range])
+    st.upstream = upstream
         .split('\0')
         .filter(|p| !p.is_empty())
         .map(str::to_string)
         .collect();
-    let counts = get(&["rev-list", "--left-right", "--count", range]);
     let mut n = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
     st.ahead = n.next().unwrap_or(0);
     st.behind = n.next().unwrap_or(0);

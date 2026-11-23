@@ -202,9 +202,36 @@ fn resolve_scope(capture: &str) -> Option<Highlight> {
     }
 }
 
-fn build(name: &str, grammar: Grammar, dir: Option<&Path>) -> anyhow::Result<LanguageConfig> {
+/// Whether an injections query can never inject anything here: every language it names is a
+/// fixed `#set! injection.language "X"` that no language in `known` answers to. tree-house runs
+/// the query over the whole file on every edit and then drops each match whose language it can't
+/// find, so such a query costs time and colours nothing (Python's only injects `comment`).
+fn injects_nothing(query: &str, known: &dyn Fn(&str) -> bool) -> bool {
+    // Languages picked from the text (a Markdown fence's tag, a file name, a shebang) or the
+    // same language again: can't be ruled out.
+    let dynamic = ["@injection.language", "@injection.filename", "@injection.shebang", "injection.self", "injection.parent"];
+    if dynamic.iter().any(|d| query.contains(d)) {
+        return false;
+    }
+    let mut names = query.split("injection.language").skip(1).filter_map(|rest| {
+        let rest = rest.trim_start().strip_prefix('"')?;
+        rest.split('"').next()
+    });
+    let mut any = false;
+    let none_known = names.all(|n| {
+        any = true;
+        !known(&n.trim().to_ascii_lowercase())
+    });
+    any && none_known
+}
+
+fn build(name: &str, grammar: Grammar, dir: Option<&Path>, known: &dyn Fn(&str) -> bool) -> anyhow::Result<LanguageConfig> {
     let q = |file| read_query(dir, name, file, 0);
-    let cfg = LanguageConfig::new(grammar, &q("highlights.scm"), &q("injections.scm"), &q("locals.scm"))
+    let mut injections = q("injections.scm");
+    if injects_nothing(&injections, known) {
+        injections.clear();
+    }
+    let cfg = LanguageConfig::new(grammar, &q("highlights.scm"), &injections, &q("locals.scm"))
         .map_err(|e| anyhow::anyhow!("{name} queries: {e}"))?;
     cfg.configure(resolve_scope);
     Ok(cfg)
@@ -297,15 +324,22 @@ impl Registry {
         let strings = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mut errors = Vec::new();
         let mut langs = Vec::new();
+        // What an injection may name (as `by_injection_name` matches it): every language that
+        // could load, built in or the user's.
+        let runtime = rt.map_or(&[][..], |r| &r.langs);
+        let known = |n: &str| {
+            BUILTINS.iter().any(|b| b.name == n || b.aliases.contains(&n) || b.extensions.contains(&n))
+                || runtime.iter().any(|r| r.name == n || r.aliases.iter().any(|a| a == n) || r.extensions.iter().any(|e| e == n))
+        };
         for b in BUILTINS {
             let grammar = Grammar::try_from(b.grammar).expect("bundled grammar");
             // Queries in the config dir may override the embedded ones; if they don't compile,
             // the embedded ones still do.
-            let config = match (build(b.name, grammar, dir), dir) {
+            let config = match (build(b.name, grammar, dir, &known), dir) {
                 (Ok(c), _) => c,
                 (Err(e), Some(d)) => {
                     errors.push(format!("{e} (in {}; using the built-in queries)", d.display()));
-                    build(b.name, grammar, None).expect("bundled queries must compile")
+                    build(b.name, grammar, None, &known).expect("bundled queries must compile")
                 }
                 (Err(e), None) => panic!("bundled queries must compile: {e}"),
             };
@@ -320,7 +354,7 @@ impl Registry {
         }
         for r in rt.map_or(&[][..], |r| &r.langs) {
             let Some(dir) = dir else { break };
-            match load_runtime(dir, r) {
+            match load_runtime(dir, r, &known) {
                 Ok(config) => {
                     let def = LangDef {
                         name: r.name.clone(),
@@ -409,10 +443,10 @@ impl Registry {
 
 /// Whether `r`'s grammar and queries in `dir` load (`nib grammar add` / `list`).
 pub fn check_runtime(dir: &Path, r: &RuntimeLanguage) -> anyhow::Result<()> {
-    load_runtime(dir, r).map(drop)
+    load_runtime(dir, r, &|_| true).map(drop)
 }
 
-fn load_runtime(dir: &Path, r: &RuntimeLanguage) -> anyhow::Result<LanguageConfig> {
+fn load_runtime(dir: &Path, r: &RuntimeLanguage, known: &dyn Fn(&str) -> bool) -> anyhow::Result<LanguageConfig> {
     let path = grammar_path(dir, &r.grammar);
     if !path.is_file() {
         anyhow::bail!("{} is missing; run `nib grammar add {}`", path.display(), r.name);
@@ -420,7 +454,7 @@ fn load_runtime(dir: &Path, r: &RuntimeLanguage) -> anyhow::Result<LanguageConfi
     // SAFETY: a library in the user's own config dir, put there to be loaded as a grammar;
     // tree-house checks its ABI version.
     let grammar = unsafe { Grammar::new(&r.grammar, &path) }?;
-    build(&r.name, grammar, Some(dir))
+    build(&r.name, grammar, Some(dir), known)
 }
 
 impl LanguageLoader for Registry {

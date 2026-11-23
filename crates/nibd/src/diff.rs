@@ -36,8 +36,12 @@ struct ShadowIndex(PathBuf);
 
 impl ShadowIndex {
     fn new(dir: &Path) -> Option<ShadowIndex> {
+        Self::of(PathBuf::from(index_path(dir)?))
+    }
+
+    /// A copy of `real`, the repository's index file (`index_path`).
+    fn of(real: PathBuf) -> Option<ShadowIndex> {
         static N: AtomicU32 = AtomicU32::new(0);
-        let real = PathBuf::from(text(dir, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?);
         let copy = std::env::temp_dir().join(format!("nib-index-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         // No index yet (nothing was ever added): git starts an empty one at `copy`.
         if real.exists() {
@@ -45,6 +49,11 @@ impl ShadowIndex {
         }
         Some(ShadowIndex(copy))
     }
+}
+
+/// Where the repository at `dir` keeps its index, absolute.
+fn index_path(dir: &Path) -> Option<String> {
+    text(dir, &["rev-parse", "--path-format=absolute", "--git-path", "index"])
 }
 
 impl Drop for ShadowIndex {
@@ -194,20 +203,29 @@ const DIFF: [&str; 9] = ["diff", "--relative", "-M", "-U3", "--no-color", "--no-
 
 /// What `git diff` prints for `scope`; `None` outside a work tree.
 fn raw(dir: &Path, scope: DiffScope) -> Option<Vec<u8>> {
-    text(dir, &["rev-parse", "--show-toplevel"])?;
+    // Independent of each other: asked at once (each is a process start, ~10 ms).
+    let shadowed = matches!(scope, DiffScope::Unstaged | DiffScope::Head);
+    let (top, has_head, index) = std::thread::scope(|s| {
+        let has_head = s.spawn(|| text(dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_some());
+        let index = shadowed.then(|| s.spawn(|| index_path(dir)));
+        let top = text(dir, &["rev-parse", "--show-toplevel"]);
+        (top, has_head.join().unwrap_or(false), index.and_then(|h| h.join().ok().flatten()))
+    });
+    top?;
     let run = |index: Option<&Path>, more: &[&str]| git(dir, index, &[&DIFF[..], more].concat());
     // Before the first commit there is no HEAD: `--cached` alone then compares with nothing.
-    let head: &[&str] = if text(dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_some() { &["HEAD"] } else { &[] };
+    let head: &[&str] = if has_head { &["HEAD"] } else { &[] };
+    let shadow = || ShadowIndex::of(PathBuf::from(index.clone()?));
     match scope {
         DiffScope::Staged => run(None, &["--cached"]),
         DiffScope::Unstaged => {
-            let shadow = ShadowIndex::new(dir)?;
+            let shadow = shadow()?;
             // Intent to add: the untracked files show as new files of the work tree.
             git(dir, Some(&shadow.0), &["add", "-N", "--", "."])?;
             run(Some(&shadow.0), &[])
         }
         DiffScope::Head => {
-            let shadow = ShadowIndex::new(dir)?;
+            let shadow = shadow()?;
             git(dir, Some(&shadow.0), &["add", "-A", "--", "."])?;
             run(Some(&shadow.0), &[&["--cached"], head].concat())
         }

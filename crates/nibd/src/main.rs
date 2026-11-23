@@ -151,7 +151,7 @@ fn serve_with<W: io::Write + Send + 'static>(
     });
 
     let mut state =
-        State { root: None, places: None, ptys: Default::default(), serve: None, web: None, lsp: None, ai: Default::default(), watch: watch::Watcher::new(tx.clone()), tx: tx.clone() };
+        State { root: None, places: None, ptys: Default::default(), serve: None, web: None, lsp: None, ai: Default::default(), watch: watch::Watcher::new(tx.clone()), tx: tx.clone(), history: worker() };
     while let Some(msg) = next()? {
         let t0 = Instant::now();
         // Requests are timed by the writer; a notification is done when this loop turns.
@@ -243,6 +243,28 @@ fn serve_with<W: io::Write + Send + 'static>(
     Ok(())
 }
 
+/// A thread running the jobs sent to it one after another; it ends with the sender.
+fn worker() -> mpsc::Sender<Box<dyn FnOnce() + Send>> {
+    let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+    thread::spawn(move || rx.into_iter().for_each(|job| job()));
+    tx
+}
+
+/// The requests the history worker answers.
+fn history_request(root: &std::path::Path, req: Request) -> Result<Response, RpcError> {
+    match req {
+        Request::AiSkills { agent } => Ok(Response::AiSkills(ai::skills(agent, Some(root)))),
+        Request::AiHistory { query } => Ok(Response::AiHistory(history::list(root, &query))),
+        Request::AiMailHistory { query } => Ok(Response::AiMailHistory(history::letters(root, &query))),
+        Request::AiHistoryLoad { id } => match history::load(root, &id) {
+            Some((past, entries)) => Ok(Response::AiPastLoaded { past, entries }),
+            None => Err(RpcError::new(ErrorKind::NotFound, "no such conversation")),
+        },
+        Request::AiHistoryDelete { id } => history::delete(root, &id).map(|()| Response::Ok).map_err(|e| RpcError::new(ErrorKind::Io, format!("deleting the conversation: {e}"))),
+        _ => unreachable!("not a history request"),
+    }
+}
+
 struct State {
     root: Option<PathBuf>,
     /// Scratch and NIBDIR, made by Hello (None if they couldn't be).
@@ -259,6 +281,10 @@ struct State {
     /// The client's open files, polled for changes made outside nib.
     watch: watch::Watcher,
     tx: mpsc::Sender<ServerMsg>,
+    /// One worker for the requests that read conversation files (up to megabytes each): off this
+    /// thread so a ping or a keystroke for a terminal never waits behind them, and in the order
+    /// they came.
+    history: mpsc::Sender<Box<dyn FnOnce() + Send>>,
 }
 
 /// `path` relative to the root, or absolute.
@@ -428,6 +454,18 @@ impl State {
                 let _ = tx.send(ServerMsg::Response { id, result: Ok(resp) });
             });
             return None;
+        }
+        if matches!(req, Request::AiSkills { .. } | Request::AiHistory { .. } | Request::AiMailHistory { .. } | Request::AiHistoryLoad { .. } | Request::AiHistoryDelete { .. }) {
+            if let Some(root) = self.root.clone() {
+                let tx = self.tx.clone();
+                let job = Box::new(move || {
+                    let _ = tx.send(ServerMsg::Response { id, result: history_request(&root, req) });
+                });
+                if self.history.send(job).is_ok() {
+                    return None;
+                }
+                return Some(Err(RpcError::new(ErrorKind::Io, "history worker gone")));
+            }
         }
         Some(self.handle_now(req))
     }

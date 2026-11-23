@@ -176,7 +176,8 @@ fn still(img: DynamicImage) -> (Handle, u32, u32) {
     (Handle::from_rgba(rgba.width(), rgba.height(), rgba.into_raw()), w, h)
 }
 
-fn animation<'a>(dec: impl AnimationDecoder<'a>) -> Result<(Vec<Frame>, u32, u32, bool), String> {
+/// `first_only`: stop after the first frame (what a still picture of an animation shows).
+fn animation<'a>(dec: impl AnimationDecoder<'a>, first_only: bool) -> Result<(Vec<Frame>, u32, u32, bool), String> {
     let mut frames = Vec::new();
     let (mut w, mut h) = (0, 0);
     let mut ends = Duration::ZERO;
@@ -195,6 +196,9 @@ fn animation<'a>(dec: impl AnimationDecoder<'a>) -> Result<(Vec<Frame>, u32, u32
         (w, h) = (buf.width(), buf.height());
         used += buf.as_raw().len();
         frames.push(Frame { handle: Handle::from_rgba(w, h, buf.into_raw()), ends });
+        if first_only {
+            break;
+        }
         if used > FRAME_BUDGET {
             truncated = true;
             break;
@@ -208,19 +212,28 @@ fn animation<'a>(dec: impl AnimationDecoder<'a>) -> Result<(Vec<Frame>, u32, u32
 
 /// Decode an image file. CPU-heavy: run it off the UI thread.
 pub fn decode(data: &[u8]) -> Result<Decoded, String> {
+    decode_frames(data, false)
+}
+
+/// As `decode`, but only an animation's first frame (the rest would be thrown away).
+pub fn decode_first(data: &[u8]) -> Result<Decoded, String> {
+    decode_frames(data, true)
+}
+
+fn decode_frames(data: &[u8], first_only: bool) -> Result<Decoded, String> {
     let err = |e: image::ImageError| e.to_string();
     let reader = ImageReader::new(Cursor::new(data)).with_guessed_format().map_err(|e| e.to_string())?;
     let format = reader.format().ok_or("not a supported image format")?;
     let animated = match format {
-        ImageFormat::Gif => Some(animation(GifDecoder::new(Cursor::new(data)).map_err(err)?)),
+        ImageFormat::Gif => Some(animation(GifDecoder::new(Cursor::new(data)).map_err(err)?, first_only)),
         ImageFormat::WebP => {
             let dec = WebPDecoder::new(Cursor::new(data)).map_err(err)?;
-            dec.has_animation().then(|| animation(dec))
+            dec.has_animation().then(|| animation(dec, first_only))
         }
         ImageFormat::Png => {
             let dec = PngDecoder::new(Cursor::new(data)).map_err(err)?;
             match dec.is_apng() {
-                Ok(true) => Some(dec.apng().map_err(err).and_then(animation)),
+                Ok(true) => Some(dec.apng().map_err(err).and_then(|a| animation(a, first_only))),
                 _ => None,
             }
         }
