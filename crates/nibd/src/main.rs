@@ -405,6 +405,11 @@ impl State {
             // Reads the whole project.
             return self.later(id, move || Ok(Response::Search(search::search(&root, &query, max as usize))));
         }
+        if let Request::GitBlame { path, first, last, contents } = req {
+            let file = self.resolve(&path);
+            // A git process: off the reader thread.
+            return self.later(id, move || Ok(Response::GitBlame(git::blame(&file, first, last, contents.as_deref()))));
+        }
         if matches!(req, Request::GitInfo | Request::GitDetails { .. } | Request::GitRun { .. } | Request::Diff { .. } | Request::WorkLand { .. } | Request::Review { .. } | Request::ReviewEdit { .. } | Request::Tree { .. }) {
             let root = self.root()?;
             let tree_root = match &req {
@@ -546,6 +551,7 @@ impl State {
             Request::Lsp { .. }
             | Request::GitInfo
             | Request::GitDetails { .. }
+            | Request::GitBlame { .. }
             | Request::GitRun { .. }
             | Request::Diff { .. }
             | Request::WorkLand { .. }

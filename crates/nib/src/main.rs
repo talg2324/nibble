@@ -268,6 +268,7 @@ fn main() -> Result<()> {
             font: cfg.editor.font.clone(),
             line_height: cfg.editor.line_height,
             beginner_mode: cfg.editor.beginner_mode,
+            blame: cfg.editor.blame,
             theme_cfg: cfg.theme.clone(),
             lsp: cfg
                 .lsp

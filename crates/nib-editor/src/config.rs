@@ -185,6 +185,14 @@ pub struct EditorConfig {
     /// Show the shortcut cheat-sheet pane.
     #[serde(default)]
     pub beginner_mode: bool,
+    /// Who last committed the selected lines, when and in which commit: dim, after the
+    /// selection's last line.
+    #[serde(default = "default_true")]
+    pub blame: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn default_line_height() -> f32 {
@@ -212,6 +220,7 @@ impl Default for EditorConfig {
             font: None,
             line_height: default_line_height(),
             beginner_mode: false,
+            blame: true,
         }
     }
 }

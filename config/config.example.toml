@@ -12,6 +12,7 @@
 # font = "JetBrains Mono"  # code font family; unset = system monospace
 # line_height = 1.4
 # beginner_mode = false    # shortcut cheat sheet on the right
+# blame = true             # selecting code shows who last committed it, when, and the commit
 
 [window]
 # width = 1200             # logical pixels; also Settings > Appearance > Window

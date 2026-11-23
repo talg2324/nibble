@@ -109,6 +109,16 @@ pub enum Request {
     GitRun {
         op: GitOp,
     },
+    /// Who last changed lines `first..=last` (1-based) of `path` -> `GitBlame`. `contents`: the
+    /// file as the editor has it, when that differs from the disk (unsaved edits), so the line
+    /// numbers are the editor's.
+    GitBlame {
+        path: String,
+        first: u32,
+        last: u32,
+        #[serde(default)]
+        contents: Option<String>,
+    },
     /// What changed under the project root, as a parsed `git diff` -> `Diff`. `known`: the
     /// `stamp` of the diff the client already has; when it is still that one, the answer leaves
     /// `files` out (the client asks again and again while its diff view is open).
@@ -938,6 +948,9 @@ pub enum Response {
         commits: Vec<GitCommit>,
         changes: Vec<GitChange>,
     },
+    /// One entry per commit that last changed a line of the range, in the order git lists
+    /// them. Empty when git can't say (not tracked, not a repository).
+    GitBlame(Vec<GitBlameCommit>),
     GitRan {
         /// git exited with success.
         ok: bool,
@@ -1040,6 +1053,20 @@ pub struct GitCommit {
     pub author: String,
     /// Commit time, seconds since the Unix epoch.
     pub time: i64,
+}
+
+/// A commit that last changed some lines of a blamed range.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GitBlameCommit {
+    /// Abbreviated hash (seven characters).
+    pub hash: String,
+    pub author: String,
+    /// Author time, seconds since the Unix epoch.
+    pub time: i64,
+    /// False for lines not committed yet (changed in the work tree or the editor).
+    pub committed: bool,
+    /// How many lines of the range it last changed.
+    pub lines: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

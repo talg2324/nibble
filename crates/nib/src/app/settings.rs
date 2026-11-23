@@ -678,6 +678,7 @@ impl App {
             line_height: cfg.editor.line_height,
         };
         self.beginner = cfg.editor.beginner_mode;
+        self.blame.on = cfg.editor.blame;
         // Tab width: the open files too (what they hold stays as typed).
         self.tab_width = cfg.editor.tab_width;
         for t in &mut self.tabs {

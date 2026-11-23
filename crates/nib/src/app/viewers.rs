@@ -834,7 +834,7 @@ impl App {
         let editor = || -> Element<'a, Message> {
             let (mut marks, tag) = self.ai_follow_view(tab.id);
             marks.extend(self.search_marks(tab));
-            EditorView::new(&tab.doc, th, tab.top, tab.left, self.face, Message::View).marks(marks).tag(tag).into()
+            EditorView::new(&tab.doc, th, tab.top, tab.left, self.face, Message::View).marks(marks).tag(tag).blame(self.blame_shown(tab.id)).into()
         };
         if !tab.rendered {
             return editor();

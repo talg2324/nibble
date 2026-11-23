@@ -74,6 +74,9 @@ pub struct Typeface {
     pub line_height: f32,
 }
 
+/// Cells between a line's end and its blame.
+const BLAME_GAP: usize = 4;
+
 pub struct EditorView<'a, Message> {
     doc: &'a Document,
     theme: &'a Theme,
@@ -83,6 +86,8 @@ pub struct EditorView<'a, Message> {
     marks: Vec<Mark>,
     /// Someone else drives this editor: their name on a flag at the cursor, and its colour.
     tag: Option<(String, Color)>,
+    /// Git blame for the selection: dim text after the end of this 0-based line.
+    blame: Option<(usize, String)>,
     on_event: Box<dyn Fn(ViewEvent) -> Message + 'a>,
 }
 
@@ -103,6 +108,7 @@ impl<'a, Message> EditorView<'a, Message> {
             face,
             marks: Vec::new(),
             tag: None,
+            blame: None,
             on_event: Box::new(on_event),
         }
     }
@@ -114,6 +120,11 @@ impl<'a, Message> EditorView<'a, Message> {
 
     pub fn tag(mut self, tag: Option<(String, Color)>) -> Self {
         self.tag = tag;
+        self
+    }
+
+    pub fn blame(mut self, blame: Option<(usize, String)>) -> Self {
+        self.blame = blame;
         self
     }
 }
@@ -499,6 +510,18 @@ where
                 _ => {}
             }
             flush(renderer, &mut run, run_col, run_color);
+
+            // Git blame: past the line's end (and its selected newline), a few cells apart.
+            if let Some((_, label)) = self.blame.as_ref().filter(|(l, _)| *l == line) {
+                let at = col + BLAME_GAP;
+                if at >= self.left {
+                    let x = text_x + (at - self.left) as f32 * cw;
+                    renderer.fill_text(mk_text(label.clone(), self.face.size), Point::new(x, y), th.gutter, text_clip);
+                } else if at + label.chars().count() > self.left {
+                    let shown: String = label.chars().skip(self.left - at).collect();
+                    renderer.fill_text(mk_text(shown, self.face.size), Point::new(text_x, y), th.gutter, text_clip);
+                }
+            }
         }
 
         // Cursors: thin bars, no blinking (blinking forces a repaint twice a second, bad on VDI).

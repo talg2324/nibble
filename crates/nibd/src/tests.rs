@@ -167,6 +167,55 @@ fn git_info_outside_and_inside_a_repo() {
 }
 
 #[test]
+fn git_blame_names_who_last_changed_each_line() {
+    let dir = std::env::temp_dir().join(format!("nibd-blame-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().is_ok_and(|o| o.status.success());
+    if !git(&["init", "-q", "-b", "trunk"]) {
+        return; // no git on this machine
+    }
+    assert!(git(&["config", "commit.gpgsign", "false"]));
+    let file = dir.join("sub/tide.txt");
+    let commit_as = |who: &str, at: &str| {
+        assert!(git(&["add", "-A"]));
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["-c", &format!("user.name={who}"), "-c", "user.email=ada@example.com", "commit", "-q", "-m", who])
+            .env("GIT_AUTHOR_DATE", at)
+            .env("GIT_COMMITTER_DATE", at)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok);
+    };
+    std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+    commit_as("ada", "1700000000 +0000");
+    std::fs::write(&file, "one\nTWO\nthree\n").unwrap();
+    commit_as("tidepool", "1700086400 +0000");
+
+    let seen = |v: Vec<nib_proto::GitBlameCommit>| v.into_iter().map(|c| (c.author, c.time, c.committed, c.lines, c.hash.len())).collect::<Vec<_>>();
+    assert_eq!(
+        seen(git::blame(&file, 1, 3, None)),
+        [("ada".to_string(), 1_700_000_000, true, 2, 7), ("tidepool".to_string(), 1_700_086_400, true, 1, 7)]
+    );
+    // The editor's unsaved text: its line numbers, its new line not committed.
+    let mine = seen(git::blame(&file, 2, 3, Some("one\nnew\nTWO\nthree\n")));
+    assert_eq!(mine.len(), 2);
+    assert!(!mine[0].2 && mine[0].3 == 1 && mine[1].0 == "tidepool");
+    // Past the end, or not tracked: nothing to say.
+    assert!(git::blame(&file, 9, 12, None).is_empty());
+    std::fs::write(dir.join("loose.txt"), "x\n").unwrap();
+    assert!(git::blame(&dir.join("loose.txt"), 1, 1, None).is_empty());
+
+    // Over the wire, with a path relative to the project root.
+    let res = run(vec![hello(&dir), Request::GitBlame { path: "sub/tide.txt".into(), first: 2, last: 2, contents: None }]);
+    let Ok(Response::GitBlame(v)) = &res[1] else { panic!("{:?}", res[1]) };
+    assert_eq!(v.iter().map(|c| c.author.as_str()).collect::<Vec<_>>(), ["tidepool"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn git_details_and_operations() {
     use nib_proto::GitOp;
     let dir = std::env::temp_dir().join(format!("nibd-gitops-{}", std::process::id()));

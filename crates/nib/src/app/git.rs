@@ -535,7 +535,7 @@ impl App {
 }
 
 /// "3h ago" for an age in seconds.
-fn ago(secs: i64) -> String {
+pub(super) fn ago(secs: i64) -> String {
     let (n, unit) = match secs {
         s if s < 60 => return "just now".into(),
         s if s < 3600 => (s / 60, "m"),

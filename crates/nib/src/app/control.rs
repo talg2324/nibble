@@ -500,6 +500,7 @@ impl App {
                 "top": t.top + 1,
                 "visible": visible,
                 "read_only": d.read_only,
+                "blame": self.blame_label(),
             })
         });
         let terminals: Vec<Value> = self

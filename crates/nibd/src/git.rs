@@ -1,9 +1,9 @@
 //! Git for the project root, through the system `git` (nibd links no git library): what the
 //! client shows (branch, user, history, changes) and the few operations it can ask for.
 
-use nib_proto::{GitChange, GitCommit, GitInfo, GitOp, GitRepo};
+use nib_proto::{GitBlameCommit, GitChange, GitCommit, GitInfo, GitOp, GitRepo};
 use std::collections::HashSet;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -171,6 +171,76 @@ pub fn info(dir: &Path) -> GitInfo {
     // `symbolic-ref` also names the branch of a repository with no commits yet.
     let last_commit = last.and_then(|s| parse_commit(&s));
     GitInfo::Repo(GitRepo { name, branch, user_name, user_email, last_commit })
+}
+
+/// Who last changed lines `first..=last` (1-based) of `file`: one entry per commit, in the order
+/// git lists them. `contents`: blame that text instead of the file on disk (the editor's unsaved
+/// buffer). Empty when git can't say (not tracked, not a repository, the range is past the end).
+pub fn blame(file: &Path, first: u32, last: u32, contents: Option<&str>) -> Vec<GitBlameCommit> {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else { return Vec::new() };
+    let Some(guard) = guard(dir) else { return Vec::new() };
+    let range = format!("{},{}", first.max(1), last.max(first).max(1));
+    let mut c = cmd(dir);
+    c.args(&guard).args(["blame", "--porcelain", "-L", &range]);
+    if contents.is_some() {
+        c.args(["--contents", "-"]).stdin(Stdio::piped());
+    }
+    let Ok(mut child) = c.arg("--").arg(name).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
+        return Vec::new();
+    };
+    if let (Some(text), Some(mut stdin)) = (contents, child.stdin.take()) {
+        // Written from a thread of its own: git may fill its stdout before it has read all of it.
+        let text = text.to_string();
+        thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
+    }
+    match child.wait_with_output() {
+        Ok(out) if out.status.success() => parse_blame(&String::from_utf8_lossy(&out.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// `git blame --porcelain`: a header line `<hash> <orig line> <final line> [<group size>]` before
+/// every line, followed (the first time a commit appears) by its `author`, `author-time`, …, and
+/// then the line itself after a tab.
+fn parse_blame(out: &str) -> Vec<GitBlameCommit> {
+    let mut commits: Vec<GitBlameCommit> = Vec::new();
+    let mut full: Vec<String> = Vec::new();
+    let mut cur: Option<usize> = None;
+    for line in out.lines() {
+        if line.starts_with('\t') {
+            continue;
+        }
+        let mut words = line.split(' ');
+        let first = words.next().unwrap_or_default();
+        let is_header = first.len() == 40 && first.bytes().all(|b| b.is_ascii_hexdigit()) && words.next().is_some_and(|w| w.parse::<u32>().is_ok());
+        if is_header {
+            let i = match full.iter().position(|h| h == first) {
+                Some(i) => i,
+                None => {
+                    full.push(first.to_string());
+                    commits.push(GitBlameCommit {
+                        hash: first[..7].to_string(),
+                        author: String::new(),
+                        time: 0,
+                        committed: first.bytes().any(|b| b != b'0'),
+                        lines: 0,
+                    });
+                    commits.len() - 1
+                }
+            };
+            commits[i].lines += 1;
+            cur = Some(i);
+        } else if let Some(c) = cur.map(|i| &mut commits[i]) {
+            if let Some(a) = line.strip_prefix("author ") {
+                c.author = a.to_string();
+            } else if let Some(t) = line.strip_prefix("author-time ") {
+                c.time = t.parse().unwrap_or(0);
+            }
+        }
+    }
+    commits
 }
 
 const LOG_FORMAT: &str = "--format=%h%x1f%s%x1f%an%x1f%ct";

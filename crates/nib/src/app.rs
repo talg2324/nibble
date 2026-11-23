@@ -1,4 +1,5 @@
 mod ai;
+mod blame;
 mod code;
 mod comment;
 mod connection;
@@ -95,6 +96,8 @@ pub enum Message {
     Tick,
     /// Time to ask the daemon about git again (for `App::epoch`).
     GitPoll(u64),
+    /// The selection has stayed put: ask git who last changed it (for `blame::State::gen`).
+    BlameAsk(u64),
     Git(git::Msg),
     /// The diff tab (`diff.rs`).
     Diff(diff::Msg),
@@ -141,6 +144,8 @@ enum Pending {
     Git { poll: bool },
     GitDetails,
     GitRun { action: git::Action },
+    /// Blame for the selection, asked while `blame::State::gen` was `gen`.
+    Blame { gen: u64 },
     /// The diff tab's diff of `scope`, asked while `App::epoch` was `epoch`.
     Diff { scope: nib_proto::DiffScope, epoch: u64 },
     /// The diff tab staged or unstaged a file.
@@ -451,6 +456,7 @@ pub struct App {
     theme_cfg: ThemeConfig,
     /// Beginner mode: shortcut cheat sheet at the far right.
     beginner: bool,
+    blame: blame::State,
     settings: settings::State,
     tabs: Vec<Tab>,
     active: usize,
@@ -517,6 +523,8 @@ pub struct Init {
     pub font: Option<String>,
     pub line_height: f32,
     pub beginner_mode: bool,
+    /// `[editor] blame`.
+    pub blame: bool,
     pub theme_cfg: ThemeConfig,
     pub launch: crate::Launch,
     pub bench: bool,
@@ -546,6 +554,7 @@ impl App {
             font,
             line_height,
             beginner_mode,
+            blame,
             theme_cfg,
             launch,
             bench,
@@ -584,6 +593,7 @@ impl App {
             font_name: font,
             theme_cfg,
             beginner: beginner_mode,
+            blame: blame::State::new(blame),
             settings: Default::default(),
             tabs: Vec::new(),
             active: 0,
@@ -768,7 +778,8 @@ impl App {
         let task = self.handle(msg);
         let task = if (self.tab_slot(), self.tab_slots()) == front { task } else { Task::batch([task, self.tab_bar_follow()]) };
         let web = self.web_follow();
-        let task = Task::batch([task, web]);
+        let blame = self.blame_follow();
+        let task = Task::batch([task, web, blame]);
         self.ai_sync();
         self.terms_sync();
         self.sync_watch();
@@ -928,6 +939,7 @@ impl App {
             Message::GitPoll(epoch) if epoch == self.epoch => self.git_refresh(),
             // A poll from before a switch or root change: the new Hello starts its own.
             Message::GitPoll(_) => Task::none(),
+            Message::BlameAsk(gen) => self.blame_ask(gen),
             Message::Git(m) => self.on_git_msg(m),
             Message::Diff(m) => self.on_diff_msg(m),
             Message::Web(m) => self.on_web_msg(m),
@@ -1074,6 +1086,7 @@ impl App {
             (Pending::Search { seq }, result) => self.on_search_results(seq, result),
             (Pending::Serve { call, quiet }, result) => self.on_serve(call, quiet, result),
             (Pending::GitDetails, result) => self.on_git_details(result),
+            (Pending::Blame { gen }, result) => self.on_blame(gen, result),
             (Pending::Diff { scope, epoch }, result) => self.on_diff(scope, epoch, result),
             (Pending::DiffGit, result) => self.on_diff_git(result),
             (Pending::WorkLand { id }, result) => self.on_diff_landed(id, result),
@@ -2562,6 +2575,7 @@ mod tests {
             font: None,
             line_height: 1.4,
             beginner_mode: false,
+            blame: true,
             theme_cfg: Default::default(),
             lsp: vec![],
             ai: Default::default(),
