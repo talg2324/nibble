@@ -19,7 +19,7 @@ Agents get API access to the editor with no MCP needed.
   </tr>
 </table>
 
-> **Status: v0.2.** Early, used daily, moving fast. Expect rough edges and breaking changes. macOS, Linux and Windows (local projects and SSH remotes; or run nibble inside WSL). You build it yourself (see [Roadmap](#roadmap)).
+> **Status: v0.4.** Early, used daily, moving fast. Expect rough edges and breaking changes. Prebuilt for macOS (Apple silicon), Linux (x86_64) and Windows (x86_64), for local projects and SSH remotes; nibble also runs inside WSL. See [Install](#install), or [build it from source](#building-from-source).
 
 ## Why nibble
 
@@ -37,13 +37,16 @@ With coding agents, the human is the bottleneck. Agents get a lot done fast, and
 
 ## Contents
 
-- [Getting started](#getting-started)
+- [Install](#install)
+- [Building from source](#building-from-source)
 - [nib, nibd and friends](#nib-nibd-and-friends)
 - [Features](#features)
 - [Agents](#agents)
   - [How agents work in nibble](#how-agents-work-in-nibble)
   - [Follow mode](#follow-mode)
   - [The mailbox](#the-mailbox)
+- [Local apps](#local-apps)
+- [Apps](#apps)
 - [Skills](#skills)
 - [Scripting nibble with `nib ctl`](#scripting-nibble-with-nib-ctl)
 - [Adding a language](#adding-a-language)
@@ -53,9 +56,36 @@ With coding agents, the human is the bottleneck. Agents get a lot done fast, and
 - [Contributing](#contributing)
 - [License](#license)
 
-## Getting started
+## Install
 
-Until v0.4 there are no prebuilt binaries, so you build nibble yourself. You need [Rust](https://rustup.rs) (stable) and git; macOS, Linux or Windows.
+**macOS, Linux and WSL:**
+
+```bash
+curl -fsSL https://github.com/talg2324/nibble/releases/latest/download/install.sh | bash
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://github.com/talg2324/nibble/releases/latest/download/install.ps1 | iex
+```
+
+The installer shows what it found (your machine, the coding agents you have) and a short checklist, then downloads the latest release and checks it against the release's `SHA256SUMS`. You get:
+
+- `nib` and `nibd`: in `~/.local/share/nib` with commands in `~/.local/bin` (macOS, Linux), or in `%LOCALAPPDATA%\Programs\nib` (Windows); optionally added to your `PATH`;
+- an app icon: `~/Applications/nibble.app` on macOS, a `.desktop` entry on Linux, a Start menu shortcut on Windows;
+- nibble's [agent skills](#skills), in `~/.claude/skills` and `~/.agents/skills`;
+- if you choose it, the Linux daemons nibble uploads to [SSH remotes](#nib-nibd-and-friends) (and, from Windows, into WSL); on by default when `~/.ssh/config` has hosts or Windows has WSL distros.
+
+Run the same line again to update in place; your settings stay. Options go after `bash -s --` (`--yes`, `--remotes`, `--prefix DIR`, `--uninstall`; `--help` lists them all); on Windows they are `-Yes`, `-Remotes`, `-Uninstall`, … (see the top of `install.ps1`). The Linux build runs on glibc 2.35 or later (distros from 2022 on).
+
+Rather download by hand? Each [release](https://github.com/talg2324/nibble/releases) has the archives the installer uses: `nibble-<version>-<platform>` (nib, nibd and the skills), `nibd-<version>-<linux platform>` (the daemon for remotes) and `nib-grammars-<version>-<platform>` (the [languages](#adding-a-language) offered on first run, prebuilt). The macOS binaries are not notarized, so a copy downloaded in a browser needs `xattr -dr com.apple.quarantine` on its folder; the installer does that for you.
+
+To use agents, install a supported coding agent (see [Agents](#agents)) on the machine with the code, and sign in to it. The agents tab can also install and update them for you.
+
+## Building from source
+
+For working on nibble itself, or a platform the releases don't cover (Intel Macs, Linux on ARM). You need [Rust](https://rustup.rs) (stable) and git; on Linux also `pkg-config`, `libxkbcommon-dev` and `libwayland-dev` (or your distro's names for them).
 
 ```bash
 git clone https://github.com/talg2324/nibble
@@ -78,8 +108,6 @@ To work on Linux servers over SSH, also build the static daemons that nibble upl
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 scripts/build/build.sh        # release client + Linux daemons into dist/
 ```
-
-To use agents, install a supported coding agent (see [Agents](#agents)) on the machine with the code, and sign in to it. The agents tab can also install and update them for you.
 
 ## nib, nibd and friends
 
@@ -106,7 +134,7 @@ The window and the daemon speak a small typed protocol (length-prefixed msgpack)
 - **Find** (⌘F): in the current file or agent chat; Tab switches to the whole project, which is searched by `nibd`, so it is fast over SSH too. Fuzzy file names plus matching lines, skipping gitignored, hidden and binary files.
 - **Files follow the disk**: when a file open in a tab is changed outside nibble (a terminal, a formatter, `git checkout`, an agent's script), the tab updates within a second, over SSH too. Unsaved edits are never replaced; saving over an outside change asks first.
 - **Terminals**: docked beside the code, running where the code lives.
-- **Servers**: the project's backend, frontend, TensorBoard or notebook server, started by nibble instead of kept alive in a split terminal. See [Servers](#servers).
+- **Servers**: the project's backend, frontend, TensorBoard or notebook server, started by nibble instead of kept alive in a split terminal. See [Apps](#apps).
 - **Git**: branch and last commit in the status strip; a panel for fetch, pull, push, commit, stash, staging, changes and history.
 - **Viewers**: images (including animated), CSV/TSV as a sortable table, PDFs with links and outline, live Markdown and HTML preview with LaTeX math and Mermaid diagrams.
 - **Remote**: type a host into the SSH panel and press Enter. The window switches to that machine in place, with no new window. Passwords and 2FA codes are asked for in the window. Unknown host keys are refused until you check the fingerprint. `nib @name` opens a saved connection from the command line.
@@ -283,8 +311,8 @@ Editing is built on [helix-core](https://github.com/helix-editor/helix) (rope, s
 
 - [x] **v0.1**: the editor, SSH remotes, the agents tab with Follow and the mailbox, `nib ctl`, `nib ai`, runtime grammars and language servers. macOS and Linux.
 - [x] **v0.2**: Windows support and a revamped diff experience. Native Windows works for local projects (editor, tree, search, git, terminals, language servers, `nib ctl`) and SSH remotes, and nibble runs inside WSL. The diff tab shows your changes and each agent's like a pull request, live: agents work on a branch of their own (`nib-work`), you comment on their diff and send it back, and accepting lands the branch as one commit.
-- [ ] **v0.3**: localhost integration: see web servers running on the remote (dev servers, notebooks, dashboards) inside nibble, with agents able to read and act on the page.
-- [ ] **v0.4**: polish, a security review (pen test) and performance work; GitHub Actions that build and publish binaries. Until then, you build nibble yourself.
+- [x] **v0.3**: localhost integration: see web servers running on the remote (dev servers, notebooks, dashboards) inside nibble, with agents able to read and act on the page.
+- [x] **v0.4**: prebuilt releases. GitHub Actions build nibble for macOS, Linux and Windows and publish each tagged version with its Linux daemons and prebuilt grammars; one-line installers for macOS / Linux / WSL and Windows; polish.
 - [ ] **v0.5**: model routing: nibble picks the model (and thinking level) for each task, with a small local model deciding and the user able to override.
 
 ## Contributing

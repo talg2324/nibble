@@ -121,23 +121,32 @@ fn run(cmd: &mut Command) -> Result<()> {
 // Helix's catalog
 // ---------------------------------------------------------------------------------------------
 
-/// `languages.toml` and `runtime/queries/` of Helix at `HELIX_TAG` (a sparse clone, ~5 MB).
+/// `languages.toml` and `runtime/queries/` of Helix at `HELIX_TAG`, from the tag's source
+/// tarball (~2.5 MB; curl and tar, which every platform nib releases for has). Not a sparse git
+/// clone: git before 2.37 (Ubuntu 22.04) checks one out without the root files.
 fn helix_dir() -> Result<PathBuf> {
-    let dir = cache_dir()?.join(format!("helix-{}", nib_syntax::HELIX_TAG));
+    let tag = nib_syntax::HELIX_TAG;
+    let dir = cache_dir()?.join(format!("helix-{tag}"));
     if dir.join("languages.toml").is_file() && dir.join("runtime/queries").is_dir() {
         return Ok(dir);
     }
-    eprintln!("fetching the language catalog (Helix {})…", nib_syntax::HELIX_TAG);
-    let tmp = dir.with_extension("tmp");
+    eprintln!("fetching the language catalog (Helix {tag})…");
+    let tmp = cache_dir()?.join(format!("helix-{tag}.part"));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(tmp.parent().unwrap())?;
-    run(Command::new("git")
-        .args(["-c", "advice.detachedHead=false", "clone", "-q", "--depth", "1", "--filter=blob:none", "--sparse"])
-        .args(["--branch", nib_syntax::HELIX_TAG, "https://github.com/helix-editor/helix"])
-        .arg(&tmp))?;
-    run(Command::new("git").arg("-C").arg(&tmp).args(["sparse-checkout", "set", "runtime/queries"]))?;
+    std::fs::create_dir_all(&tmp)?;
+    let archive = tmp.join("helix.tar.gz");
+    curl(&format!("https://github.com/helix-editor/helix/archive/refs/tags/{tag}.tar.gz"), &archive)?;
+    let top = format!("helix-{tag}");
+    run(Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&tmp)
+        .arg(format!("{top}/languages.toml"))
+        .arg(format!("{top}/runtime/queries")))?;
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::rename(&tmp, &dir)?;
+    std::fs::rename(tmp.join(&top), &dir)?;
+    let _ = std::fs::remove_dir_all(&tmp);
     Ok(dir)
 }
 
@@ -148,7 +157,8 @@ struct Catalog {
 
 impl Catalog {
     fn load(helix: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(helix.join("languages.toml"))?;
+        let path = helix.join("languages.toml");
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let mut doc: toml::Table = toml::from_str(&text).context("Helix languages.toml")?;
         let tables = |v: Option<toml::Value>| -> Vec<toml::Table> {
             match v {
@@ -224,7 +234,7 @@ fn add_all(langs: &[String], source: &Source) -> Result<()> {
             }
         },
     };
-    // Helix's catalog only when something has to be compiled (it needs git).
+    // Helix's catalog only when something has to be compiled (it is a download).
     let mut helix: Option<(PathBuf, Catalog)> = None;
     let mut failed = 0;
     for want in langs {
