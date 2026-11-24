@@ -29,7 +29,10 @@ function Install-Nib {
     $DaemonTriples = @('x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl')
     $Dir = [IO.Path]::GetFullPath($Prefix)
     $State = Join-Path $Dir 'install-state'
-    $Shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\nib.lnk'
+    # Named nibble: the taskbar's tooltip and pins take the app's name from this shortcut.
+    $Shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\nibble.lnk'
+    # What releases before it called the shortcut.
+    $OldShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\nib.lnk'
     $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest's progress bar slows downloads a lot
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
@@ -159,7 +162,7 @@ function Install-Nib {
             $kept = (UserPath) -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $Dir.TrimEnd('\') }
             SetUserPath ($kept -join ';')
         }
-        Step 'Start menu' 'nib.lnk' { Remove-Item -Force $Shortcut -ErrorAction SilentlyContinue }
+        Step 'Start menu' 'nibble.lnk' { Remove-Item -Force $Shortcut, $OldShortcut -ErrorAction SilentlyContinue }
         Step 'Program' (tilde $Dir) { Remove-Item -Recurse -Force $Dir }
         rule
         if ($Notes.Count) { say ''; $Notes | ForEach-Object { say "  $_" } }
@@ -354,7 +357,8 @@ function Install-Nib {
             }
             Set-Content -Path $State -Value $now -Encoding UTF8
         }
-        Step 'Start menu' 'nib' {
+        Step 'Start menu' 'nibble' {
+            Remove-Item -Force $OldShortcut -ErrorAction SilentlyContinue
             $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($Shortcut)
             $sh.TargetPath = Join-Path $Dir 'nib.exe'
             $sh.WorkingDirectory = $HOME
