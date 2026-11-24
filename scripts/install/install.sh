@@ -307,7 +307,7 @@ do_verify() {
   for f in "$TMPD"/*.tar.gz; do verify "$f" || return 1; done
 }
 # Releases made before provenance was (v0.4): nothing to check them against.
-unattested() { case "$TAG" in v0.[0-3]|v0.[0-3][.-]*|v0.4-rc.*) return 0 ;; esac; return 1; }
+unattested() { case "$TAG" in v0.[0-3]|v0.[0-3][.-]*|v0.4|v0.4-rc.*) return 0 ;; esac; return 1; }
 # SHA256SUMS comes from the release the archives come from: it tells of a broken download, not
 # of a release somebody else filled. Provenance does: GitHub's record (Sigstore) that this very
 # file was built by the release workflow of $REPO. Checking it takes the GitHub CLI, signed in;

@@ -3,7 +3,7 @@
 #   irm https://github.com/talg2324/nibble/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm https://github.com/talg2324/nibble/releases/latest/download/install.ps1))) -Yes -Remotes
 #   & ([scriptblock]::Create((irm https://github.com/talg2324/nibble/releases/latest/download/install.ps1))) -Uninstall
-#   $env:NIB_VERSION = 'v0.4-rc.1'; irm …/install.ps1 | iex     # that release (also -Version TAG)
+#   $env:NIB_VERSION = 'v0.4-rc.1'; irm .../install.ps1 | iex     # that release (also -Version TAG)
 #
 # "Latest" never means a prerelease (a release candidate, vX.Y-rc.N): those only by name.
 # Installs the latest release into %LOCALAPPDATA%\Programs\nib and puts that folder on your user
@@ -33,7 +33,7 @@ function Install-Nib {
     $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest's progress bar slows downloads a lot
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    # ── look: nib's default theme ──────────────────────────────────────────
+    # -- look: nib's default theme ------------------------------------------
     $E = [char]27
     $Plain = [Console]::IsOutputRedirected
     function rgb($hex) { if ($Plain) { return '' }; "$E[38;2;$([Convert]::ToInt32($hex.Substring(0,2),16));$([Convert]::ToInt32($hex.Substring(2,2),16));$([Convert]::ToInt32($hex.Substring(4,2),16))m" }
@@ -43,28 +43,36 @@ function Install-Nib {
     $Interactive = -not $Yes -and -not [Console]::IsInputRedirected -and -not $Plain
     $Notes = New-Object System.Collections.Generic.List[string]
 
+    # Glyphs by code point: this file must stay ASCII. GitHub serves it with no charset, so
+    # Windows PowerShell 5.1's irm reads it as Latin-1 and any UTF-8 character would arrive garbled.
+    function glyph([int]$c) { [string][char]$c }
+    $hr = glyph 0x2500; $ell = glyph 0x2026; $mid = glyph 0x00B7; $dash = glyph 0x2014; $chk = glyph 0x2713; $cross = glyph 0x2717
+    $sq = glyph 0x25A0; $ptr = glyph 0x25B8; $arrows = (glyph 0x2191) + (glyph 0x2193); $infoMark = glyph 0x2139
+
     function say($s) { Write-Host "$s" }
-    function rule { say "  $D─────────────────────────────────────────────────────────────$R" }
+    function rule { say "  $D$($hr * 61)$R" }
     function tilde($p) { if ($p.StartsWith($HOME)) { '~' + $p.Substring($HOME.Length) } else { $p } }
     function fit($h, $w) {
         $w = [Math]::Max(10, $w)
-        if ($h.Length -gt $w) { $h.Substring(0, $w - 1) + '…' } else { $h }
+        if ($h.Length -gt $w) { $h.Substring(0, $w - 1) + $ell } else { $h }
     }
     function Cols { try { [Console]::WindowWidth } catch { 100 } }
 
     function Banner {
         say ''
-        say "    $WHITE▄████▄ ▄████▄ ▄████▄ $LOGO▄██▄$R"
-        say "    $WHITE██████ ██████ ██████ $LOGO█████▄$R"
-        say "    $WHITE▀████▀ ▀████▀ ▀████▀ $LOGO▀████▀$R"
+        # ^ upper half block, # full block, _ lower half block
+        function logo($s) { $s.Replace('^', (glyph 0x2584)).Replace('#', (glyph 0x2588)).Replace('_', (glyph 0x2580)) }
+        say "    $WHITE$(logo '^####^ ^####^ ^####^ ')$LOGO$(logo '^##^')$R"
+        say "    $WHITE$(logo '###### ###### ###### ')$LOGO$(logo '#####^')$R"
+        say "    $WHITE$(logo '_####_ _####_ _####_ ')$LOGO$(logo '_####_')$R"
         say "               $B${WHITE}nibble$R"
         say ''
     }
 
-    # ── downloads ──────────────────────────────────────────────────────────
+    # -- downloads ----------------------------------------------------------
     function Fetch($url, $out) { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out }
     function LatestTag {
-        # releases/latest redirects to …/releases/tag/vX.Y (no API call, no rate limit)
+        # releases/latest redirects to .../releases/tag/vX.Y (no API call, no rate limit)
         $req = [Net.HttpWebRequest]::Create("https://github.com/$Repo/releases/latest")
         $req.AllowAutoRedirect = $false
         $req.Method = 'HEAD'
@@ -99,7 +107,7 @@ function Install-Nib {
         $s
     }
 
-    # ── user PATH, kept as REG_EXPAND_SZ so %VARS% in it survive ───────────
+    # -- user PATH, kept as REG_EXPAND_SZ so %VARS% in it survive -----------
     function UserPath {
         (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     }
@@ -111,25 +119,25 @@ function Install-Nib {
     }
     function OnPath { (UserPath) -split ';' | Where-Object { $_.TrimEnd('\') -ieq $Dir.TrimEnd('\') } }
 
-    # ── steps ──────────────────────────────────────────────────────────────
+    # -- steps --------------------------------------------------------------
     function Step($title, $what, [scriptblock]$do) {
         $what = fit $what ((Cols) - $title.Length - 8)
-        if (-not $Plain) { Write-Host -NoNewline "  $A…$R $title  $D$what$R" }
+        if (-not $Plain) { Write-Host -NoNewline "  $A$ell$R $title  $D$what$R" }
         try { & $do } catch {
             if (-not $Plain) { Write-Host -NoNewline "`r$EL" }
-            say "  $RED✗$R $title  $D$what$R"
+            say "  $RED$cross$R $title  $D$what$R"
             say "      $($_.Exception.Message)"
             throw 'stopped'
         }
         if (-not $Plain) { Write-Host -NoNewline "`r$EL" }
-        say "  $G✓$R $title  $D$what$R"
+        say "  $G$chk$R $title  $D$what$R"
     }
 
     function Running {
         Get-Process nib, nibd -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($Dir, [StringComparison]::OrdinalIgnoreCase) }
     }
 
-    # ── uninstall ──────────────────────────────────────────────────────────
+    # -- uninstall ----------------------------------------------------------
     function Remove-Nib {
         say "  $B${WHITE}Remove nib$R  ${D}your settings and your projects stay$R"
         say ''
@@ -158,7 +166,7 @@ function Install-Nib {
         say ''; say "  $G${B}nib is removed.$R"; say ''
     }
 
-    # ── install ────────────────────────────────────────────────────────────
+    # -- install ------------------------------------------------------------
     Write-Host -NoNewline $FG
     Banner
     if ($Uninstall) { Remove-Nib; return }
@@ -169,7 +177,7 @@ function Install-Nib {
     if ($Version) {
         $Tag = if ($Version.StartsWith('v')) { $Version } else { "v$Version" }
     } else {
-        try { $Tag = LatestTag } catch { say "  $RED✗$R Couldn't reach GitHub to find the latest release (https://github.com/$Repo/releases)."; return }
+        try { $Tag = LatestTag } catch { say "  $RED$cross$R Couldn't reach GitHub to find the latest release (https://github.com/$Repo/releases)."; return }
     }
     $have = $null
     if (Test-Path (Join-Path $Dir 'nib.exe')) { $have = (& (Join-Path $Dir 'nib.exe') --version 2>$null | Select-Object -First 1) }
@@ -183,13 +191,13 @@ function Install-Nib {
     $onPath = [bool](OnPath)
 
     function row($k, $v) { say ("  $D{0,-9}$R {1}" -f $k, $v) }
-    row machine "$os · $arch"
+    row machine "$os $mid $arch"
     row release $Tag
     row into (tilde $Dir)
-    if ($have) { row found "$have  $D— replaced in place, your settings stay$R" }
+    if ($have) { row found "$have  $D$dash replaced in place, your settings stay$R" }
     if ($harn) { row agents ($harn -join ' ') } else { row agents "${Y}none found$R  ${D}nib works without; its agents tab needs one$R" }
     if (-not $hasGit) { row git "${Y}not found$R  ${D}diffs and agent branches need it$R" }
-    if ($arch -eq 'ARM64') { say ''; say "  $A`ℹ$R  This is the x64 build; Windows on ARM runs it emulated." }
+    if ($arch -eq 'ARM64') { say ''; say "  $A$infoMark$R  This is the x64 build; Windows on ARM runs it emulated." }
     say ''
 
     # defaults
@@ -203,22 +211,22 @@ function Install-Nib {
     if ($sshHosts -gt 0) { $wslNote += "$sshHosts hosts in ~\.ssh\config" }
     $items = @(
         @{ label = 'nib + nibd'; hint = 'the editor, its daemon, the Start menu entry and agent skills'; key = $null },
-        @{ label = 'WSL and SSH'; hint = "projects in WSL or on Linux servers: the Linux daemon (for WSL nib starts it inside WSL; no SSH involved)$(if ($wslNote) { '  ·  ' + ($wslNote -join ', ') })"; key = 'remotes' },
+        @{ label = 'WSL and SSH'; hint = "projects in WSL or on Linux servers: the Linux daemon (for WSL nib starts it inside WSL; no SSH involved)$(if ($wslNote) { "  $mid  " + ($wslNote -join ', ') })"; key = 'remotes' },
         @{ label = 'Add to PATH'; hint = $(if ($onPath) { "$(tilde $Dir) is on PATH already; nothing to change" } else { 'your user PATH, so `nib` works in any terminal' }); key = 'path' },
         @{ label = 'nib-upstream'; hint = "agents may draft issues / PRs to $Repo, sent only with your OK"; key = 'upstream' }
     )
-    function Draw($cur) {
+    function Draw([int]$cur) {
         $w = (Cols) - 28
         for ($i = 0; $i -lt $items.Count; $i++) {
             $it = $items[$i]
-            if (-not $it.key) { $box = "$D[■]" } elseif ($opt[$it.key]) { $box = "$A[✓]" } else { $box = "$D[ ]" }
+            if (-not $it.key) { $box = "$D[$sq]" } elseif ($opt[$it.key]) { $box = "$A[$chk]" } else { $box = "$D[ ]" }
             $h = fit $it.hint $w
-            if ($i -eq $cur) { say ("$SEL $A▸ $box $WHITE{0,-17}$FG$h$EL$E[0m$R" -f $it.label) }
+            if ($i -eq $cur) { say ("$SEL $A$ptr $box $WHITE{0,-17}$FG$h$EL$E[0m$R" -f $it.label) }
             else { say ("   $box $FG{0,-17}$D$h$R$EL" -f $it.label) }
         }
         say "$EL"
         # The keys only when they can be pressed (-1: -Yes, nothing to choose).
-        if ($cur -ge 0) { say "  $A↑↓$D move  ${A}space$D toggle  ${A}enter$D install  ${A}q$D quit$R$EL" }
+        if ($cur -ge 0) { say "  $A$arrows$D move  ${A}space$D toggle  ${A}enter$D install  ${A}q$D quit$R$EL" }
     }
 
     if ($Interactive) {
@@ -268,13 +276,14 @@ function Install-Nib {
         # CLI, signed in; without one it is not checked, and the summary says so. Releases made
         # before provenance was (v0.4) have nothing to be checked against.
         $ghIn = $false
-        if (Get-Command gh -ErrorAction SilentlyContinue) { & gh auth status *> $null; $ghIn = ($LASTEXITCODE -eq 0) }
-        if ($Tag -match '^v0\.[0-3]([.-]|$)' -or $Tag -match '^v0\.4-rc\.') {
+        # gh's stderr under 'Continue': in Windows PowerShell 5.1 a caller's 'Stop' turns it into a throw.
+        if (Get-Command gh -ErrorAction SilentlyContinue) { $ghIn = & { $ErrorActionPreference = 'Continue'; & gh auth status *> $null; $LASTEXITCODE -eq 0 } }
+        if ($Tag -match '^v0\.[0-3]([.-]|$)' -or $Tag -match '^v0\.4(-rc\.|$)') {
             $Notes.Add("$D$Tag was released before nib's builds carried provenance: not checked$R")
         } elseif ($ghIn) {
             Step 'Provenance' "built by $Repo's release workflow (gh attestation verify)" {
                 Get-ChildItem $tmp -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | ForEach-Object {
-                    $said = & gh attestation verify $_.FullName --repo $Repo --signer-workflow "$Repo/.github/workflows/release.yml" 2>&1
+                    $said = & { $ErrorActionPreference = 'Continue'; & gh attestation verify $_.FullName --repo $Repo --signer-workflow "$Repo/.github/workflows/release.yml" 2>&1 }
                     if ($LASTEXITCODE -ne 0) { throw "$($_.Name) was not built by $Repo's release workflow, or GitHub has no record that it was: $(($said | Select-Object -Last 3) -join ' ')" }
                 }
             }
@@ -358,7 +367,7 @@ function Install-Nib {
         }
         rule
     } catch {
-        if ("$_" -ne 'stopped') { say "  $RED✗$R $_" }
+        if ("$_" -ne 'stopped') { say "  $RED$cross$R $_" }
         say ''
         say "  ${RED}Stopped.$R $(if ($have) { 'Your installed nib is as it was.' } else { 'Nothing was installed.' })"
         return
