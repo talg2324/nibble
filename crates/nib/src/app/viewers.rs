@@ -223,12 +223,52 @@ pub struct SvgPreview {
 
 /// A decoded image in a preview: raster formats go through `media::decode`, SVG is drawn as vectors.
 #[derive(Clone)]
-pub(super) enum PreviewImage {
+pub enum PreviewImage {
     Raster(Handle),
     Svg(svg::Handle),
 }
 
+impl std::fmt::Debug for PreviewImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PreviewImage::Raster(_) => "PreviewImage::Raster",
+            PreviewImage::Svg(_) => "PreviewImage::Svg",
+        })
+    }
+}
+
 impl PreviewImage {
+    /// The longest side an SVG is drawn with to be copied: twice its own size, up to this.
+    const SVG_COPY_MAX_SIDE: f32 = 4096.0;
+
+    /// Its pixels, straight RGBA, and their width and height: to put it on the clipboard. An SVG
+    /// is drawn (at twice its size, so it stays sharp pasted into a document). Blocking.
+    pub(super) fn rgba(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        match self {
+            PreviewImage::Raster(Handle::Rgba { width, height, pixels, .. }) => Ok((*width, *height, pixels.to_vec())),
+            PreviewImage::Raster(_) => Err("the picture isn't decoded".into()),
+            PreviewImage::Svg(h) => {
+                let data = match h.data() {
+                    iced::advanced::svg::Data::Bytes(b) => b.to_vec(),
+                    iced::advanced::svg::Data::Path(p) => std::fs::read(p).map_err(|e| e.to_string())?,
+                };
+                let mut opt = resvg::usvg::Options::default();
+                opt.fontdb_mut().load_system_fonts();
+                let tree = resvg::usvg::Tree::from_data(&data, &opt).map_err(|e| e.to_string())?;
+                let size = tree.size();
+                let k = (Self::SVG_COPY_MAX_SIDE / size.width().max(size.height())).min(2.0);
+                let (w, h) = (((size.width() * k).round() as u32).max(1), ((size.height() * k).round() as u32).max(1));
+                let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or("the SVG has no size")?;
+                resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(k, k), &mut pixmap.as_mut());
+                let rgba = pixmap.pixels().iter().flat_map(|p| {
+                    let c = p.demultiply();
+                    [c.red(), c.green(), c.blue(), c.alpha()]
+                });
+                Ok((w, h, rgba.collect()))
+            }
+        }
+    }
+
     /// Decoded here (not lazily by the renderer) so the image has its size from the first frame.
     pub(super) fn decode(url: &str, data: Vec<u8>) -> Option<PreviewImage> {
         if is_svg(url) {
@@ -991,5 +1031,28 @@ impl App {
         };
         let on = tab.rendered && tab.kind != Kind::Csv;
         Some(container(pill(label, on, Message::Control(Command::TogglePreview))).padding([0, 8]).into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_picture_gives_its_pixels_to_copy() {
+        let mut png = Vec::new();
+        let img = image::RgbaImage::from_fn(3, 2, |x, y| image::Rgba([x as u8 * 50, y as u8 * 100, 7, 255]));
+        image::DynamicImage::ImageRgba8(img.clone()).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let (w, h, px) = PreviewImage::decode("a.png", png).unwrap().rgba().unwrap();
+        assert_eq!((w, h, px), (3, 2, img.into_raw()));
+    }
+
+    #[test]
+    fn an_svg_is_drawn_at_twice_its_size_to_copy() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="4"><rect width="10" height="4" fill="#ff0000" fill-opacity="0.5"/></svg>"##;
+        let (w, h, px) = PreviewImage::decode("a.svg", svg.to_vec()).unwrap().rgba().unwrap();
+        assert_eq!((w, h, px.len()), (20, 8, 20 * 8 * 4));
+        // Straight alpha, not premultiplied: full red at half opacity.
+        assert_eq!(&px[..4], &[255, 0, 0, 128]);
     }
 }

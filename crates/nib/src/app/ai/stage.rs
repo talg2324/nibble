@@ -1566,18 +1566,9 @@ impl App {
         // A box's own copy button, in its bottom-right corner, under what it says.
         // `fill`: the box is as wide as the feed; the button goes to its right edge, not to
         // that of the text (a reply's text is only as wide as its longest line).
+        let look = super::CopyLook { dim, fg, panel, divider };
         let with_copy = |body: Element<'a, Message>, i: usize, fill: bool| -> Element<'a, Message> {
-            let copy = button(text("📋").size(12))
-                .on_press(Message::Ai(Msg::CopyTurn(i)))
-                .padding([0, 4])
-                .style(move |_: &iced::Theme, status: button::Status| button::Style {
-                    border: Border { color: if matches!(status, button::Status::Hovered) { dim } else { Color::TRANSPARENT }, width: 1.0, radius: 3.0.into() },
-                    ..Default::default()
-                });
-            let tip = container(text("copy").size(11).color(fg))
-                .padding([2, 6])
-                .style(move |_| container::Style { background: Some(panel.into()), border: Border { color: divider, width: 1.0, radius: 3.0.into() }, ..Default::default() });
-            let copy = tooltip(copy, tip, tooltip::Position::Left);
+            let copy = super::copy_button(look, "copy", Message::Ai(Msg::CopyTurn(i)));
             if fill {
                 column![body, container(copy).align_right(Length::Fill)].spacing(2).width(Length::Fill).into()
             } else {
@@ -1640,7 +1631,10 @@ impl App {
                         _ => None,
                     };
                     match pic {
-                        Some(p) => mark(icon, column![row, container(crate::app::peek::peek(p.view(), p, self.ai.image_zoom_delay)).max_height(PICTURE_HEIGHT)].spacing(4).into()),
+                        Some(p) => {
+                            let pic = container(crate::app::peek::peek(p.view(), p, self.ai.image_zoom_delay)).max_height(PICTURE_HEIGHT);
+                            mark(icon, column![row, super::with_image_copy(pic.into(), p, look)].spacing(4).into())
+                        }
                         None => mark(icon, row),
                     }
                 }
@@ -1684,7 +1678,7 @@ impl App {
                         size,
                         color: fg,
                         math: Some(&t.math),
-                        images: Some((&t.images, self.ai.image_zoom_delay)),
+                        images: Some((&t.images, self.ai.image_zoom_delay, look)),
                         blocks: Some(Blocks::new(&ai.feed_sel, shown, i, sel_bg)),
                     };
                     // Outlined, on the feed's own background: the reply stands apart from the steps

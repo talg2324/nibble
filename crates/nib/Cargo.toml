@@ -42,6 +42,8 @@ merman = { version = "0.11", default-features = false, features = ["all-diagrams
 # PDF viewer: pure-Rust rasterizer.
 hayro = "0.9"
 arboard = "3.7.0"
+# Draws an SVG to pixels, to copy a chat picture to the clipboard. Already in the tree via iced.
+resvg = "0.45"
 # The window's handle, to ask the OS where a file was dropped (winit doesn't say).
 raw-window-handle = "0.6"
 # Pictures of a page come from the browser as base64 (web/). Already in the tree.

@@ -392,6 +392,91 @@ fn paste() -> Task<Message> {
     Task::perform(async { read_clipboard() }, |c| Message::Ai(Msg::Clip(c)))
 }
 
+/// Put a chat picture on the clipboard; the answer is `Msg::ImageCopied`.
+fn copy_image(img: PreviewImage) -> Task<Message> {
+    Task::perform(async move { write_clipboard_image(&img) }, |r| Message::Ai(Msg::ImageCopied(r)))
+}
+
+fn write_clipboard_image(img: &PreviewImage) -> Result<(), String> {
+    let (width, height, rgba) = img.rgba()?;
+    // WSL: WSLg doesn't pass pictures over to Windows (see `windows_clipboard_image`).
+    if crate::clipboard::is_wsl() {
+        return to_windows_clipboard_image(width, height, rgba);
+    }
+    let data = arboard::ImageData { width: width as usize, height: height as usize, bytes: rgba.into() };
+    #[cfg(target_os = "linux")]
+    {
+        // On X11 and Wayland the clipboard is served by whoever set it, for as long as they
+        // live: a thread of its own holds it until another copy replaces it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use arboard::SetExtLinux;
+            let mut c = match arboard::Clipboard::new() {
+                Ok(c) => c,
+                Err(e) => return drop(tx.send(Err(e.to_string()))),
+            };
+            // `wait` returns once another copy replaces this one; the answer is sent before that.
+            let _ = tx.send(Ok(()));
+            if let Err(e) = c.set().wait().image(data) {
+                crate::control::log("warn", &format!("copy an image to the clipboard: {e}"));
+            }
+        });
+        rx.recv().map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        arboard::Clipboard::new().and_then(|mut c| c.set_image(data)).map_err(|e| e.to_string())
+    }
+}
+
+/// On WSL, put a picture on the Windows clipboard: PNG bytes to Windows PowerShell's stdin.
+fn to_windows_clipboard_image(width: u32, height: u32, rgba: Vec<u8>) -> Result<(), String> {
+    use std::io::Write;
+    let img = image::RgbaImage::from_raw(width, height, rgba).ok_or("the picture's pixels don't fit its size")?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+        $m = New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($m); \
+        [Windows.Forms.Clipboard]::SetImage([Drawing.Image]::FromStream($m))";
+    let mut child = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", SCRIPT])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("powershell.exe: {e}"))?;
+    child.stdin.take().expect("piped").write_all(&png).map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() { Ok(()) } else { Err(format!("powershell.exe: {status}")) }
+}
+
+/// The colours of a copy button in the chat (see `copy_button`).
+#[derive(Clone, Copy)]
+pub(super) struct CopyLook {
+    pub dim: Color,
+    pub fg: Color,
+    pub panel: Color,
+    pub divider: Color,
+}
+
+/// A small 📋 button with a tooltip on its left, as the chat's boxes and pictures have.
+pub(super) fn copy_button<'a>(look: CopyLook, tip: &'a str, on_press: Message) -> Element<'a, Message> {
+    let CopyLook { dim, fg, panel, divider } = look;
+    let copy = button(text("📋").size(12)).on_press(on_press).padding([0, 4]).style(move |_: &iced::Theme, status: button::Status| button::Style {
+        border: Border { color: if matches!(status, button::Status::Hovered) { dim } else { Color::TRANSPARENT }, width: 1.0, radius: 3.0.into() },
+        ..Default::default()
+    });
+    let tip = container(text(tip).size(11).color(fg))
+        .padding([2, 6])
+        .style(move |_| container::Style { background: Some(panel.into()), border: Border { color: divider, width: 1.0, radius: 3.0.into() }, ..Default::default() });
+    iced::widget::tooltip(copy, tip, iced::widget::tooltip::Position::Left).into()
+}
+
+/// A picture in the chat with its copy button under its bottom-right corner.
+pub(super) fn with_image_copy<'a>(picture: Element<'a, Message>, img: &PreviewImage, look: CopyLook) -> Element<'a, Message> {
+    column![picture, copy_button(look, "copy image", Message::Ai(Msg::CopyImage(img.clone())))].spacing(2).align_x(Alignment::End).into()
+}
+
 /// On WSL, the picture on the Windows clipboard (a Snipping Tool / Win+Shift+S snip): WSLg
 /// passes only text across to Linux, so arboard never sees it. Asks Windows PowerShell for it
 /// as PNG bytes on its stdout (about a second: PowerShell is slow to start). `None` off WSL, or
@@ -860,6 +945,10 @@ pub enum Msg {
     /// The copy button of turn `i` of the shown agent: its text to the clipboard (a reply as
     /// the markdown it was written in).
     CopyTurn(usize),
+    /// The copy button under a picture in the chat: the picture to the clipboard.
+    CopyImage(PreviewImage),
+    /// The picture is on the clipboard, or why it isn't.
+    ImageCopied(Result<(), String>),
     /// The mouse on text in the chat (block `Key`, see `select`): a press, a drag, a release.
     Sel(select::Key, select::SelEv),
 }
@@ -1395,6 +1484,9 @@ impl App {
                 let Some(t) = self.ai.turns.get(i) else { return Task::none() };
                 return Task::batch([crate::clipboard::write(t.text.clone()), self.flash_info("copied")]);
             }
+            Msg::CopyImage(img) => return copy_image(img),
+            Msg::ImageCopied(Ok(())) => return self.flash_info("image copied"),
+            Msg::ImageCopied(Err(e)) => return self.flash_warn(format!("couldn't copy the image: {e}")),
             Msg::HistoryClose => self.ai_history_close(),
             Msg::HistoryMail(on) => {
                 self.focus = Focus::Ai;

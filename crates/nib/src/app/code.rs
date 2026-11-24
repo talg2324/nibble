@@ -767,8 +767,9 @@ pub(super) struct MarkdownViewer<'m> {
     pub color: Color,
     pub math: Option<&'m math::Formulas>,
     /// Pictures that have arrived (the AI panel), by URL, and how long the mouse rests on one
-    /// before it is shown bigger. A click opens one in a tab.
-    pub images: Option<(&'m HashMap<String, Option<PreviewImage>>, Duration)>,
+    /// before it is shown bigger, and the look of the copy button under each. A click opens one
+    /// in a tab.
+    pub images: Option<(&'m HashMap<String, Option<PreviewImage>>, Duration, super::ai::CopyLook)>,
     /// The chat's text, selectable with the mouse (see `ai::select`); `None`: plain text.
     pub blocks: Option<super::ai::select::Blocks<'m>>,
 }
@@ -832,15 +833,13 @@ impl<'a> markdown::Viewer<'a, Message> for MarkdownViewer<'a> {
         title: &'a str,
         alt: &markdown::Text,
     ) -> Element<'a, Message> {
-        let picture = self.images.and_then(|(m, delay)| Some((m.get(url.as_str())?.as_ref()?, delay)));
+        let picture = self.images.and_then(|(m, delay, look)| Some((m.get(url.as_str())?.as_ref()?, delay, look)));
         match (math::get(self.math, url), picture) {
             (Some(f), _) => container(math::display(f, settings.text_size.0, self.color)).padding([settings.spacing.0 / 2.0, 0.0]).into(),
-            (None, Some((img, delay))) => {
-                let pic = container(super::peek::peek(img.view(), img, delay)).max_height(REPLY_IMAGE_MAX_H).padding([settings.spacing.0 / 2.0, 0.0]);
-                mouse_area(pic)
-                    .on_press(Message::Ai(super::ai::Msg::OpenImage(url.clone())))
-                    .interaction(mouse::Interaction::Pointer)
-                    .into()
+            (None, Some((img, delay, look))) => {
+                let pic = container(super::peek::peek(img.view(), img, delay)).max_height(REPLY_IMAGE_MAX_H);
+                let pic = mouse_area(pic).on_press(Message::Ai(super::ai::Msg::OpenImage(url.clone()))).interaction(mouse::Interaction::Pointer);
+                container(super::ai::with_image_copy(pic.into(), img, look)).padding([settings.spacing.0 / 2.0, 0.0]).into()
             }
             (None, None) => {
                 let _ = title;
