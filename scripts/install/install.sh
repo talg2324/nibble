@@ -415,6 +415,13 @@ EOF
       echo "Terminal=false"
       echo "Categories=Development;TextEditor;"
     } > "$apps/nibble.desktop"
+    # WSLg makes Start-menu shortcuts (which Windows needs to pin an app) only from system
+    # folders, never ~/.local/share/applications. It watches /usr/share/applications (on every
+    # distro) while it runs, so the shortcut appears at once.
+    if [ $WSL = 1 ]; then
+      sudo -n cp "$apps/nibble.desktop" /usr/share/applications/ 2>/dev/null ||
+        note "${Y}!${R} To pin nibble on Windows: ${A}sudo cp $(tilde "$apps/nibble.desktop") /usr/share/applications/${R}"
+    fi
   fi
 }
 do_check() { "$HOME_DIR/nib" --version; }
@@ -477,6 +484,10 @@ un_path() {
 un_icon() {
   rm -rf "$HOME/Applications/nibble.app" "$HOME/Applications/nib.app"
   rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nibble.desktop" "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nib.desktop"
+  if [ -f /usr/share/applications/nibble.desktop ]; then
+    sudo -n rm -f /usr/share/applications/nibble.desktop 2>/dev/null ||
+      note "${Y}!${R} Also remove the Start-menu entry: ${A}sudo rm /usr/share/applications/nibble.desktop${R}"
+  fi
 }
 un_program() { rm -rf "$HOME_DIR"; }
 
