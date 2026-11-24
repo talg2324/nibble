@@ -262,8 +262,48 @@ impl Document {
         if c.is_whitespace() {
             self.commit_pending();
         }
+        if closer_of(c).is_some() || is_closer(c) {
+            self.type_bracket(c);
+            return;
+        }
         let mut buf = [0u8; 4];
         self.insert(c.encode_utf8(&mut buf), EditKind::Typing);
+    }
+
+    /// Typing a bracket, per cursor: an opener before whitespace, the end or a closer gets its
+    /// closer too (cursor between); a closer right before the same closer is typed over.
+    fn type_bracket(&mut self, c: char) {
+        let text = self.text.slice(..);
+        let len = text.len_chars();
+        let typed: Tendril = c.to_string().into();
+        // (from, to, inserted, cursor offset from `from` after the edit)
+        let edits: Vec<(usize, usize, Option<Tendril>, usize)> = self
+            .selection
+            .ranges()
+            .iter()
+            .map(|r| {
+                let next = (r.is_empty() && r.head < len).then(|| text.char(r.head));
+                if !r.is_empty() {
+                    return (r.from(), r.to(), Some(typed.clone()), 1);
+                }
+                if let Some(close) = closer_of(c) {
+                    if next.is_none_or(|n| n.is_whitespace() || is_closer(n)) {
+                        return (r.head, r.head, Some(format!("{c}{close}").into()), 1);
+                    }
+                } else if next == Some(c) {
+                    return (r.head, r.head, None, 1);
+                }
+                (r.head, r.head, Some(typed.clone()), 1)
+            })
+            .collect();
+        let tx = Transaction::change(&self.text, edits.iter().map(|(f, t, s, _)| (*f, *t, s.clone())));
+        let ranges = edits
+            .iter()
+            .map(|(f, _, _, off)| Range::point(tx.changes().map_pos(*f, Assoc::Before) + off))
+            .collect();
+        let sel = Selection::new(ranges, self.selection.primary_index());
+        self.apply(tx.with_selection(sel), EditKind::Typing);
+        self.goal_col = None;
     }
 
     pub fn newline(&mut self) {
@@ -315,6 +355,12 @@ impl Document {
                 (pos, next_grapheme_boundary(text, pos))
             } else if word {
                 (word_left(text, pos), pos)
+            } else if pos > 0
+                && pos < text.len_chars()
+                && closer_of(text.char(pos - 1)) == Some(text.char(pos))
+            {
+                // Backspace inside an empty pair removes both brackets.
+                (pos - 1, pos + 1)
             } else {
                 // Backspace in leading whitespace removes back to the previous tab stop.
                 let line_start = text.line_to_char(text.char_to_line(pos));
@@ -882,6 +928,19 @@ pub fn word_left(t: RopeSlice, mut pos: usize) -> usize {
     pos
 }
 
+fn closer_of(c: char) -> Option<char> {
+    match c {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        _ => None,
+    }
+}
+
+fn is_closer(c: char) -> bool {
+    matches!(c, ')' | ']' | '}')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,6 +986,63 @@ mod tests {
         d.newline();
         d.type_char('x');
         assert_eq!(d.text, "def f():\n    x");
+    }
+
+    fn typed(start: &str, at: usize, keys: &str) -> (String, usize) {
+        let mut d = doc(start);
+        d.set_cursor(at, false);
+        for c in keys.chars() {
+            d.type_char(c);
+        }
+        (d.text.to_string(), d.selection.primary().head)
+    }
+
+    #[test]
+    fn brackets_close_and_type_over() {
+        assert_eq!(typed("", 0, "["), ("[]".into(), 1));
+        assert_eq!(typed("", 0, "f(x)"), ("f(x)".into(), 4));
+        assert_eq!(typed("", 0, "{[(1)]}"), ("{[(1)]}".into(), 7));
+        assert_eq!(typed("a = \n", 4, "("), ("a = ()\n".into(), 5));
+        // Before a word: no closer.
+        assert_eq!(typed("x", 0, "("), ("(x".into(), 1));
+        // A closer with nothing to type over is inserted.
+        assert_eq!(typed("a", 1, ")"), ("a)".into(), 2));
+        assert_eq!(typed("(]", 1, ")"), ("()]".into(), 2));
+    }
+
+    #[test]
+    fn bracket_replaces_selection() {
+        let mut d = doc("hello");
+        d.set_cursor(0, false);
+        d.move_word(true, true);
+        d.type_char('[');
+        assert_eq!(d.text, "[");
+    }
+
+    #[test]
+    fn backspace_deletes_empty_pair() {
+        let mut d = doc("");
+        d.type_char('(');
+        d.delete_backward();
+        assert_eq!(d.text, "");
+        let mut d = doc("(x)");
+        d.set_cursor(2, false);
+        d.delete_backward();
+        assert_eq!(d.text, "()");
+    }
+
+    #[test]
+    fn brackets_with_many_cursors() {
+        let mut d = doc("a\nb\n");
+        d.selection = Selection::new([Range::point(1), Range::point(3)].into_iter().collect(), 0);
+        d.type_char('[');
+        assert_eq!(d.text, "a[]\nb[]\n");
+        d.type_char(']');
+        assert_eq!(d.text, "a[]\nb[]\n");
+        let heads: Vec<usize> = d.selection.ranges().iter().map(|r| r.head).collect();
+        assert_eq!(heads, vec![3, 7]);
+        d.undo();
+        assert_eq!(d.text, "a\nb\n");
     }
 
     #[test]
