@@ -14,6 +14,7 @@
 use super::act::Act;
 use super::ink::{self, Ink};
 use super::caret::next_char;
+use super::select::{plain_block, Blocks};
 use super::{compose, wait, Chat, Effort, Msg, Session, Side, Step, Turn, Who, TRANSCRIPT_ID};
 use crate::app::plan::{self, Outcome, PlanMsg};
 use crate::app::{async_sleep, App, Focus, Message};
@@ -1547,6 +1548,11 @@ impl App {
         let settings = markdown::Settings::with_text_size(size, style);
 
         let mut feed = column![].spacing(10).padding(Padding { left: 14.0, right: 16.0, top: 10.0, bottom: 10.0 });
+        // The text that can be selected, noted afresh as it is drawn (see `select`).
+        ai.feed_sel.forget_blocks();
+        let shown = ai.feed_sel.of(&self.ai_feed_owner()).is_some();
+        // Selected text in the user's bubble, which is already the selection's colour.
+        let bubble_sel = Color { a: 0.45, ..accent };
         let dropdown = ai.picking || ai.setup.is_some();
         if ai.turns.is_empty() && !dropdown {
             feed = feed.push(text(self.ai_intro()).size(12).color(dim));
@@ -1640,7 +1646,8 @@ impl App {
                 }
                 (Who::Mail, _) => {
                     let accent = th.accent;
-                    let card = container(with_copy(text(t.text.as_str()).size(12).color(fg).into(), i, true))
+                    let blocks = Blocks::new(&ai.feed_sel, shown, i, sel_bg);
+                    let card = container(with_copy(plain_block(&blocks, &t.text, 12.0, fg, Length::Shrink), i, true))
                         .padding([4, 10])
                         .width(Length::Fill)
                         .style(move |_| container::Style { border: Border { color: accent, width: 1.0, radius: 3.0.into() }, ..Default::default() });
@@ -1648,9 +1655,11 @@ impl App {
                 }
                 (Who::Done, _) => {
                     let mut card = column![text("Finished").size(12).color(OK)].spacing(4);
+                    let blocks = Blocks::new(&ai.feed_sel, shown, i, sel_bg);
                     for line in t.text.lines() {
                         let (head, rest) = line.split_once(": ").unwrap_or(("", line));
-                        card = card.push(rich_text![span::<(), Font>(format!("{head}  ")).color(OK).font(Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT }), span(rest.to_string()).color(fg)].size(12));
+                        let line = [Span::new(format!("{head}  ")).color(OK).font(Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT }), Span::new(rest.to_string()).color(fg)];
+                        card = card.push(blocks.block(&line, true).size(12.0));
                     }
                     let card = container(with_copy(card.into(), i, true)).padding([8, 10]).width(Length::Fill).style(move |_| container::Style {
                         background: Some(Color { a: 0.10, ..OK }.into()),
@@ -1661,7 +1670,8 @@ impl App {
                 }
                 (Who::Note, _) | (Who::Step, None) => container(text(t.text.as_str()).size(11).color(dim)).center_x(Length::Fill).into(),
                 (Who::User, _) => {
-                    let bubble = container(with_copy(text(t.text.as_str()).size(size).color(fg).into(), i, false)).padding([6, 10]).style(move |_| container::Style {
+                    let blocks = Blocks::new(&ai.feed_sel, shown, i, bubble_sel);
+                    let bubble = container(with_copy(plain_block(&blocks, &t.text, size, fg, Length::Shrink), i, false)).padding([6, 10]).style(move |_| container::Style {
                         background: Some(sel_bg.into()),
                         border: Border { radius: 6.0.into(), ..Default::default() },
                         ..Default::default()
@@ -1675,6 +1685,7 @@ impl App {
                         color: fg,
                         math: Some(&t.math),
                         images: Some((&t.images, self.ai.image_zoom_delay)),
+                        blocks: Some(Blocks::new(&ai.feed_sel, shown, i, sel_bg)),
                     };
                     // Outlined, on the feed's own background: the reply stands apart from the steps
                     // around it without competing with the user's filled bubble.

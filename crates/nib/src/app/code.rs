@@ -653,7 +653,7 @@ impl App {
         style.inline_code_font = self.face.font;
         style.code_block_font = self.face.font;
         let settings = markdown::Settings::with_text_size(self.face.size.min(14.0), style);
-        let viewer = MarkdownViewer { font: self.face.font, size: self.face.size, color: th.foreground, math: None, images: None };
+        let viewer = MarkdownViewer { font: self.face.font, size: self.face.size, color: th.foreground, math: None, images: None, blocks: None };
         let body = markdown::view_with(s.content.items(), settings, &viewer);
         let (panel, border, fg) = (th.panel, th.divider, th.foreground);
 
@@ -769,6 +769,8 @@ pub(super) struct MarkdownViewer<'m> {
     /// Pictures that have arrived (the AI panel), by URL, and how long the mouse rests on one
     /// before it is shown bigger. A click opens one in a tab.
     pub images: Option<(&'m HashMap<String, Option<PreviewImage>>, Duration)>,
+    /// The chat's text, selectable with the mouse (see `ai::select`); `None`: plain text.
+    pub blocks: Option<super::ai::select::Blocks<'m>>,
 }
 
 /// The tallest a picture in a reply is drawn; a click shows it whole.
@@ -780,8 +782,47 @@ impl<'a> markdown::Viewer<'a, Message> for MarkdownViewer<'a> {
     }
 
     fn paragraph(&self, settings: markdown::Settings, text: &markdown::Text) -> Element<'a, Message> {
-        math::rich(&text.spans(settings.style), self.math, settings.text_size.0, self.color, Self::on_link_click)
-            .unwrap_or_else(|| markdown::paragraph(settings, text, Self::on_link_click))
+        let spans = text.spans(settings.style);
+        let with_math = math::rich(&spans, self.math, settings.text_size.0, self.color, Self::on_link_click);
+        match (&self.blocks, with_math) {
+            (Some(b), Some(m)) => {
+                b.unselectable(crate::selectable::plain(&spans));
+                m
+            }
+            (None, Some(m)) => m,
+            (Some(b), None) => b.block(&spans, false).size(settings.text_size.0).into(),
+            (None, None) => markdown::paragraph(settings, text, Self::on_link_click),
+        }
+    }
+
+    fn heading(&self, settings: markdown::Settings, level: &'a markdown::HeadingLevel, text: &'a markdown::Text, index: usize) -> Element<'a, Message> {
+        let Some(b) = &self.blocks else { return markdown::heading(settings, level, text, index, Self::on_link_click) };
+        use markdown::HeadingLevel as H;
+        let size = match level {
+            H::H1 => settings.h1_size,
+            H::H2 => settings.h2_size,
+            H::H3 => settings.h3_size,
+            H::H4 => settings.h4_size,
+            H::H5 => settings.h5_size,
+            H::H6 => settings.h6_size,
+        };
+        // As iced's own heading: a little room above, but not at the very top.
+        let top = if index > 0 { settings.text_size.0 / 2.0 } else { 0.0 };
+        container(b.block(&text.spans(settings.style), false).size(size.0)).padding(iced::Padding { top, ..iced::Padding::ZERO }).into()
+    }
+
+    fn unordered_list(&self, settings: markdown::Settings, bullets: &'a [markdown::Bullet]) -> Element<'a, Message> {
+        self.blocks.as_ref().inspect(|b| b.list_start());
+        let list = markdown::unordered_list(self, settings, bullets);
+        self.blocks.as_ref().inspect(|b| b.list_end());
+        list
+    }
+
+    fn ordered_list(&self, settings: markdown::Settings, start: u64, bullets: &'a [markdown::Bullet]) -> Element<'a, Message> {
+        self.blocks.as_ref().inspect(|b| b.list_start());
+        let list = markdown::ordered_list(self, settings, start, bullets);
+        self.blocks.as_ref().inspect(|b| b.list_end());
+        list
     }
 
     fn image(
@@ -818,7 +859,11 @@ impl<'a> markdown::Viewer<'a, Message> for MarkdownViewer<'a> {
         code: &'a str,
         _lines: &'a [markdown::Text],
     ) -> Element<'a, Message> {
-        let body = text(code.trim_end_matches('\n')).font(self.font).size(self.size).color(self.color);
+        let code = code.trim_end_matches('\n');
+        let body: Element<'a, Message> = match &self.blocks {
+            Some(b) => b.block(&[iced::widget::text::Span::new(code.to_string())], false).font(self.font).size(self.size).color(self.color).into(),
+            None => text(code).font(self.font).size(self.size).color(self.color).into(),
+        };
         container(body).padding(settings.spacing.0 / 2.0).width(Length::Fill).into()
     }
 }

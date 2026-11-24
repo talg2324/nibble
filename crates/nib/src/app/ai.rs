@@ -20,6 +20,7 @@ mod follow;
 mod history;
 mod ink;
 mod question;
+pub(in crate::app) mod select;
 mod stage;
 mod wait;
 
@@ -500,6 +501,8 @@ pub struct Panel {
     image_zoom_delay: std::time::Duration,
     /// nib's and the user's skills, on this machine.
     local_skills: Vec<nib_proto::AiSkill>,
+    /// Text selected with the mouse in the shown chat (see `select`).
+    pub(in crate::app) feed_sel: select::FeedSel,
 }
 
 impl Default for Panel {
@@ -547,6 +550,7 @@ impl Default for Panel {
             cloud_models: false,
             image_zoom_delay: zoom_delay(nib_editor::config::default_image_zoom_delay()),
             local_skills: Vec::new(),
+            feed_sel: Default::default(),
         }
     }
 }
@@ -854,9 +858,16 @@ pub enum Msg {
     /// The copy button of turn `i` of the shown agent: its text to the clipboard (a reply as
     /// the markdown it was written in).
     CopyTurn(usize),
+    /// The mouse on text in the chat (block `Key`, see `select`): a press, a drag, a release.
+    Sel(select::Key, select::SelEv),
 }
 
 impl App {
+    /// The feed shown, for a selection in it (see `select`).
+    fn ai_feed_owner(&self) -> select::Owner {
+        (self.ai.key, self.ai.thread.clone())
+    }
+
     pub(super) fn ai_tabs_seen(&self) -> (usize, usize, Option<u64>) {
         self.ai.tabs_seen
     }
@@ -1244,6 +1255,8 @@ impl App {
             Msg::Delete(model) => return self.ai_delete(model),
             Msg::Registry => super::viewers::open_external(OLLAMA_REGISTRY),
             Msg::Focus => {
+                // A click beside the chat's text lets go of what was selected there.
+                self.ai.feed_sel.clear();
                 if self.focus != Focus::Ai {
                     self.ai.return_to = Some(self.focus).filter(|f| !matches!(f, Focus::Ai | Focus::Toolbar));
                     self.focus = Focus::Ai;
@@ -1366,6 +1379,15 @@ impl App {
                 if !self.ai.unfolded.remove(&id) {
                     self.ai.unfolded.insert(id);
                 }
+            }
+            Msg::Sel(key, ev) => {
+                if matches!(ev, select::SelEv::Press(..)) && self.focus != Focus::Ai {
+                    // The press doesn't reach the panel's own (it's the text's): take the keys here.
+                    self.ai.return_to = Some(self.focus).filter(|f| !matches!(f, Focus::Ai | Focus::Toolbar));
+                    self.focus = Focus::Ai;
+                }
+                let owner = self.ai_feed_owner();
+                self.ai.feed_sel.on(owner, key, ev);
             }
             Msg::CopyTurn(i) => {
                 let Some(t) = self.ai.turns.get(i) else { return Task::none() };
@@ -2579,6 +2601,7 @@ impl App {
         match chord.key {
             // A selection first: Esc only lets go of it.
             Key::Esc if self.ai.selection().is_some() => self.ai.anchor = None,
+            Key::Esc if self.ai.feed_sel.of(&self.ai_feed_owner()).is_some_and(select::FeedSel::is_some) => self.ai.feed_sel.clear(),
             // Waiting for leave: Esc on an empty box says no (with words typed, Enter says no
             // with them, and Esc keeps them), Enter on an empty box says yes.
             Key::Esc if self.ai.ask.is_some() && self.ai.input.trim().is_empty() => self.ai_answer(false, None),
@@ -2650,7 +2673,11 @@ impl App {
                 }
                 match cmd {
                     Some(Command::SelectAll) => self.ai.select_all(),
-                    Some(Command::Copy) => return self.ai.selected().map_or_else(Task::none, |t| iced::clipboard::write(t.to_string())),
+                    // What's selected in the message box, else in the chat.
+                    Some(Command::Copy) => {
+                        let t = self.ai.selected().map(str::to_string).or_else(|| self.ai.feed_sel.of(&self.ai_feed_owner()).and_then(select::FeedSel::text));
+                        return t.map_or_else(Task::none, iced::clipboard::write);
+                    }
                     Some(Command::Cut) => {
                         let Some(t) = self.ai.selected().map(str::to_string) else { return Task::none() };
                         self.ai.delete_selection();
@@ -3386,6 +3413,32 @@ mod tests {
         assert!(a.flash.is_none(), "no such turn: nothing happens");
         let _ = a.update(Message::Ai(Msg::CopyTurn(0)));
         assert_eq!(a.flash.as_ref().map(|f| f.0.as_str()), Some("copied"));
+    }
+
+    #[test]
+    fn text_dragged_over_in_the_chat_is_what_copy_takes() {
+        use iced::advanced::mouse::click::Kind;
+        use select::SelEv;
+        let mut a = chatting();
+        say(&mut a, "fix the build");
+        event(&mut a, 7, AiEvent::Text("The **linker** fails.\n\n- one\n- two".into()));
+        event(&mut a, 7, AiEvent::TurnDone { error: None });
+        let reply = a.ai.turns.iter().position(|t| t.who == Who::Assistant).expect("a reply") as u32;
+        // Drawing the chat notes what each piece of text says.
+        drop(a.view());
+        let sel = |a: &mut App, key: select::Key, ev: SelEv| drop(a.update(Message::Ai(Msg::Sel(key, ev))));
+        sel(&mut a, (0, 0), SelEv::Press(8, Kind::Single));
+        sel(&mut a, (reply, 2), SelEv::Drag(2));
+        sel(&mut a, (reply, 2), SelEv::Release);
+        let copied = a.ai.feed_sel.of(&a.ai_feed_owner()).and_then(select::FeedSel::text);
+        assert_eq!(copied.as_deref(), Some("build\n\nThe linker fails.\n\none\ntw"));
+        sel(&mut a, (reply, 0), SelEv::Press(6, Kind::Double));
+        assert_eq!(a.ai.feed_sel.text().as_deref(), Some("linker"));
+        key(&mut a, "esc");
+        assert!(!a.ai.feed_sel.is_some(), "Esc lets go of it");
+        sel(&mut a, (reply, 0), SelEv::Press(0, Kind::Triple));
+        let _ = a.update(Message::Ai(Msg::Focus));
+        assert!(!a.ai.feed_sel.is_some(), "a click beside the text too");
     }
 
     #[test]

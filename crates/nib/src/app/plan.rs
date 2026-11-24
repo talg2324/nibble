@@ -403,7 +403,7 @@ impl Look {
 /// what it publishes.
 pub fn view<'a>(plan: &'a Plan, look: &Look, live: bool, on: impl Fn(PlanMsg) -> Message + Copy + 'a) -> Element<'a, Message> {
     let c = look.comment;
-    let viewer = MarkdownViewer { font: look.mono, size: c.size + 1.0, color: c.fg, math: None, images: None };
+    let viewer = MarkdownViewer { font: look.mono, size: c.size + 1.0, color: c.fg, math: None, images: None, blocks: None };
     let draft = plan.comments.draft.as_ref().filter(|_| live);
     let sel = plan.sel.filter(|_| live).map(|(a, b)| (a.min(b), a.max(b)));
     let mut col = column![];

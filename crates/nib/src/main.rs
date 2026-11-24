@@ -23,6 +23,7 @@ mod math;
 mod media;
 mod pdf;
 mod preview;
+mod selectable;
 mod ssh;
 mod table;
 mod table_view;
