@@ -7,7 +7,9 @@
 #               it; `NIB_VERSION=vX.Y-rc.N` asks for it by name.
 #   vX.Y        on the commit of a published rc: *promotes* it. No build: the rc's archives, renamed
 #               to vX.Y, become the release, marked latest. With no rc on its commit: a full build.
-#               Either way the smoke test runs again, through `releases/latest`.
+#               Either way the smoke test runs again, through `releases/latest`, and checks what the
+#               installer prints too (check marks, provenance, no menu with --yes, no garbling;
+#               on Windows in Windows PowerShell 5.1, the one every Windows has).
 #
 #   git tag v0.4-rc.1 && git push origin v0.4-rc.1    (smoke red: fix on main, tag v0.4-rc.2)
 #   git tag v0.4 v0.4-rc.1 && git push origin v0.4
@@ -337,12 +339,19 @@ jobs:
       - uses: actions/checkout@v5
       - name: install, version, grammar
         if: runner.os != 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}   # so the installer checks provenance with gh, where it has gh
         run: |
           if [[ "$PRE" == true ]]; then
             curl -fsSL "$REL/install.sh" | NIB_VERSION="$TAG" bash -s -- --yes --remotes
             export NIB_GRAMMARS_URL="$REL"
           else
-            curl -fsSL "$LATEST/install.sh" | bash -s -- --yes --remotes
+            # A release: what the installer says is checked as well.
+            said="$(curl -fsSL "$LATEST/install.sh" | bash -s -- --yes --remotes 2>&1)" || { echo "$said"; exit 1; }
+            echo "$said"
+            grep -q '✓' <<< "$said" || { echo "::error::no check marks in the installer's output"; exit 1; }
+            grep -qE 'Provenance|provenance:? not checked' <<< "$said" || { echo "::error::the installer did not mention provenance"; exit 1; }
+            if grep -q 'toggle' <<< "$said"; then echo "::error::--yes showed the keys for a choice it does not offer"; exit 1; fi
           fi
           N="$HOME/.local/lib/nib/nib"
           "$N" --version
@@ -376,17 +385,34 @@ jobs:
               fi
               NIB="$HOME/.local/lib/nib/nib" NIB_E2E_OUTSIDE=outside.test scripts/test/e2e.sh'
           fi
-      - name: install, version, grammar, headless edit (Windows)
+      # In Windows PowerShell 5.1, which every Windows has: GitHub serves install.ps1 with no
+      # charset, and 5.1's irm then reads it as Latin-1 (pwsh 7 reads UTF-8 and would hide that).
+      - name: install (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}   # so the installer checks provenance with gh
+        run: |
+          # 'Stop' on purpose: the installer has to work for users who set it in their profile.
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) { throw "expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)" }
+          if ($env:PRE -eq 'true') {
+            & ([scriptblock]::Create((irm "$env:REL/install.ps1"))) -Yes -Remotes -Version $env:TAG
+          } else {
+            # A release: what the installer says is checked as well.
+            $said = & ([scriptblock]::Create((irm "$env:LATEST/install.ps1"))) -Yes -Remotes 6>&1 | Out-String
+            $said
+            if ($said -notmatch [char]0x2713) { throw "no check marks in the installer's output" }
+            if ($said -match "$([char]0xE2)|$([char]0xC2)") { throw "garbled characters in the installer's output" }
+            if ($said -cnotmatch 'Provenance|provenance:? not checked') { throw 'the installer did not mention provenance' }
+            if ($said -match 'toggle') { throw '-Yes showed the keys for a choice it does not offer' }
+          }
+      - name: version, grammar, headless edit (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:PRE -eq 'true') {
-            & ([scriptblock]::Create((irm "$env:REL/install.ps1"))) -Yes -Remotes -Version $env:TAG
-            $env:NIB_GRAMMARS_URL = $env:REL
-          } else {
-            & ([scriptblock]::Create((irm "$env:LATEST/install.ps1"))) -Yes -Remotes
-          }
+          if ($env:PRE -eq 'true') { $env:NIB_GRAMMARS_URL = $env:REL }
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\nib'
           $N = Join-Path $dir 'nib.exe'
           if (-not (Test-Path $N)) { throw 'the installer did not install nib.exe' }
