@@ -417,7 +417,7 @@ impl App {
                 Key::Esc => return self.ssh_answer(false),
                 Key::Char('y') if matches!(a.kind, AskKind::Confirm) && plain => return self.ssh_answer(true),
                 Key::Char('n') if matches!(a.kind, AskKind::Confirm) && plain => return self.ssh_answer(false),
-                _ if paste => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
+                _ if paste => return crate::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
                 _ if matches!(a.kind, AskKind::Secret) => drop(a.input.key(&chord, text.as_deref())),
                 _ => {}
             }
@@ -454,7 +454,7 @@ impl App {
             Key::Delete if plain && matches!(cur, Row::Root(..)) => return self.ssh_ask_forget(cur),
             Key::Char('d') if plain && matches!(cur, Row::Root(..)) => return self.ssh_ask_forget(cur),
             Key::Char('e') if plain && matches!(cur, Row::Root(..) | Row::Alias(_)) => return self.ssh_edit_start(cur),
-            _ if paste => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
+            _ if paste => return crate::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
             // Typing anywhere goes into the box (and filters the list).
             _ => {
                 let edit = self.ssh.input.key(&chord, text.as_deref());
@@ -776,7 +776,7 @@ impl App {
             // Back to the tree, the root as it was.
             Key::Esc => self.ssh.browse = None,
             Key::Backspace if b.filter.is_empty() => return self.ssh_browse_up(),
-            _ if paste => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
+            _ if paste => return crate::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
             _ => {
                 let edit = b.filter.key(&chord, text.as_deref());
                 if edit.changed() {
@@ -938,7 +938,7 @@ impl App {
             Key::Enter | Key::Down => e.sel = (e.sel + 1).min(last),
             Key::Tab if !chord.shift => e.sel = (e.sel + 1).min(last),
             Key::Up | Key::Tab => e.sel = e.sel.saturating_sub(1),
-            _ if cmd == Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
+            _ if cmd == Some(Command::Paste) => return crate::clipboard::read().map(|s| Message::Ssh(Msg::Pasted(s))),
             _ => {
                 if e.fields[e.sel].key(&chord, text.as_deref()).changed() {
                     e.error = None;

@@ -355,7 +355,7 @@ impl App {
                 }
                 if !edit.handled() && cmd {
                     match self.keymap.lookup(&chord) {
-                        Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Search(Msg::Pasted(s))),
+                        Some(Command::Paste) => return crate::clipboard::read().map(|s| Message::Search(Msg::Pasted(s))),
                         Some(Command::SelectAll) => {}
                         Some(Command::Find) => return self.search_toggle_scope(),
                         Some(c) => {

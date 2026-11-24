@@ -533,7 +533,7 @@ impl App {
             Key::Esc if cur == Row::Address && !self.apps.address.is_empty() => self.apps.address.clear(),
             Key::Esc => self.apps_close(),
             _ if cur == Row::Address => match chord.key {
-                _ if paste => return iced::clipboard::read().map(|s| Message::Apps(Msg::Pasted(s))),
+                _ if paste => return crate::clipboard::read().map(|s| Message::Apps(Msg::Pasted(s))),
                 _ => drop(self.apps.address.key(&chord, text.as_deref())),
             },
             Key::Right | Key::Left | Key::Char(' ') if plain && app.is_some() => {
@@ -576,7 +576,7 @@ impl App {
             Key::Down | Key::Tab => f.sel = (f.sel + 1).min(n - 1),
             Key::Enter if f.sel + 1 == n => return self.apps_save(),
             Key::Enter => f.sel += 1,
-            _ if paste => return iced::clipboard::read().map(|s| Message::Apps(Msg::Pasted(s))),
+            _ if paste => return crate::clipboard::read().map(|s| Message::Apps(Msg::Pasted(s))),
             _ => {
                 let sel = f.sel;
                 if let Some(v) = f.field_mut(sel) {

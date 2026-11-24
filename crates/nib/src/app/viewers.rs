@@ -476,17 +476,51 @@ impl Tab {
     }
 }
 
+/// Open `url` in the system's browser (or whatever the system opens it with), on this
+/// machine. Off the UI thread; a failure is said in the window's message line.
 pub(super) fn open_external(url: &str) {
-    let mut cmd = if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
-    } else if cfg!(target_os = "windows") {
-        let mut c = std::process::Command::new("rundll32");
-        c.arg("url.dll,FileProtocolHandler");
-        c
-    } else {
-        std::process::Command::new("xdg-open")
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = launch(&url) {
+            crate::control::log("warn", &format!("opening {url}: {e}"));
+            crate::forward::note(format!("could not open {url}: {e}"), true);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn launch(url: &str) -> Result<(), String> {
+    let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let status = std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if status.success() { Ok(()) } else { Err(format!("{program} failed ({status})")) }
+}
+
+/// The shell's own "open", as Explorer does it: `rundll32 url.dll,FileProtocolHandler`, which
+/// this replaced, loses long URLs with query strings (a login link) without a word.
+#[cfg(windows)]
+fn launch(url: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (verb, file) = (wide("open"), wide(url));
+    // Some URL handlers are COM objects: the shell asks for this before ShellExecute.
+    // SAFETY: plain Win32 calls with NUL-terminated wide strings that outlive them.
+    let r = unsafe {
+        CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
+        ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
     };
-    let _ = cmd.arg(url).spawn();
+    // Above 32 is success; anything else is an error code.
+    match r as isize {
+        n if n > 32 => Ok(()),
+        n => Err(format!("Windows could not open it (ShellExecute error {n})")),
+    }
 }
 
 impl App {

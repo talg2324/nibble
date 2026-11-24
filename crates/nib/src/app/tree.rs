@@ -1011,7 +1011,7 @@ impl App {
             match chord.key {
                 Key::Esc => self.tree.input = None,
                 Key::Enter => return self.tree_input_done(),
-                _ if cmd == Some(Command::Paste) => return iced::clipboard::read().map(|s| Message::Tree(Msg::Pasted(s))),
+                _ if cmd == Some(Command::Paste) => return crate::clipboard::read().map(|s| Message::Tree(Msg::Pasted(s))),
                 _ => drop(input.text_mut().key(&chord, text.as_deref())),
             }
             return Task::none();

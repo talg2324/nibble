@@ -21,6 +21,8 @@ pub enum TermEvent {
     OpenUrl(String),
     /// Text was selected with the mouse, first and last cell (both in); `None`: unselected.
     Select(Option<(Cell, Cell)>),
+    /// The right button (off macOS): copy the selection, or paste when there is none.
+    RightClick,
 }
 
 /// `(a, b)` in reading order.
@@ -325,6 +327,9 @@ where
                     Some(l) => shell.publish((self.on_event)(TermEvent::OpenUrl(l.url))),
                     None => {
                         shell.publish((self.on_event)(TermEvent::Focus));
+                        if *button == mouse::Button::Right && !cfg!(target_os = "macos") {
+                            shell.publish((self.on_event)(TermEvent::RightClick));
+                        }
                         if left {
                             // A press starts a selection (and drops the last one).
                             if self.selection.is_some() {

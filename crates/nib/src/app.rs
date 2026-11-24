@@ -1545,6 +1545,10 @@ impl App {
             // the keyboard (a remote shell has none).
             TermEvent::OpenUrl(url) => self.open_link(&url),
             TermEvent::Select(sel) => t.sel = sel,
+            // As in Windows Terminal and PuTTY.
+            TermEvent::RightClick => {
+                return if t.sel.is_some() { self.term_copy(true) } else { self.term_paste() };
+            }
             TermEvent::Scroll(lines) => {
                 // The selection is of the rows that were shown.
                 t.sel = None;
@@ -1563,6 +1567,24 @@ impl App {
         Task::none()
     }
 
+    /// Copy the focused terminal's selection; `unselect`: and let it go (Ctrl+C and the right
+    /// button do, so that the next Ctrl+C interrupts again).
+    fn term_copy(&mut self, unselect: bool) -> Task<Message> {
+        let text = self.focused_term().and_then(|t| Some(crate::terminal_view::selected_text(t.parser.screen(), t.sel?)));
+        let Some(s) = text else { return self.flash_info("nothing selected: drag over the text to copy") };
+        if unselect {
+            let k = self.focus;
+            if let Some(t) = self.terms.iter_mut().find(|t| Focus::Terminal(t.key) == k) {
+                t.sel = None;
+            }
+        }
+        Task::batch([crate::clipboard::write(s), self.flash_info("copied")])
+    }
+
+    fn term_paste(&mut self) -> Task<Message> {
+        crate::clipboard::read().map(Message::PastedTerm)
+    }
+
     /// Keys while the terminal has focus: app shortcuts stay with the app (Cmd on macOS,
     /// Ctrl+Shift elsewhere, Ctrl+`/Ctrl+Tab everywhere); everything else goes to the shell.
     fn terminal_key(&mut self, chord: KeyChord, text: Option<String>) -> Option<Task<Message>> {
@@ -1573,16 +1595,21 @@ impl App {
         // Ctrl+C and Ctrl+V are the shell's.
         let mac = cfg!(target_os = "macos");
         let other = |c: char| !mac && chord.ctrl && chord.shift && !chord.alt && chord.key == Key::Char(c);
+        // And as in Windows Terminal: Ctrl+C copies when there is a selection (else it is the
+        // shell's interrupt), Ctrl+V pastes.
+        let plain = |c: char| !mac && chord.ctrl && !chord.shift && !chord.alt && !chord.logo && chord.key == Key::Char(c);
+        if plain('c') && self.focused_term().is_some_and(|t| t.sel.is_some()) {
+            return Some(self.term_copy(true));
+        }
+        if plain('v') {
+            return Some(self.term_paste());
+        }
         if app_chord && (cmd == Some(Command::Copy) && mac || other('c')) {
-            let text = self.focused_term().and_then(|t| Some(crate::terminal_view::selected_text(t.parser.screen(), t.sel?)));
-            return Some(match text {
-                Some(s) => Task::batch([iced::clipboard::write(s), self.flash_info("copied")]),
-                None => self.flash_info("nothing selected: drag over the text to copy"),
-            });
+            return Some(self.term_copy(false));
         }
         if app_chord || always_app {
             if cmd == Some(Command::Paste) && mac || other('v') {
-                return Some(iced::clipboard::read().map(Message::PastedTerm));
+                return Some(self.term_paste());
             }
             match cmd {
                 // Only what works from anywhere leaves the terminal: an editing command (delete
@@ -1895,7 +1922,7 @@ impl App {
                 return Task::none();
             }
             TogglePreview => return self.toggle_preview(),
-            Paste => return iced::clipboard::read().map(Message::Pasted),
+            Paste => return crate::clipboard::read().map(Message::Pasted),
             NavigateBack | NavigateForward => return self.navigate(c == NavigateForward),
             GoToDefinition | FindReferences | RenameSymbol | ChangeAllOccurrences if self.editing() => {
                 return self.code_command(c);
@@ -1927,8 +1954,8 @@ impl App {
                     task = self.flash_info("nothing to redo");
                 }
             }
-            Copy => task = iced::clipboard::write(doc.copy_text().0),
-            Cut => task = iced::clipboard::write(doc.cut()),
+            Copy => task = crate::clipboard::write(doc.copy_text().0),
+            Cut => task = crate::clipboard::write(doc.cut()),
             SelectAll => doc.select_all(),
             Indent => doc.indent(),
             Dedent => doc.dedent(),
@@ -2735,6 +2762,38 @@ mod tests {
         // Typing (or scrolling) leaves the selection behind.
         let _ = a.update(Message::Key { chord: chord("x"), text: Some("x".into()), repeat: false });
         assert!(a.terms[0].sel.is_none());
+    }
+
+    #[test]
+    fn the_right_button_copies_a_terminal_selection_and_lets_it_go() {
+        let mut a = with_terms(1);
+        let key = a.terms[0].key;
+        a.terms[0].parser.process(b"hello world");
+        let _ = a.update(Message::Term(key, TermEvent::Select(Some(((0, 0), (0, 4))))));
+        let _ = a.update(Message::Term(key, TermEvent::RightClick));
+        assert!(a.flash.as_ref().is_some_and(|f| f.0 == "copied"));
+        assert!(a.terms[0].sel.is_none(), "the next right click pastes");
+    }
+
+    /// Ctrl+C and Ctrl+V as in Windows Terminal (off macOS, where they are Cmd+C / Cmd+V).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ctrl_c_copies_a_terminal_selection_and_interrupts_without_one() {
+        let mut a = app();
+        // Its pty not answered yet: what the shell would get stays in `queued`.
+        tap(&mut a, "ctrl+shift+`");
+        let key = a.terms[0].key;
+        a.terms[0].parser.process(b"hello world");
+        let _ = a.update(Message::Term(key, TermEvent::Select(Some(((0, 0), (0, 4))))));
+        down(&mut a, "ctrl+c");
+        assert!(a.flash.as_ref().is_some_and(|f| f.0 == "copied"));
+        assert!(a.terms[0].queued.is_empty(), "the copy did not reach the shell");
+        assert!(a.terms[0].sel.is_none());
+        down(&mut a, "ctrl+c");
+        assert_eq!(a.terms[0].queued, b"\x03", "no selection: the shell's interrupt");
+        // Ctrl+V pastes: nothing typed into the shell.
+        down(&mut a, "ctrl+v");
+        assert_eq!(a.terms[0].queued, b"\x03");
     }
 
     #[test]

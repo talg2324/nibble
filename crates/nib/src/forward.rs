@@ -309,7 +309,7 @@ pub fn port_of(url: &str) -> Option<u16> {
     }
 }
 
-fn with_port(url: &str, port: u16) -> Option<String> {
+pub fn with_port(url: &str, port: u16) -> Option<String> {
     let (scheme, rest) = url.split_once("://")?;
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..end];

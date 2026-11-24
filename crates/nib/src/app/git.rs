@@ -331,7 +331,7 @@ impl App {
                     return self.git_run(Action::Commit, GitOp::Commit { message });
                 }
                 _ if self.keymap.lookup(&chord) == Some(Command::Paste) => {
-                    return iced::clipboard::read().map(|s| Message::Git(Msg::Pasted(s)));
+                    return crate::clipboard::read().map(|s| Message::Git(Msg::Pasted(s)));
                 }
                 _ => drop(m.key(&chord, text.as_deref())),
             }

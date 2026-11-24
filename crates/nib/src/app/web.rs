@@ -329,7 +329,7 @@ impl App {
             }
         }
         if let Some(text) = told.copied {
-            tasks.push(iced::clipboard::write(text));
+            tasks.push(crate::clipboard::write(text));
         }
         if let Some(p) = web::take_picture() {
             // Shown only once the renderer has it: a picture it is still loading is drawn as
@@ -395,7 +395,7 @@ impl App {
                 web::tab(TabJob::Copy { page, cut: true });
                 return Some(Task::none());
             }
-            Some(Command::Paste) => return Some(iced::clipboard::read().map(|t| Message::Web(Msg::Pasted(t)))),
+            Some(Command::Paste) => return Some(crate::clipboard::read().map(|t| Message::Web(Msg::Pasted(t)))),
             _ => {}
         }
         let key = match chord.key {

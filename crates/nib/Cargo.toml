@@ -56,7 +56,8 @@ libc = "0.2"
 # AF_UNIX sockets on Windows 10 1803+ (std has them on Unix only): the control socket.
 uds_windows = "1"
 # Letting go of the console window when started from Explorer (main.rs). Already in the tree.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+# And the shell's "open" for links (app/viewers.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(windows)'.build-dependencies]
 # Builds nib.rc into nib.exe: the icon Explorer and the taskbar show (build.rs).

@@ -6,6 +6,7 @@
 mod ai_cli;
 mod app;
 mod app_bundle;
+mod clipboard;
 mod color_picker;
 mod control;
 mod diff_view;

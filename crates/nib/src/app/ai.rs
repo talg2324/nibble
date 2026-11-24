@@ -369,6 +369,10 @@ pub enum Clip {
 
 /// Text if the clipboard has any, else a picture (a screenshot, a copied image).
 fn read_clipboard() -> Clip {
+    // WSL: Windows' clipboard, which WSLg does not reliably pass over (`crate::clipboard`).
+    if let Some(t) = crate::clipboard::windows_text().filter(|t| !t.is_empty()) {
+        return Clip::Text(t);
+    }
     let Ok(mut c) = arboard::Clipboard::new() else { return Clip::Nothing };
     if let Ok(t) = c.get_text() {
         if !t.is_empty() {
@@ -393,9 +397,7 @@ fn paste() -> Task<Message> {
 /// as PNG bytes on its stdout (about a second: PowerShell is slow to start). `None` off WSL, or
 /// when the Windows clipboard holds no picture.
 fn windows_clipboard_image() -> Option<Pic> {
-    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
-        || std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|r| r.to_ascii_lowercase().contains("microsoft"));
-    if !wsl {
+    if !crate::clipboard::is_wsl() {
         return None;
     }
     const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
@@ -1391,7 +1393,7 @@ impl App {
             }
             Msg::CopyTurn(i) => {
                 let Some(t) = self.ai.turns.get(i) else { return Task::none() };
-                return Task::batch([iced::clipboard::write(t.text.clone()), self.flash_info("copied")]);
+                return Task::batch([crate::clipboard::write(t.text.clone()), self.flash_info("copied")]);
             }
             Msg::HistoryClose => self.ai_history_close(),
             Msg::HistoryMail(on) => {
@@ -2676,12 +2678,12 @@ impl App {
                     // What's selected in the message box, else in the chat.
                     Some(Command::Copy) => {
                         let t = self.ai.selected().map(str::to_string).or_else(|| self.ai.feed_sel.of(&self.ai_feed_owner()).and_then(select::FeedSel::text));
-                        return t.map_or_else(Task::none, iced::clipboard::write);
+                        return t.map_or_else(Task::none, crate::clipboard::write);
                     }
                     Some(Command::Cut) => {
                         let Some(t) = self.ai.selected().map(str::to_string) else { return Task::none() };
                         self.ai.delete_selection();
-                        return iced::clipboard::write(t);
+                        return crate::clipboard::write(t);
                     }
                     Some(Command::Paste) => return paste(),
                     Some(c) if super::app_wide(c) => return self.exec(c),

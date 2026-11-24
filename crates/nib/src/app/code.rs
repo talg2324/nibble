@@ -570,7 +570,7 @@ impl App {
             Key::Esc => self.code.rename = None,
             Key::Enter => return self.rename_submit(),
             _ if cmd == Some(Command::SelectAll) => r.fresh = true,
-            _ if cmd == Some(Command::Paste) => return iced::clipboard::read().map(Message::Pasted),
+            _ if cmd == Some(Command::Paste) => return crate::clipboard::read().map(Message::Pasted),
             // The old name is selected: deleting takes all of it, a move lets go of the selection.
             Key::Backspace | Key::Delete if r.fresh => {
                 r.text.clear();

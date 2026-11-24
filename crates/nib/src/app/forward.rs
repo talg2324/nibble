@@ -37,8 +37,23 @@ impl App {
     /// system's browser on the machine at the keyboard (a person's click may open it).
     pub(super) fn open_link(&mut self, url: &str) {
         let spelled = local::spell_out(url);
-        if local::is_local(&spelled) && !self.headless && !crate::web::state()["browser"].is_null() {
-            self.web_open(Call::internal(json!({ "cmd": "web.open", "url": url })));
+        let local = local::is_local(&spelled);
+        if local && !self.headless && !crate::web::state()["browser"].is_null() {
+            // What goes wrong (the forward, the browser, nothing listening) is said, not lost.
+            let shown = url.to_string();
+            self.web_open(Call::then(json!({ "cmd": "web.open", "url": url }), move |v| {
+                if v["ok"] != true {
+                    let why = v["error"].as_str().unwrap_or("no answer").to_string();
+                    forward::note(format!("could not open {shown}: {why}"), true);
+                }
+            }));
+        } else if let (true, Some(via), Some(port)) = (local, self.forward_via(), forward::port_of(&spelled)) {
+            // No browser nib can drive, and the page is another machine's: forwarded first, or
+            // the system's browser would ask this machine's port for it.
+            std::thread::spawn(move || match forward::add(&via.host, &via.label, port, Why::Asked, true) {
+                Ok(m) => viewers::open_external(&forward::with_port(&spelled, m.local).unwrap_or(spelled)),
+                Err(e) => forward::note(format!("could not open {spelled}: {e}"), true),
+            });
         } else if url.contains("://") {
             viewers::open_external(url);
         } else {
