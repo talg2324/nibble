@@ -2107,9 +2107,15 @@ impl App {
             nib_editor::document::char_at_visual_col(t, line, col, doc.tab_width)
         };
         match ev {
-            ViewEvent::Click { line, col, extend, .. } => {
+            ViewEvent::Click { line, col, extend, double, .. } => {
                 let p = to_pos(line, col);
-                doc.set_cursor(p, extend);
+                match doc.word_at(p).filter(|_| double) {
+                    Some((a, b)) => {
+                        doc.set_cursor(a, false);
+                        doc.set_cursor(b, true);
+                    }
+                    None => doc.set_cursor(p, extend),
+                }
             }
             ViewEvent::Drag { line, col } => {
                 let p = to_pos(line, col);

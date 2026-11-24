@@ -331,6 +331,8 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
             ("cmd+shift+up", SelectDocStart),
             ("cmd+shift+down", SelectDocEnd),
             ("alt+backspace", DeleteWordBackward),
+            // The Mac's Delete key is Backspace.
+            ("cmd+shift+backspace", DeleteLine),
             ("ctrl+cmd+f", ToggleFullscreen),
             ("cmd+.", StopAgent),
             // Elsewhere Ctrl+B is the file browser (mod+b): Ctrl+` then B does this on every OS.
@@ -352,6 +354,7 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
             ("ctrl+shift+home", SelectDocStart),
             ("ctrl+shift+end", SelectDocEnd),
             ("ctrl+backspace", DeleteWordBackward),
+            ("ctrl+shift+delete", DeleteLine),
             ("f11", ToggleFullscreen),
             // Ctrl+. is Panic.
             ("ctrl+shift+.", StopAgent),
@@ -536,6 +539,12 @@ mod tests {
     fn bind_unbind_reset() {
         let mut km = Keymap::default();
         let dl = KeyChord::parse("mod+shift+k").unwrap();
+        let dl2 = KeyChord::parse(if cfg!(target_os = "macos") {
+            "cmd+shift+backspace"
+        } else {
+            "ctrl+shift+delete"
+        })
+        .unwrap();
         let new = KeyChord::parse("mod+d").unwrap();
         assert!(!km.is_customized(Command::DeleteLine));
         // Stealing Save's chord reports the previous owner.
@@ -547,11 +556,12 @@ mod tests {
 
         km.bind(new, Command::DeleteLine);
         km.unbind(dl);
+        km.unbind(dl2);
         assert_eq!(km.bindings_for(Command::DeleteLine), vec![(new, Origin::User)]);
-        assert_eq!(km.overrides_for_config().len(), 2);
+        assert_eq!(km.overrides_for_config().len(), 3);
         // Re-binding a default chord to its default command is not an override.
         km.bind(dl, Command::DeleteLine);
-        assert_eq!(km.overrides_for_config().len(), 1);
+        assert_eq!(km.overrides_for_config().len(), 2);
         km.reset(Command::DeleteLine);
         assert!(!km.is_customized(Command::DeleteLine));
         assert!(km.overrides_for_config().is_empty());

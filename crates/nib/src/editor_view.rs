@@ -18,6 +18,7 @@ use nib_editor::document::{char_width, line_end};
 use nib_editor::Document;
 
 use crate::theme::Theme;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ViewEvent {
@@ -28,6 +29,8 @@ pub enum ViewEvent {
         extend: bool,
         /// Cmd-click (Ctrl elsewhere): go to the definition.
         jump: bool,
+        /// The second press of a double click: select the word there.
+        double: bool,
     },
     Drag {
         line: usize,
@@ -143,7 +146,12 @@ struct State {
     last_size: (usize, usize),
     /// The cell under the mouse last reported with `Hover`.
     hover: Option<(usize, usize)>,
+    /// When and where the last left press was (for double clicks).
+    last_press: Option<(Instant, (usize, usize))>,
 }
+
+/// Two presses on one cell within this are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 fn gutter_cols(doc: &Document) -> usize {
     doc.text.len_lines().to_string().len() + 3
@@ -231,13 +239,22 @@ where
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(p) = cursor.position_over(bounds) {
                     let (line, col) = to_doc(p, st);
-                    st.dragging = !st.command;
+                    let now = Instant::now();
+                    let double = !st.shift
+                        && !st.command
+                        && st.last_press.is_some_and(|(t, at)| {
+                            at == (line, col) && now.duration_since(t) < DOUBLE_CLICK
+                        });
+                    // A third press starts over rather than counting as another double click.
+                    st.last_press = (!double).then_some((now, (line, col)));
+                    st.dragging = !st.command && !double;
                     st.hover = None;
                     shell.publish((self.on_event)(ViewEvent::Click {
                         line,
                         col,
                         extend: st.shift,
                         jump: st.command,
+                        double,
                     }));
                     shell.capture_event();
                 }
