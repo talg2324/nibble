@@ -1064,7 +1064,17 @@ impl App {
         let plain = !held && !chord.alt;
         let empty = self.ai.input.is_empty() && self.ai.images.is_empty();
         let command = self.keymap.lookup(&chord);
+        let replied = !self.ai.input.trim().is_empty();
         let p = self.ai.asked_plan_mut()?;
+        // ⌘↵ (Ctrl+↵ elsewhere), nib's "send": the plan goes back with the comment being written
+        // and the reply typed, whatever is picked or open. It never approves.
+        let send = if cfg!(target_os = "macos") { chord.logo && !chord.ctrl } else { chord.ctrl };
+        if send && chord.key == Key::Enter && !chord.alt && !chord.shift {
+            if p.has_feedback() || replied {
+                return Some(self.ai_revise());
+            }
+            return Some(self.flash_info("nothing to send back: ↑↓ and ↵ comment on rows, or type a reply; ↵ approves"));
+        }
         let vertical = match chord.key {
             Key::Up => Some(-1),
             Key::Down => Some(1),
@@ -3872,6 +3882,19 @@ mod tests {
         assert!(told.contains("On lines 3–5:\n> Why: slow.\n>\n> 1. Add a cache\nwhy a cache?\nmeasure first"), "{told}");
         assert_eq!(a.ai.plans["t4"].outcome, Some(Outcome::Revise));
         assert_eq!(a.ai.turns.last().map(|t| t.text.as_str()), Some("Sent the plan back with 1 comment."));
+        // E: ⌘↵ sends it back straight from a comment being written; with nothing to send it
+        // does nothing (it never approves).
+        let send = if cfg!(target_os = "macos") { "cmd+enter" } else { "ctrl+enter" };
+        ask_plan(&mut a, 5);
+        key(&mut a, send);
+        assert!(a.ai.ask.is_some() && a.ai.plans["t5"].outcome.is_none(), "⌘↵ with nothing to send leaves the plan waiting");
+        key(&mut a, "down");
+        key(&mut a, "enter");
+        type_str(&mut a, "why?");
+        key(&mut a, send);
+        let told = a.ai.told.clone().unwrap();
+        assert!(told.contains("On line 1:") && told.contains("why?"), "{told}");
+        assert_eq!(a.ai.plans["t5"].outcome, Some(Outcome::Revise));
     }
 
     #[test]
