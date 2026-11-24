@@ -3,8 +3,9 @@
 //! what it does can be shown, reviewed and landed like a pull request.
 //!
 //! Like the mailbox it is this same binary run as a plain command (`nibd work …`), so it works
-//! with every assistant and over SSH. What it records is kept in the session's mailbox folder
-//! (`work/<agent>.json`, `work/<agent>.plan.md`); a letter to `nib` tells the daemon to read it
+//! with every assistant and over SSH. What it records is kept in the agent's own part of the
+//! session's mailbox folder (`mail::own`: `work/<agent>.json`, `work/<agent>.plan.md`), which
+//! no other agent is given to write; a letter to `nib` tells the daemon to read it
 //! again, and the daemon tells the client (`AiEvent::Work`).
 
 use crate::mail::{self, Report};
@@ -27,12 +28,17 @@ pub struct Record {
     pub dir: PathBuf,
 }
 
+/// Where what is kept for `agent` is: in its own part of the mailbox.
+pub(crate) fn kept_dir(mailbox: &Path, agent: &str) -> PathBuf {
+    mail::own(mailbox, agent).join("work")
+}
+
 fn record_file(mailbox: &Path, agent: &str) -> PathBuf {
-    mailbox.join("work").join(format!("{agent}.json"))
+    kept_dir(mailbox, agent).join(format!("{agent}.json"))
 }
 
 fn plan_file(mailbox: &Path, agent: &str) -> PathBuf {
-    mailbox.join("work").join(format!("{agent}.plan.md"))
+    kept_dir(mailbox, agent).join(format!("{agent}.plan.md"))
 }
 
 /// The branch of the agent with mailbox id `agent`, if it started one.
@@ -47,7 +53,7 @@ pub fn plan(mailbox: &Path, agent: &str) -> Option<String> {
 
 /// Record `text` as the agent's plan (also done for it when it asks approval for one).
 pub fn set_plan(mailbox: &Path, agent: &str, text: &str) -> std::io::Result<()> {
-    fs::create_dir_all(mailbox.join("work"))?;
+    fs::create_dir_all(kept_dir(mailbox, agent))?;
     // Read by the window at any moment: never half there.
     crate::fs_ops::write_whole(&plan_file(mailbox, agent), text)
 }
@@ -63,7 +69,7 @@ pub fn persist(mailbox: &Path, agent: &str, store: &Path, key: &str) {
         return;
     }
     for ext in KEPT {
-        let (here, there) = (mailbox.join("work").join(format!("{agent}.{ext}")), store.join(format!("{key}.{ext}")));
+        let (here, there) = (kept_dir(mailbox, agent).join(format!("{agent}.{ext}")), store.join(format!("{key}.{ext}")));
         if here.is_file() {
             let _ = fs::copy(&here, &there);
         } else {
@@ -75,11 +81,11 @@ pub fn persist(mailbox: &Path, agent: &str, store: &Path, key: &str) {
 /// Bring back what `persist` kept under `key`, for `agent` of this session. A branch whose
 /// work tree is no longer there is not brought back.
 pub fn restore(mailbox: &Path, agent: &str, store: &Path, key: &str) {
-    if key.is_empty() || fs::create_dir_all(mailbox.join("work")).is_err() {
+    if key.is_empty() || fs::create_dir_all(kept_dir(mailbox, agent)).is_err() {
         return;
     }
     for ext in KEPT {
-        let (here, there) = (mailbox.join("work").join(format!("{agent}.{ext}")), store.join(format!("{key}.{ext}")));
+        let (here, there) = (kept_dir(mailbox, agent).join(format!("{agent}.{ext}")), store.join(format!("{key}.{ext}")));
         if there.is_file() {
             let _ = fs::copy(&there, &here);
         }
@@ -109,8 +115,19 @@ pub fn state(mailbox: &Path, agent: &str) -> AiWork {
 /// Land `agent`'s branch on its base, checked out at `root`: everything it did as one commit
 /// with `message`, then its work tree, branch and record are removed. `Err`: why not; nothing
 /// was changed (what the agent had not committed is committed on its branch, that is all).
-pub fn land(mailbox: &Path, agent: &str, root: &Path, message: &str) -> Result<String, String> {
+///
+/// The record is the agent's own to write, so it is not believed: only a branch of nib's
+/// naming (`nib/…`) is merged and deleted, and only a real folder directly inside `trees`
+/// (`$NIBDIR/worktrees`) is taken for its work tree, which is removed at the end.
+pub fn land(mailbox: &Path, agent: &str, root: &Path, trees: &Path, message: &str) -> Result<String, String> {
     let rec = record(mailbox, agent).ok_or("this agent has no branch to land")?;
+    if !rec.branch.starts_with("nib/") {
+        return Err(format!("not landed: {:?} is not a branch nib-work made (they are named nib/…)", rec.branch));
+    }
+    let inside = rec.tree.parent().is_some_and(|p| canonical_near(p) == canonical_near(trees));
+    if !inside || !fs::symlink_metadata(&rec.tree).is_ok_and(|m| m.is_dir()) || !rec.dir.starts_with(&rec.tree) {
+        return Err(format!("not landed: {} is not a work tree nib-work made in {}", rec.tree.display(), trees.display()));
+    }
     let on = git(root, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
     if on != rec.base {
         let on = if on.is_empty() { "no branch (detached HEAD)".to_string() } else { on };
@@ -393,8 +410,8 @@ fn carry(ctx: &Ctx, rec: &Record) -> Result<String, String> {
         let mut args = vec!["diff", "--binary", "HEAD", "--"];
         args.extend(tracked.iter().map(|f| f.as_str()));
         let patch = git_raw(root, &args)?;
-        let file = ctx.mailbox.join("work").join(format!("{}.carry.patch", ctx.agent));
-        fs::create_dir_all(ctx.mailbox.join("work")).map_err(|e| e.to_string())?;
+        let file = kept_dir(&ctx.mailbox, &ctx.agent).join(format!("{}.carry.patch", ctx.agent));
+        fs::create_dir_all(kept_dir(&ctx.mailbox, &ctx.agent)).map_err(|e| e.to_string())?;
         fs::write(&file, patch).map_err(|e| e.to_string())?;
         let applied = git(&rec.tree, &["apply", "--3way", &file.to_string_lossy()]);
         let _ = fs::remove_file(&file);
@@ -527,7 +544,7 @@ fn start(ctx: &Ctx, name: &str, fix: bool) -> Result<Record, String> {
     let tree = nib_proto::path::canonical(&tree).unwrap_or(tree);
     let dir = if prefix.is_empty() { tree.clone() } else { tree.join(prefix.trim_end_matches('/')) };
     let rec = Record { branch, base, tree, dir };
-    fs::create_dir_all(ctx.mailbox.join("work")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(kept_dir(&ctx.mailbox, &ctx.agent)).map_err(|e| e.to_string())?;
     crate::fs_ops::write_whole(&record_file(&ctx.mailbox, &ctx.agent), serde_json::to_vec_pretty(&rec).unwrap_or_default()).map_err(|e| e.to_string())?;
     Ok(rec)
 }
@@ -554,7 +571,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let (repo, mailbox, nibdir) = (dir.join("repo"), dir.join("mailbox"), dir.join("nibdir"));
         fs::create_dir_all(repo.join("app")).unwrap();
-        fs::create_dir_all(mailbox.join("outbox")).unwrap();
+        mail::make_own(&mailbox, "claude-1").unwrap();
         if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
             return; // no git on this machine
         }
@@ -568,6 +585,7 @@ mod tests {
         git(&repo, &["commit", "-q", "-m", "first"]).unwrap();
         let root = repo.join("app");
         let ctx = Ctx { mailbox: mailbox.clone(), agent: "claude-1".into(), root: root.clone(), nibdir };
+        let trees = ctx.nibdir.join("worktrees");
         let go = |args: &[&str]| run(&ctx, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), || Ok("# Plan\n1. do it\n".to_string()));
         let done = || mail::run_in(&mailbox, "claude-1", Some(&root), &["done", "--asked", "a sum", "--did", "added it"].map(String::from));
         let guard_on = |path: &Path| {
@@ -631,7 +649,7 @@ mod tests {
         assert_eq!(done().1, 0);
         let f: nib_proto::AiFinished = serde_json::from_str(&mail::collect(&mailbox).last().unwrap().text).unwrap();
         assert!(f.stray.is_empty());
-        land(&mailbox, "claude-1", &root, "Add sum").unwrap();
+        land(&mailbox, "claude-1", &root, &trees, "Add sum").unwrap();
         assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "one\nmore\n");
         assert_eq!(git(&repo, &["log", "--format=%s", "-1"]).unwrap(), "Add sum");
         let _ = fs::remove_dir_all(&dir);
@@ -643,7 +661,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let (repo, mailbox, nibdir) = (dir.join("repo"), dir.join("mailbox"), dir.join("nibdir"));
         fs::create_dir_all(repo.join("app")).unwrap();
-        fs::create_dir_all(mailbox.join("outbox")).unwrap();
+        mail::make_own(&mailbox, "claude-1").unwrap();
         if git(&repo, &["init", "-q", "-b", "trunk"]).is_err() {
             return; // no git on this machine
         }
@@ -656,6 +674,7 @@ mod tests {
         git(&repo, &["commit", "-q", "-m", "first"]).unwrap();
         // The project root is a folder of the repository.
         let ctx = Ctx { mailbox: mailbox.clone(), agent: "claude-1".into(), root: repo.join("app"), nibdir };
+        let trees = ctx.nibdir.join("worktrees");
         let go = |args: &[&str]| run(&ctx, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), || Ok("# Plan\n1. do it\n".to_string()));
 
         assert_eq!(go(&["status"]).1, 0);
@@ -701,14 +720,14 @@ mod tests {
         // Something staged in the project: refused, and nothing changed.
         fs::write(repo.join("app/b.txt"), "two!\n").unwrap();
         git(&repo, &["add", "-A"]).unwrap();
-        let e = land(&mailbox, "claude-1", &ctx.root, "Add sum").unwrap_err();
+        let e = land(&mailbox, "claude-1", &ctx.root, &trees, "Add sum").unwrap_err();
         assert!(e.contains("staged"), "{e}");
         git(&repo, &["restore", "--staged", "."]).unwrap();
         // A conflict with what the base did meanwhile: refused, the project as it was.
         git(&repo, &["checkout", "-q", "--", "."]).unwrap();
         fs::write(repo.join("app/a.txt"), "one\nother\n").unwrap();
         git(&repo, &["commit", "-q", "-am", "third"]).unwrap();
-        assert!(land(&mailbox, "claude-1", &ctx.root, "Add sum").is_err());
+        assert!(land(&mailbox, "claude-1", &ctx.root, &trees, "Add sum").is_err());
         assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "");
         assert_eq!(fs::read_to_string(repo.join("app/a.txt")).unwrap(), "one\nother\n");
         assert!(record(&mailbox, "claude-1").is_some());
@@ -718,7 +737,7 @@ mod tests {
         git(&rec.tree, &["commit", "-q", "-am", "merged"]).unwrap();
         // The user's own unstaged change elsewhere stays theirs.
         fs::write(repo.join("app/b.txt"), "mine\n").unwrap();
-        let out = land(&mailbox, "claude-1", &ctx.root, "Add sum\n\nAsked: a sum").unwrap();
+        let out = land(&mailbox, "claude-1", &ctx.root, &trees, "Add sum\n\nAsked: a sum").unwrap();
         assert!(out.contains("Add sum") && out.contains("landed nib/feat/add-sum on trunk"), "{out}");
         assert_eq!(git(&repo, &["log", "--format=%s", "-2"]).unwrap(), "Add sum\nthird");
         assert_eq!(fs::read_to_string(repo.join("app/a.txt")).unwrap(), "one\nother\nmore\n");
@@ -737,7 +756,7 @@ mod tests {
         }
         assert!(gone(), "the landed work tree was deleted");
         assert!(git(&repo, &["rev-parse", "--verify", "-q", "refs/heads/nib/feat/add-sum"]).is_err());
-        assert!(land(&mailbox, "claude-1", &ctx.root, "again").is_err());
+        assert!(land(&mailbox, "claude-1", &ctx.root, &trees, "again").is_err());
         // Landed: nothing is kept any more, and a branch whose work tree is gone stays gone.
         restore(&later, "claude-6", &store, "conv-7");
         assert!(record(&later, "claude-6").is_none(), "its work tree was removed");
@@ -769,6 +788,7 @@ mod tests {
         git(&repo, &["add", "-A"]).unwrap();
         git(&repo, &["commit", "-q", "-m", "first"]).unwrap();
         let ctx = Ctx { mailbox: mailbox.clone(), agent: "codex-1".into(), root: repo.clone(), nibdir };
+        let trees = ctx.nibdir.join("worktrees");
         let go = |args: &[&str]| run(&ctx, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), || Ok("# Plan\n".to_string()));
         assert_eq!(go(&["plan", "-"]).1, 0);
         assert_eq!(go(&["start", "pinned"]).1, 0);
@@ -794,7 +814,30 @@ mod tests {
         fs::write(rec.tree.join(".git"), format!("gitdir: {}\n", fake_admin.display())).unwrap();
         fs::write(real_admin.join("commondir"), format!("{}\n", fake.display())).unwrap();
 
-        let out = land(&mailbox, "codex-1", &repo, "The agent's work");
+        // Its record is its own to write too. One that names a folder nib-work did not make as
+        // its work tree (landing removes the work tree), or a branch that is not nib's (landing
+        // merges and deletes the branch), lands nothing and removes nothing.
+        let precious = dir.join("precious");
+        fs::create_dir_all(&precious).unwrap();
+        fs::write(precious.join("thesis.txt"), "years\n").unwrap();
+        git(&repo, &["branch", "keep-me"]).unwrap();
+        let honest = fs::read(record_file(&mailbox, "codex-1")).unwrap();
+        std::os::unix::fs::symlink(&precious, trees.join("linked")).unwrap();
+        let forged = [
+            Record { tree: precious.clone(), dir: precious.clone(), ..rec.clone() },
+            Record { tree: trees.join("linked"), dir: trees.join("linked"), ..rec.clone() },
+            Record { dir: precious.clone(), ..rec.clone() },
+            Record { branch: "keep-me".into(), ..rec.clone() },
+        ];
+        for f in &forged {
+            fs::write(record_file(&mailbox, "codex-1"), serde_json::to_vec(f).unwrap()).unwrap();
+            let e = land(&mailbox, "codex-1", &repo, &trees, "forged").unwrap_err();
+            assert!(e.starts_with("not landed"), "{e}");
+        }
+        assert!(precious.join("thesis.txt").is_file() && git(&repo, &["rev-parse", "--verify", "-q", "keep-me"]).is_ok() && !repo.join("b.txt").exists());
+        fs::write(record_file(&mailbox, "codex-1"), honest).unwrap();
+
+        let out = land(&mailbox, "codex-1", &repo, &trees, "The agent's work");
         let ran: Vec<String> = fs::read_dir(&marks).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         let landed = fs::read_to_string(repo.join("b.txt")).ok();
         let _ = fs::remove_dir_all(&dir);

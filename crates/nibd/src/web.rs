@@ -37,14 +37,14 @@ pub struct Relay {
     dir: PathBuf,
     tx: Sender<ServerMsg>,
     /// Requests passed to the window: the file its answer goes to, and since when.
-    waiting: HashMap<u64, (String, Instant)>,
+    waiting: HashMap<u64, (PathBuf, String, Instant)>,
     next: u64,
 }
 
 /// The relay for the session whose mailbox folder is `mailbox`, and the thread that looks
 /// for requests for as long as it is kept.
 pub fn new(mailbox: &Path, tx: Sender<ServerMsg>) -> Shared {
-    let shared = Arc::new(Mutex::new(Relay { dir: mailbox.join("web"), tx, waiting: HashMap::new(), next: 1 }));
+    let shared = Arc::new(Mutex::new(Relay { dir: mailbox.to_path_buf(), tx, waiting: HashMap::new(), next: 1 }));
     let weak = Arc::downgrade(&shared);
     thread::spawn(move || {
         let mut busy_until = Instant::now();
@@ -63,12 +63,15 @@ pub fn new(mailbox: &Path, tx: Sender<ServerMsg>) -> Shared {
 impl Relay {
     /// Pass the requests agents left to the window, oldest first. How many there were.
     fn pick_up(&mut self) -> usize {
-        let taken = crate::rpc::take(&self.dir);
+        let taken = crate::rpc::take_all(&self.dir, "web");
         let n = taken.len();
-        for (name, mut req) in taken {
-            // Only an agent nib started asks (its token says so), and the window never sees it.
+        for mut asked in taken {
+            let (dir, name) = (asked.dir.clone(), asked.name.clone());
+            let mut req = asked.req.take();
+            // Only an agent nib started asks, from its own folder (its token says so), and the
+            // window never sees the token.
             let token = req.as_mut().and_then(Value::as_object_mut).and_then(|o| o.remove("token"));
-            let agent = token.as_ref().and_then(Value::as_str).and_then(crate::tokens::who);
+            let agent = token.as_ref().and_then(Value::as_str).and_then(|t| asked.asker(t));
             // Whatever wrote the file: only what an agent may ask goes to the window.
             let refused = match &req {
                 _ if agent.is_none() && req.is_some() => Some("refused: the request does not come from an agent nib started (no valid $NIB_TOKEN)".to_string()),
@@ -76,12 +79,18 @@ impl Relay {
                 None => Some("not a request".to_string()),
             };
             if let Some(why) = refused {
-                crate::rpc::answer(&self.dir, &name, &json!({ "ok": false, "error": why }).to_string());
+                crate::rpc::answer(&dir, &name, &json!({ "ok": false, "error": why }).to_string());
                 continue;
+            }
+            // A picture is asked for as its bytes, whatever wrote the request: `nib-web` writes
+            // it here, where the agent is. The window writes no file of an agent's naming.
+            if let Some(o) = req.as_mut().and_then(Value::as_object_mut).filter(|o| o.get("cmd").and_then(Value::as_str) == Some("web.shot")) {
+                o.remove("path");
+                o.insert("inline".into(), json!(true));
             }
             let id = self.next;
             self.next += 1;
-            self.waiting.insert(id, (name, Instant::now()));
+            self.waiting.insert(id, (dir, name, Instant::now()));
             let _ = self.tx.send(ServerMsg::Notify(ServerNotify::Web { id, req: req.unwrap_or_default().to_string() }));
         }
         n
@@ -89,12 +98,12 @@ impl Relay {
 
     /// The window answered request `id`.
     pub fn reply(&mut self, id: u64, reply: &str) {
-        if let Some((name, _)) = self.waiting.remove(&id) {
-            crate::rpc::answer(&self.dir, &name, reply);
+        if let Some((dir, name, _)) = self.waiting.remove(&id) {
+            crate::rpc::answer(&dir, &name, reply);
         }
         // What nobody came for (an agent that gave up, or was stopped).
-        self.waiting.retain(|_, (_, since)| since.elapsed() < crate::rpc::KEEP);
-        crate::rpc::sweep(&self.dir);
+        self.waiting.retain(|_, (_, _, since)| since.elapsed() < crate::rpc::KEEP);
+        crate::rpc::sweep_all(&self.dir, "web");
     }
 }
 
@@ -226,7 +235,7 @@ pub fn cli(args: &[String]) -> i32 {
     }
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let Some(dir) = crate::cli::rpc_dir("web") else {
-        eprintln!("nib-web: only works inside an agent that nib started (NIB_MAILBOX is not set)");
+        eprintln!("nib-web: only works inside an agent that nib started (NIB_MAILBOX and NIB_AGENT are not set, or name no folder of this agent's own)");
         return 2;
     };
     let reply = match prepare(&words) {
@@ -307,17 +316,23 @@ mod tests {
                 window.lock().unwrap().reply(id, &json!({ "ok": true, "echo": req }).to_string());
             }
         });
-        let dir = d.join("web");
+        let dir = crate::mail::make_own(&d, "claude-web-relay-test").unwrap().join("web");
         let token = crate::tokens::issue("claude-web-relay-test");
         let (req, _) = prepare(&["click", "4"]).unwrap();
         assert_eq!(ask(&dir, &token, &req), json!({ "ok": true, "echo": { "cmd": "web.click", "ref": "4" } }));
         // Several at once each get their own answer.
         let asked: Vec<_> = (0..8).map(|n| (n, dir.clone())).map(|(n, dir)| (n, dir, token.clone())).map(|(n, dir, token)| thread::spawn(move || ask(&dir, &token, &json!({ "cmd": "web.fill", "ref": n }))["echo"]["ref"].clone())).collect();
         assert_eq!(asked.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>(), (0..8).map(|n| json!(n)).collect::<Vec<_>>());
+        // A picture asked for with a file's name on the window's machine goes on as its bytes.
+        let raw = json!({ "cmd": "web.shot", "path": "/Users/ada/.ssh/authorized_keys", "token": token });
+        let v = crate::rpc::ask(&dir, &raw.to_string(), Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(v["echo"], json!({ "cmd": "web.shot", "inline": true }));
         // A file that is not what `nib-web` writes never reaches the window: what an agent may
         // not ask, even with its token; anything without an agent's token; not a request at all.
         let with = |cmd: &str| json!({ "cmd": cmd, "js": "1", "token": token }).to_string();
-        let bad = [with("web.eval"), with("run"), json!({ "cmd": "web.click", "ref": "4" }).to_string(), json!({ "cmd": "web.click", "ref": "4", "token": "0".repeat(32) }).to_string(), "[]".into(), "junk".into()];
+        // Nor with the token of another agent, left in a folder that is not that agent's.
+        let theirs = crate::tokens::issue("codex-web-relay-test-other");
+        let bad = [with("web.eval"), with("run"), json!({ "cmd": "web.click", "ref": "4" }).to_string(), json!({ "cmd": "web.click", "ref": "4", "token": "0".repeat(32) }).to_string(), json!({ "cmd": "web.click", "ref": "4", "token": theirs }).to_string(), "[]".into(), "junk".into()];
         for (n, bad) in bad.iter().enumerate() {
             fs::write(dir.join("req").join(format!("bad{n}.json")), bad).unwrap();
         }

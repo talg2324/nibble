@@ -345,6 +345,13 @@ pub fn profile_host(name: &str) -> Result<SshHost, String> {
     }
 }
 
+/// The saved connection `asked` names (`PROFILE:PORT`), when that is how [`open`] would take
+/// it: not an address of this machine.
+pub fn names_profile(asked: &str) -> Option<&str> {
+    let local = local::is_local(&local::spell_out(asked));
+    profile_port(asked).filter(|_| !local).map(|(name, _, _)| name)
+}
+
 /// What `asked` (a port, an address, `PROFILE:PORT`) needs before the web tab can show it.
 enum Route {
     /// Nothing: the engine takes it as it is (and refuses what is not this machine).

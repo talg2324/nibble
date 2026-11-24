@@ -350,8 +350,9 @@ impl State {
             // Asks the assistant whether it is signed in first, which takes a moment.
             let (ai, tx) = (self.ai.clone(), self.tx.clone());
             let (scratch, nibdir) = (self.places.as_ref().map(|p| p.scratch.clone()), self.places.as_ref().map(|p| p.nibdir.clone()));
+            let private = self.places.as_ref().and_then(|p| p.private.clone());
             return self.later(id, move || {
-                ai::open(&ai, replace, agent, model, ai::Tuning { effort, prompt }, tools, mode, resume.as_deref(), &root, ai::Dirs { scratch: scratch.as_deref(), nibdir: nibdir.as_deref() }, tx).map(|id| Response::AiOpened { id })
+                ai::open(&ai, replace, agent, model, ai::Tuning { effort, prompt }, tools, mode, resume.as_deref(), &root, ai::Dirs { scratch: scratch.as_deref(), nibdir: nibdir.as_deref(), private: private.as_deref() }, tx).map(|id| Response::AiOpened { id })
             });
         }
         if let Request::AiWarm { model, warm, gpu } = req {
@@ -511,7 +512,8 @@ impl State {
                 };
                 self.lsp = Some(lsp);
                 let (nibdir, scratch) = (self.places.as_ref().map(|p| p.nibdir.as_path()), self.places.as_ref().map(|p| p.scratch.as_path()));
-                self.serve = Some(serve::new(&root, nibdir, scratch, &mail::path(scratch), self.ptys.clone(), self.tx.clone()));
+                let approvals = self.places.as_ref().and_then(|p| p.private.as_ref()).map(|d| d.join("approvals.json"));
+                self.serve = Some(serve::new(&root, nibdir, approvals, scratch, &mail::path(scratch), self.ptys.clone(), self.tx.clone()));
                 self.web = Some(web::new(&mail::path(scratch), self.tx.clone()));
                 self.root = Some(root);
                 Ok(resp)

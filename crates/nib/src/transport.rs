@@ -213,6 +213,9 @@ impl Launch {
     }
 }
 
+/// How much a remote may print before nibd's handshake (a shell's greeting, a banner).
+const HANDSHAKE_NOISE: usize = 64 * 1024;
+
 fn launch(mut cmd: Command, label: String) -> Result<Launch> {
     no_console_window(&mut cmd);
     cmd.stdin(Stdio::piped())
@@ -252,6 +255,11 @@ fn launch(mut cmd: Command, label: String) -> Result<Launch> {
         if line.ends_with(MAGIC) {
             break;
         }
+        // The limit holds within a line too: output with no newline in it is not kept for ever.
+        if noise.len() + line.len() > HANDSHAKE_NOISE {
+            let _ = child.kill();
+            bail!("{label}: no nibd handshake in 64 KiB of output");
+        }
         if byte[0] == b'\n' {
             let s = String::from_utf8_lossy(&line).trim().to_string();
             if let Some(rest) = s.strip_prefix(NEED_UPLOAD_MARKER) {
@@ -260,7 +268,8 @@ fn launch(mut cmd: Command, label: String) -> Result<Launch> {
             }
             noise.extend_from_slice(&line);
             line.clear();
-            if noise.len() > 64 * 1024 {
+            if noise.len() > HANDSHAKE_NOISE {
+                let _ = child.kill();
                 bail!("{label}: no nibd handshake in 64 KiB of output");
             }
         }
@@ -438,6 +447,8 @@ fn daemons_dirs() -> Vec<PathBuf> {
         v.push(PathBuf::from(d));
     }
     if let Some(h) = std::env::var_os("HOME") {
+        // Where the installer puts them, and where installers before v0.4 did.
+        v.push(PathBuf::from(&h).join(".local/lib/nib/daemons"));
         v.push(PathBuf::from(h).join(".local/share/nib/daemons"));
     }
     if let Ok(exe) = crate::app_bundle::exe() {
@@ -479,6 +490,11 @@ const SKILLS_ONLY: &str = "+skills ";
 
 /// Bootstrap snippet. Must not contain single quotes (see `Remote::sh`). `skills`: the hash of
 /// the skills to hand nibd (`None`: this nib has none).
+///
+/// The cached nibd is run only if it still is the file its name says (`same`: its SHA-256
+/// starts with the hash in its name, the first 8 bytes); one that was changed where it lies is
+/// uploaded again, over it. A remote with neither `sha256sum` nor `shasum` runs it by its name
+/// alone, as before.
 fn bootstrap_script(hashes: &[(&str, String)], skills: Option<&str>) -> String {
     let mut cases = String::new();
     for (uname, hash) in hashes {
@@ -488,7 +504,10 @@ fn bootstrap_script(hashes: &[(&str, String)], skills: Option<&str>) -> String {
     format!(
         "d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/nib\"; u=\"$(uname -sm)\"; h=; s={skills}; \
          case \"$u\" in {cases}esac; \
-         if [ -n \"$h\" ] && [ -x \"$d/nibd-$h\" ]; then \
+         same() {{ if command -v sha256sum >/dev/null 2>&1; then g=$(sha256sum \"$1\"); \
+           elif command -v shasum >/dev/null 2>&1; then g=$(shasum -a 256 \"$1\"); else return 0; fi; \
+           case \"$g\" in \"$h\"*) return 0;; esac; return 1; }}; \
+         if [ -n \"$h\" ] && [ -x \"$d/nibd-$h\" ] && same \"$d/nibd-$h\"; then \
            if [ -z \"$s\" ] || [ -d \"$d/skills-$s\" ]; then \
              [ -z \"$s\" ] || export NIB_SKILLS=\"$d/skills-$s\"; exec \"$d/nibd-$h\" --stdio; \
            fi; \
@@ -770,6 +789,22 @@ mod tests {
         assert!(s.contains("\"Linux x86_64\") h=abcd;;"));
     }
 
+    /// A remote that prints and prints and never says nibd's handshake, with or without ends
+    /// of lines, is given up after 64 KiB: what it sends is not kept without limit.
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_that_never_shakes_hands_is_given_up() {
+        for flood in ["yes", "yes | tr -d \"\\n\""] {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(flood);
+            let started = std::time::Instant::now();
+            let Err(e) = launch(cmd, format!("nib-test-flood-{}", std::process::id())) else { panic!("{flood}: connected") };
+            assert!(e.to_string().contains("no nibd handshake in 64 KiB"), "{flood}: {e:#}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "{flood}");
+        }
+        let _ = std::fs::remove_file(log_path(&format!("nib-test-flood-{}", std::process::id())));
+    }
+
     /// Runs the bootstrap snippet with a local `sh`, simulating a remote with a fake HOME.
     #[test]
     #[cfg(unix)]
@@ -780,7 +815,10 @@ mod tests {
         let uname =
             String::from_utf8(Command::new("uname").arg("-sm").output().unwrap().stdout).unwrap();
         let uname = uname.trim().to_string();
-        let script = bootstrap_script(&[(uname.as_str(), "feed".into())], None);
+        // Named, as an upload names it, by the start of the SHA-256 of what is in it.
+        let body = "#!/bin/sh\necho ran \"$1\"\n";
+        let feed: String = Sha256::digest(body.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let script = bootstrap_script(&[(uname.as_str(), feed.clone())], None);
         let run = || {
             let out = Command::new("sh")
                 .arg("-c")
@@ -792,14 +830,18 @@ mod tests {
             String::from_utf8(out.stdout).unwrap()
         };
         assert_eq!(run().trim(), format!("{NEED_UPLOAD_MARKER} {uname}"));
-        let fake = home.join(".cache/nib/nibd-feed");
-        std::fs::write(&fake, "#!/bin/sh\necho ran \"$1\"\n").unwrap();
+        let fake = home.join(".cache/nib").join(format!("nibd-{feed}"));
+        std::fs::write(&fake, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert_eq!(run().trim(), "ran --stdio");
+        // Changed where it lies (its name and its executable bit as they were): not run, and
+        // asked for again, which writes the real one over it.
+        std::fs::write(&fake, "#!/bin/sh\necho somebody else ran \"$1\"\n").unwrap();
+        assert_eq!(run().trim(), format!("{NEED_UPLOAD_MARKER} {uname}"));
         std::fs::remove_dir_all(&home).unwrap();
     }
 
@@ -820,10 +862,12 @@ mod tests {
             c.stdin.take().unwrap().write_all(input).unwrap();
             String::from_utf8(c.wait_with_output().unwrap().stdout).unwrap().trim().to_string()
         };
-        let boot = bootstrap_script(&[(uname.as_str(), "feed".into())], Some("5c11"));
+        let body = "#!/bin/sh\necho \"ran $1 $NIB_SKILLS\"\n";
+        let feed: String = Sha256::digest(body.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let boot = bootstrap_script(&[(uname.as_str(), feed.clone())], Some("5c11"));
         assert_eq!(sh(&boot, b""), format!("{NEED_UPLOAD_MARKER} {uname}"), "no nibd: upload both");
-        let fake = cache.join("nibd-feed");
-        std::fs::write(&fake, "#!/bin/sh\necho \"ran $1 $NIB_SKILLS\"\n").unwrap();
+        let fake = cache.join(format!("nibd-{feed}"));
+        std::fs::write(&fake, body).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(sh(&boot, b""), format!("{NEED_UPLOAD_MARKER} {SKILLS_ONLY}{uname}"), "nibd there: only the skills");
 

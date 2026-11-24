@@ -78,6 +78,21 @@ Rules:
 | `wait [SECS]` | poll until no requests to the daemon are outstanding and no server is `waiting` / `starting` (not logged) |
 | `raw JSON` | one request as-is: `{"cmd":"state"}` |
 
+## What only the user decides
+You drive the window; you do not decide for the person at it. In a window (not `--headless`),
+these are refused however you send them — by name, as the key the user would press, as a
+command — and the answer says so:
+
+- **allowing what an agent asks leave for** (`ai answer --allow`, Enter on its request, approving
+  its plan). A no, and answers to its questions, are taken;
+- **letting an agent do more without asking** (`ai mode accept-edits`, `ai mode auto`). Less
+  (`manual`, `plan`) is taken;
+- **trusting a host's key** ("Trust this host key" in the SSH panel);
+- **approving an app** (never, headless included).
+
+A headless nib you started has nobody to speak for, so it takes the first three: use one for
+tests that need them. Nothing else turns this off: no setting, no environment variable.
+
 ## SSH connections
 A window works on one machine at a time and **switches in place** (same window, same socket):
 saved connections are `[profiles]` in the user's config.toml. `state.connection` says where the

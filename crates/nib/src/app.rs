@@ -729,6 +729,20 @@ impl App {
         self.flash = Some((s, warn, seq));
         Task::perform(async_sleep(Duration::from_secs(4)), move |_| Message::FlashExpired(seq))
     }
+    /// What is being handled came through the control socket of a window a person sits at:
+    /// it may drive the window, but not decide for them. What only they decide (allowing what
+    /// an agent asks leave for, letting an agent do more unasked, trusting a host's key,
+    /// approving an app) checks this, whatever way the request came: by name, as a key, as a
+    /// command.
+    ///
+    /// A `--headless` nib has no person to speak for, and whoever started it drives all of it:
+    /// there these are taken (app approval excepted, which no control client ever gives). That
+    /// is an argument of that one process, not a setting or a variable: nothing a file or an
+    /// environment says turns this off for a window.
+    fn ctl_decides(&self) -> bool {
+        self.ctl_input && !self.headless
+    }
+
     fn flash_info(&mut self, s: impl Into<String>) -> Task<Message> {
         self.flash(s, false)
     }

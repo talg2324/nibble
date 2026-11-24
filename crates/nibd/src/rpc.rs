@@ -2,12 +2,16 @@
 //! `DIR/req/` and waits for the answer of the same name in `DIR/res/`. Used by `nib-app` and
 //! `nib-web`, which run in an agent's process tree and cannot reach the daemon otherwise.
 //!
+//! `DIR` is in the asking agent's own part of the mailbox (`mail::own`: `…/app`, `…/web`), so
+//! the daemon knows whose request it is by where it was left ([`take_all`]), and takes it only
+//! with that agent's token.
+//!
 //! Only `*.json` files are requests or answers: `fs_ops::write_whole` writes each beside, under
 //! another name, and renames it, so a reader never sees half of one.
 
 use serde_json::Value;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +54,42 @@ pub fn take(dir: &Path) -> Vec<(String, Option<Value>)> {
             Some((file.file_name()?.to_string_lossy().into_owned(), req))
         })
         .collect()
+}
+
+/// One request an agent left: the folder it is in (where its answer goes), its file's name, the
+/// agent whose folder that is, and what it says (`None` if it is not JSON).
+pub struct Asked {
+    pub dir: PathBuf,
+    pub name: String,
+    pub agent: String,
+    pub req: Option<Value>,
+}
+
+impl Asked {
+    /// The agent this request is from: the one whose folder it was left in, when `token` is
+    /// the one nib gave that agent. `None`: no token, a made-up one, or another agent's.
+    pub fn asker(&self, token: &str) -> Option<String> {
+        crate::tokens::who(token).filter(|a| *a == self.agent)
+    }
+}
+
+/// The requests of kind `sub` (`app`, `web`) that the agents of `mailbox` left, each in its
+/// own folder, oldest first (file names start with the time), each taken as it is read.
+pub fn take_all(mailbox: &Path, sub: &str) -> Vec<Asked> {
+    let mut all: Vec<Asked> = Vec::new();
+    for agent in crate::mail::agents(mailbox) {
+        let dir = crate::mail::own(mailbox, &agent).join(sub);
+        all.extend(take(&dir).into_iter().map(|(name, req)| Asked { dir: dir.clone(), name, agent: agent.clone(), req }));
+    }
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    all
+}
+
+/// [`sweep`] every agent's folder of kind `sub`.
+pub fn sweep_all(mailbox: &Path, sub: &str) {
+    for agent in crate::mail::agents(mailbox) {
+        sweep(&crate::mail::own(mailbox, &agent).join(sub));
+    }
 }
 
 /// Answer the request named `name` (from [`take`]).

@@ -73,12 +73,34 @@ pub enum Msg {
 /// Why a request that came from an agent (`nib-web`, through the daemon) is not run, if it is
 /// not: an agent gets less than the socket (`nib_proto::web::AGENT`; the daemon's side refuses
 /// the same, this is the second lock), and its files are on the daemon's machine.
-fn agent_refused(req: &serde_json::Value, daemon_is_here: bool, label: &str) -> Option<String> {
+///
+/// It reaches the machine it runs on and no other: a saved connection by name (`gpu:8888`) is
+/// the user's to open, with their keys, unless it is this window's own (`own_profile`).
+fn agent_refused(req: &serde_json::Value, daemon_is_here: bool, label: &str, own_profile: &dyn Fn(&str) -> bool) -> Option<String> {
     let cmd = req.get("cmd").and_then(serde_json::Value::as_str).unwrap_or("");
     if let Err(why) = nib_proto::web::agent_may(cmd) {
         return Some(why);
     }
+    if cmd == "web.open" {
+        let url = req.get("url").and_then(serde_json::Value::as_str).unwrap_or("");
+        if let Some(name) = crate::forward::names_profile(url).filter(|n| !own_profile(n)) {
+            return Some(format!("open: {name} is another of the user's saved connections, and an agent opens pages of the machine it runs on ({label}) only: give the port alone, or ask the user to open {url}"));
+        }
+    }
     (cmd == "web.upload" && !daemon_is_here).then(|| format!("upload: the files are on {label} and the browser is on the machine nib's window is on; not supported yet"))
+}
+
+/// An agent's request as the window runs it: a picture comes back as its bytes (`inline`) and
+/// is written where the agent is, by `nibd web`. The window writes no file an agent names: its
+/// disk is the user's, and may be another machine's than the agent's.
+fn agent_shaped(mut req: serde_json::Value) -> serde_json::Value {
+    if req.get("cmd").and_then(serde_json::Value::as_str) == Some("web.shot") {
+        if let Some(o) = req.as_object_mut() {
+            o.remove("path");
+            o.insert("inline".into(), true.into());
+        }
+    }
+    req
 }
 
 impl App {
@@ -95,9 +117,13 @@ impl App {
                 return Task::none();
             }
         };
-        crate::control::log("agent", &req.to_string());
+        let req = agent_shaped(req);
+        crate::control::log("agent", &crate::control::loggable(&req));
         let here = matches!(self.launch.target, nib_editor::Target::Local { .. });
-        if let Some(why) = agent_refused(&req, here, &self.label) {
+        // Its own machine by its saved name is the window's remote, as a port alone would be.
+        let via = self.forward_via();
+        let own = |name: &str| via.as_ref().is_some_and(|v| crate::forward::profile_host(name).is_ok_and(|h| h == v.host));
+        if let Some(why) = agent_refused(&req, here, &self.label, &own) {
             crate::control::log("agent!", &why);
             answer(serde_json::json!({ "ok": false, "error": why }));
             return Task::none();
@@ -527,19 +553,39 @@ mod tests {
     fn an_agents_request_is_refused_what_the_socket_alone_is_given() {
         // Here too, whatever the daemon let through.
         for cmd in ["web.eval", "web.pointer", "web.quit"] {
-            assert!(agent_refused(&json!({ "cmd": cmd, "js": "1" }), true, "local").unwrap().contains("not for agents"), "{cmd}");
+            assert!(agent_refused(&json!({ "cmd": cmd, "js": "1" }), true, "local", &|_| false).unwrap().contains("not for agents"), "{cmd}");
         }
         // Nothing but the web tab's requests comes this way.
         for cmd in ["run", "state", "type", "ssh.connect", "serve.down", "forward.add", "web.dance", ""] {
-            assert!(agent_refused(&json!({ "cmd": cmd }), true, "local").is_some(), "{cmd}");
+            assert!(agent_refused(&json!({ "cmd": cmd }), true, "local", &|_| false).is_some(), "{cmd}");
         }
-        assert!(agent_refused(&json!({}), true, "local").is_some());
+        assert!(agent_refused(&json!({}), true, "local", &|_| false).is_some());
         for cmd in ["web.open", "web.read", "web.click", "web.shot", "web.wait", "web.upload", "web.close"] {
-            assert_eq!(agent_refused(&json!({ "cmd": cmd }), true, "local"), None, "{cmd}");
+            assert_eq!(agent_refused(&json!({ "cmd": cmd }), true, "local", &|_| false), None, "{cmd}");
         }
         // An agent on another machine has its files there, the browser is here.
-        assert!(agent_refused(&json!({ "cmd": "web.upload", "ref": "1", "files": ["/a"] }), false, "@gpu").unwrap().contains("@gpu"));
-        assert_eq!(agent_refused(&json!({ "cmd": "web.read" }), false, "@gpu"), None);
+        assert!(agent_refused(&json!({ "cmd": "web.upload", "ref": "1", "files": ["/a"] }), false, "@gpu", &|_| false).unwrap().contains("@gpu"));
+        assert_eq!(agent_refused(&json!({ "cmd": "web.read" }), false, "@gpu", &|_| false), None);
+    }
+
+    #[test]
+    fn an_agent_opens_pages_of_its_own_machine_and_writes_no_file_on_the_windows() {
+        // A port, or an address of this machine, as ever.
+        for url in ["8765", "localhost:8765/x", "http://127.0.0.1:8765/?a=1"] {
+            assert_eq!(agent_refused(&json!({ "cmd": "web.open", "url": url }), true, "local", &|_| false), None, "{url}");
+        }
+        // Another saved connection is the user's to reach: its keys, its loopback services.
+        let why = agent_refused(&json!({ "cmd": "web.open", "url": "gpu:8888/lab" }), true, "local", &|_| false).unwrap();
+        assert!(why.contains("gpu is another of the user's saved connections"), "{why}");
+        assert!(agent_refused(&json!({ "cmd": "web.open", "url": "prod:5432" }), false, "@gpu", &|n| n == "gpu").is_some());
+        // The window's own machine by its saved name is where the agent runs.
+        assert_eq!(agent_refused(&json!({ "cmd": "web.open", "url": "gpu:8888/lab" }), false, "@gpu", &|n| n == "gpu"), None);
+        // A picture comes back as bytes: no path of the agent's choosing is written here.
+        let shot = agent_shaped(json!({ "cmd": "web.shot", "path": "/Users/ada/.ssh/authorized_keys", "full": true }));
+        assert_eq!(shot, json!({ "cmd": "web.shot", "full": true, "inline": true }));
+        assert_eq!(agent_shaped(json!({ "cmd": "web.shot", "inline": false })), json!({ "cmd": "web.shot", "inline": true }));
+        let other = json!({ "cmd": "web.upload", "ref": "1", "files": ["/a"], "path": "x" });
+        assert_eq!(agent_shaped(other.clone()), other);
     }
 
     #[test]

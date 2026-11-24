@@ -23,7 +23,13 @@ impl App {
     /// `web.open`, from anywhere (the socket, an agent, a link, a server's page): the port it
     /// names is the daemon's machine's, forwarded first when that is not this one.
     pub(super) fn web_open(&self, call: Call) {
-        forward::open(call, self.forward_via(), self.root.to_string());
+        forward::open(call, self.forward_via(), self.web_project());
+    }
+
+    /// What names this window's project to the web tab's browser, which keeps a profile
+    /// (cookies, storage) for each: the machine as the window calls it, and the whole path.
+    pub(super) fn web_project(&self) -> String {
+        format!("{}:{}", self.label, self.root)
     }
 
     /// A link clicked in a terminal. A page of the machine the terminal runs on is shown in a

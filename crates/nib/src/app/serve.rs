@@ -176,7 +176,7 @@ impl App {
         self.apps_clamp();
         let again = self.serve.viewed.contains(&name);
         let asked = self.serve.opening.contains(&name);
-        let root = self.root.to_string();
+        let root = self.web_project();
         for (server, port) in ready {
             let is_page = page.as_ref().is_some_and(|p| p.server == server);
             if is_page {

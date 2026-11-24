@@ -622,7 +622,14 @@ impl App {
     }
 
     /// A person read the fingerprint and trusts the key: add it to known_hosts, connect again.
+    ///
+    /// So not a control client's key or command in a window a person sits at
+    /// (`App::ctl_decides`): reading the fingerprint is the whole point, and what is trusted
+    /// stays in `known_hosts`.
     fn ssh_trust(&mut self) -> Task<Message> {
+        if self.ctl_decides() {
+            return self.flash_warn("only the user trusts a host's key, having read its fingerprint: not through nib ctl (a --headless nib takes it)");
+        }
         let Some(KeyCheck::Ready(l, p)) = &self.ssh.key else { return Task::none() };
         let (l, p) = (l.clone(), p.clone());
         match crate::ssh::trust_host_key(&p) {
@@ -1521,6 +1528,32 @@ mod tests {
             let _ = a.update(Message::KeyUp(Key::Char(c)));
         }
     }
+    #[test]
+    fn a_control_client_cannot_trust_a_hosts_key_for_the_user() {
+        let known = std::env::temp_dir().join(format!("nib-trust-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&known);
+        let (name, p) = saved("gpu", "ada@gpu.example", &["/srv/app"]);
+        let probe = Probe {
+            stage: Stage::HostKeyUnknown,
+            message: String::new(),
+            fingerprints: vec!["256 SHA256:abc gpu.example (ED25519)".into()],
+            key_lines: vec!["gpu.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc".into()],
+            known_hosts: Some(known.clone()),
+            methods: vec![],
+            platform: None,
+            root: None,
+        };
+        let mut a = app();
+        a.ssh.key = Some(KeyCheck::Ready(launch_for(&name, &p, "/srv/app").unwrap(), Arc::new(probe)));
+        // However a control client gets there (the row's key, a command): handled as its.
+        a.ctl_input = true;
+        let _ = a.ssh_trust();
+        a.ctl_input = false;
+        assert!(!known.exists(), "nothing was added to known_hosts");
+        assert!(matches!(a.ssh.key, Some(KeyCheck::Ready(..))), "the fingerprint still waits for the user");
+        assert!(a.flash.as_ref().is_some_and(|f| f.0.contains("only the user trusts a host's key")));
+    }
+
     fn saved(name: &str, host: &str, roots: &[&str]) -> (String, Profile) {
         let mut p = Profile { ssh: Some(host.into()), root: roots[roots.len() - 1].into(), ..Default::default() };
         for r in roots.iter().rev() {

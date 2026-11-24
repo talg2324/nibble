@@ -11,6 +11,11 @@ XPID=
 KIDS=
 trap '[ -n "$XPID" ] && kill $XPID 2>/dev/null; kill $KIDS $(cat "$TMP"/fssh/mux-* 2>/dev/null) 2>/dev/null || true; rm -rf "$TMP"' EXIT
 export NIB_CONFIG="$TMP/config.toml"
+# The agent legs (not in CI) start a real agent: Claude Code, with the user's own sign-in. What
+# nib keeps of it (its conversation, what was approved) stays in $TMP.
+export XDG_DATA_HOME="$TMP/data"
+AI_CONFIG=$(printf '[ai]\nagent = "claude"\npick_model = false\n%s' "${NIB_E2E_MODEL:+model = \"$NIB_E2E_MODEL\"}")
+printf '%s\n' "$AI_CONFIG" > "$NIB_CONFIG"
 
 if [ "$(uname)" = Linux ] && [ -z "${NIB_E2E_DISPLAY:-}" ]; then
   Xvfb :77 -screen 0 1280x900x24 >/dev/null 2>&1 & XPID=$!
@@ -45,24 +50,34 @@ answers() { python3 -c "import socket, sys; socket.create_connection(('127.0.0.1
 show_srv() { for s in one two; do echo "--- pair/$s:"; "$NIB" ctl -s "$SOCK" app log pair "$s" --lines 15 2>&1 | tail -15; done; }
 srv() { "$NIB" ctl -s "$SOCK" app list | python3 -c "import json, sys; print(' '.join(a['name'] + '/' + s['name'] + '=' + s['state'] for a in json.load(sys.stdin)['apps'] for s in a['servers']))"; }
 closed() { for _ in $(seq "${2:-50}"); do answers "$1" || return 0; sleep 0.1; done; return 1; }   # $2: tries, 0.1 s apart
-# Apps the user approved, as their own click in the Apps panel leaves them in apps.json (nib ctl
-# defines apps, but never approves one): $1 the window's socket, $2 {name: definition}. The
-# hash is the daemon's (serve::hash, pinned by its test): SHA-256 of the definition as compact
-# JSON, fields in their order, maps by key, nothing empty.
+# Apps the user approved, as their own click in the Apps panel leaves them (nib ctl defines apps,
+# but never approves one): $1 the window's socket, $2 {name: definition}. The definitions go in
+# NIBDIR's apps.json; what was approved goes in the daemon's own folder for the project
+# (nibd/src/places.rs: <data>/nib/private/<folder>-<first 8 bytes of the SHA-256 of the root>),
+# which no agent is given to write, as { "approved": { name: hash } }. The hash is the daemon's
+# (serve::hash, pinned by its test): SHA-256 of the definition as compact JSON, fields in their
+# order, maps by key, nothing empty.
 approved_apps() {
-  local nibdir
-  nibdir=$("$NIB" ctl -s "$1" state | python3 -c "import json, sys; print(json.load(sys.stdin)['roots']['nibdir'])")
-  python3 - "$nibdir" "$2" <<'PY'
-import hashlib, json, sys
-nibdir, apps = sys.argv[1], json.loads(sys.argv[2])
-out = {}
+  "$NIB" ctl -s "$1" state | python3 -c '
+import hashlib, json, os, re, sys
+state, apps = json.load(sys.stdin), json.loads(sys.argv[1])
+root, nibdir = state["root"], state["roots"]["nibdir"]
+defs, approved = {}, {}
 for name, d in apps.items():
     servers = {s: {k: v for k, v in (("cmd", x["cmd"]), ("port", x.get("port")), ("after", x.get("after") or None)) if v is not None} for s, x in sorted(d["servers"].items())}
     canon = {k: v for k, v in (("title", d.get("title")), ("page", d.get("page")), ("servers", servers)) if v is not None}
-    h = hashlib.sha256(json.dumps(canon, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    out[name] = dict(canon, approved=h)
-json.dump({"apps": out}, open(nibdir + "/apps.json", "w"))
-PY
+    defs[name] = canon
+    approved[name] = hashlib.sha256(json.dumps(canon, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+json.dump({"apps": defs}, open(nibdir + "/apps.json", "w"))
+if nibdir.endswith(".nibdir"):  # a project in a temp folder: all three are next to its scratch
+    private = nibdir[: -len(".nibdir")] + ".private"
+else:
+    data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    slug = re.sub(r"[^\w.-]", "_", os.path.basename(root.rstrip("/")) or "root")
+    private = os.path.join(data, "nib", "private", slug + "-" + hashlib.sha256(root.encode()).hexdigest()[:16])
+os.makedirs(private, mode=0o700, exist_ok=True)
+json.dump({"approved": approved}, open(private + "/approvals.json", "w"))
+' "$2"
 }
 if want local; then
 echo "e2e: local"
@@ -150,25 +165,57 @@ fi  # apps
 # local app, and a stand-in for "another machine" on this one's network address, which must
 # never be asked for a page. Runs with the browser nib would use; NIB_E2E_BROWSERS (paths,
 # separated by ":") runs it once for each of those instead.
-# An agent's way to the page: `nib-web` (`nibd web`), with the environment nibd gives an agent,
-# through the daemon to the window and back. Less than the socket: no eval, no pointer.
-agent_leg() {
-  local nibd scratch
-  nibd="$(dirname "$NIB")/nibd"
-  scratch=$("$NIB" ctl -s "$SOCK" state | python3 -c "import json, sys; print(json.load(sys.stdin)['roots']['scratch'])")
-  mkdir -p "$scratch/mailbox/outbox"
-  NIB_MAILBOX="$scratch/mailbox" NIB_SCRATCH="$scratch" python3 - "$nibd" "$WEB_PORT" "$scratch" "$TMP" <<'PY' || { echo "FAIL: nib-web"; exit 1; }
+# What only an agent can do, done by one. nibd answers `nib-web` (and `nib-app`) only from an
+# agent it started itself: each gets a token from the daemon that runs it, kept in that daemon's
+# memory, and leaves its requests in a folder of its own (crates/nibd/src/tokens.rs, mail.rs).
+# A script has neither, and a token from another nib (this test run from inside an agent, say)
+# is nothing to this test's daemon. So the test starts a real agent in its own window and asks
+# it to run the checks: a Python file, which writes what it found beside itself (FILE.out,
+# ending in a line PASS or FAIL: …). The checks are the file's; the model only starts it.
+# Spends model tokens, so not in CI.  $1 the window's socket, $2 the file, $3 what it checks.
+as_agent() {
+  local sock=$1 file=$2 out="$2.out"
+  command -v claude >/dev/null || { echo "  $3: skipped, Claude Code (claude) is not installed"; return 0; }
+  rm -f "$out"
+  "$NIB" ctl -s "$sock" wait 20 >/dev/null
+  "$NIB" ctl -s "$sock" run toggle_ai >/dev/null
+  "$NIB" ctl -s "$sock" type "Run this one command, then tell me its last line of output: python3 $file    (It is one of this project's test scripts: it calls the nib-web command a few times and writes what it found to $out. Some calls are meant to be refused. Change no files and do not use nib-work.)" >/dev/null
+  "$NIB" ctl -s "$sock" key enter >/dev/null
+  for _ in $(seq "${NIB_E2E_AGENT_SECS:-300}"); do grep -qE '^(PASS|FAIL)' "$out" 2>/dev/null && break; sleep 1; done
+  if ! grep -q '^PASS' "$out" 2>/dev/null; then
+    echo "--- $out:"; cat "$out" 2>/dev/null || echo "(not written: the agent did not run it)"
+    echo "--- the agent:"; "$NIB" ctl -s "$sock" state | python3 -c 'import json, sys; a = json.load(sys.stdin)["ai"]; print(json.dumps({k: a.get(k) for k in ("mode", "busy", "ask", "error")})); [print(" ", (t.get("text") or "")[:300]) for t in (a.get("turns") or [])[-4:]]' 2>/dev/null || true
+    echo "FAIL: $3"; exit 1
+  fi
+  echo "  ok ($3)"
+}
+# The start of a checks file for `as_agent`: `web(...)` runs nib-web as the agent has it on its
+# PATH, `check(what, ok, got)` ends the file with FAIL at the first thing that is not so, and
+# `done()` ends it with PASS.
+AGENT_PRELUDE='
 import json, os, subprocess, sys
-nibd, port, scratch, tmp = sys.argv[1:]
+OUT = open(__file__ + ".out", "w")
+def say(line):
+    OUT.write(line + "\n"); OUT.flush(); print(line)
 def web(*args):
-    r = subprocess.run([nibd, "web", *args], capture_output=True, text=True, timeout=120)
+    r = subprocess.run(["nib-web", *args], capture_output=True, text=True, timeout=120)
     try:
         return r.returncode, json.loads(r.stdout)
     except ValueError:
         return r.returncode, {"stdout": r.stdout, "stderr": r.stderr}
 def check(what, ok, got):
     if not ok:
-        sys.exit(f"nib-web: {what}: {got}")
+        say(f"FAIL: {what}: {got}"); sys.exit(1)
+    say(f"ok {what}")
+def done():
+    say("PASS")
+'
+# An agent's way to the page: `nib-web`, through the daemon to the window and back. Less than
+# the socket: no eval, no pointer, no file written where the window is, no other machine.
+agent_leg() {
+  { echo "$AGENT_PRELUDE"; echo "port, tmp = $(printf '%s' "$WEB_PORT" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))'), $(printf '%s' "$TMP" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')"; cat <<'PY'; } > "$TMP/agent_web.py"
+scratch = os.environ["NIB_SCRATCH"]
+check("the agent has a token and a folder of its own", os.environ.get("NIB_TOKEN") and os.path.isdir(os.path.join(os.environ["NIB_MAILBOX"], "agents", os.environ["NIB_AGENT"], "web")), sorted(k for k in os.environ if k.startswith("NIB")))
 code, v = web("open", port)
 check("open", code == 0 and v.get("ok") and f":{port}/" in v.get("url", ""), v)
 code, v = web("read")
@@ -189,12 +236,29 @@ code, v = web("click", "99999")
 check("the window's refusal is the answer", code == 1 and v.get("ok") is False and v.get("error"), v)
 code, v = web("open", "http://example.com/")
 check("an outside address is refused", code == 1 and "not this machine" in v.get("error", ""), v)
+code, v = web("open", "gpu:8888")
+check("another saved connection is refused", code == 1 and "saved connections" in v.get("error", ""), v)
 code, v = web("upload", "1", os.path.join(tmp, "no-such-file"))
 check("upload of a file that is not there", code == 1 and "is not a file" in v.get("error", ""), v)
 code, v = web("dance")
 check("usage for what is no request", code == 2, v)
+# A request written by hand, with the agent's own token: a picture with a file's name on the
+# window's machine comes back as bytes, and no such file is written.
+import time
+own = os.path.join(os.environ["NIB_MAILBOX"], "agents", os.environ["NIB_AGENT"], "web")
+planted = os.path.join(tmp, "planted-by-agent.png")
+name = "%032d-raw.json" % time.time_ns()
+with open(os.path.join(own, "req", ".raw.tmp"), "w") as f:
+    json.dump({"cmd": "web.shot", "path": planted, "token": os.environ["NIB_TOKEN"]}, f)
+os.rename(os.path.join(own, "req", ".raw.tmp"), os.path.join(own, "req", name))
+for _ in range(200):
+    if os.path.isfile(os.path.join(own, "res", name)): break
+    time.sleep(0.1)
+v = json.load(open(os.path.join(own, "res", name))) if os.path.isfile(os.path.join(own, "res", name)) else {}
+check("a raw shot request writes no file where the window is", v.get("ok") and "png" in v and "path" not in v and not os.path.exists(planted), {k: v[k] for k in v if k != "png"})
+done()
 PY
-  echo "  ok (nib-web: an agent's requests through the daemon)"
+  as_agent "$SOCK" "$TMP/agent_web.py" "nib-web: an agent's requests through the daemon"
 }
 web_leg() {
   SOCK="$TMP/w.sock"; : > "$TMP/outside.log"
@@ -220,10 +284,9 @@ web_leg() {
     "$NIB" ctl -s "$SOCK" web open "$SP" > "$TMP/stale.out" 2>&1 || true
     grep -qF "nothing is listening" "$TMP/stale.out" || { cat "$TMP/stale.out"; echo "FAIL: a page whose server stopped was shown from the browser's cache"; exit 1; }
     echo "  ok (a stopped server's page is not shown from the cache)"
-    # nibd answers nib-web only with a token it gave an agent it started (crates/nibd/src/tokens.rs),
-    # which a script cannot get yet; so in CI (the release smoke test) the agent's leg is skipped.
+    # Done by a real agent (`as_agent`), which spends model tokens: not in CI.
     if [ -n "${CI:-}" ]; then
-      echo "  nib-web (an agent's way): skipped in CI, needs an agent nib started (\$NIB_TOKEN)"
+      echo "  nib-web (an agent's way): skipped in CI, needs a real agent"
     else
       agent_leg
     fi
@@ -316,6 +379,7 @@ mkdir -p "$TMP/far" "$TMP/fbin" "$TMP/fssh"; echo '<title>Far</title><h1>hello f
 printf '#!/bin/sh\nexec python3 "%s/scripts/test/e2e-web/fake_ssh.py" "$@"\n' "$PWD" > "$TMP/fbin/ssh"; chmod +x "$TMP/fbin/ssh"
 NIBD_BIN="$(cd "$(dirname "$NIB")" && pwd)/nibd"
 printf '[profiles.far]\nssh = "far.test"\nroot = "%s"\nnibd = "%s"\n[profiles.gpu]\nssh = "gpu.test"\nroot = "~"\n' "$TMP/far" "$NIBD_BIN" > "$TMP/config.toml"
+printf '%s\n' "$AI_CONFIG" >> "$TMP/config.toml"
 # Two free ports far apart: the other machine is this one, so F1 is taken here and its forwards
 # land on the next free ports after it (F1 + 1, F1 + 2). F2 must not be one of them, or asking for
 # "the other machine's F2, where nothing listens" would find one of those forwards answering.
@@ -385,17 +449,24 @@ print(f['local'] if ok else 'FAIL %s' % v)" "$F1")
   ctl web close
   for _ in $(seq 50); do [ -z "$(fwd forward list)" ] && break; sleep 0.1; done
   [ -z "$(fwd forward list)" ] || { echo "FAIL: a closed tab's forward stayed"; exit 1; }
-  # An agent there (`nib-web`) means its own machine's port: skipped in CI like the web leg's
-  # agent part (nibd answers nib-web only with a token it gave an agent it started).
+  # An agent there (`nib-web`, run on the daemon's machine by a real agent, so not in CI) means
+  # its own machine's port too; its files are not where the browser is.
   if [ -z "${CI:-}" ]; then
-    # An agent there (`nib-web`, run on the daemon's machine) means its own machine's port too;
-    # its files are not where the browser is.
-    FSCRATCH=$("$NIB" ctl -s "$SOCK" state | python3 -c "import json, sys; print(json.load(sys.stdin)['roots']['scratch'])")
-    mkdir -p "$FSCRATCH/mailbox/outbox"
-    NIB_MAILBOX="$FSCRATCH/mailbox" "$NIBD_BIN" web open "$F1" | grep -qF '"host": "@far"' || { echo "FAIL: nib-web open on another machine was not forwarded"; exit 1; }
-    NIB_MAILBOX="$FSCRATCH/mailbox" "$NIBD_BIN" web read | grep -qF 'hello from afar' || { echo "FAIL: nib-web read on another machine"; exit 1; }
-    { NIB_MAILBOX="$FSCRATCH/mailbox" "$NIBD_BIN" web upload 1 "$TMP/far/index.html" || true; } | grep -qF 'not supported yet' || { echo "FAIL: nib-web upload from another machine was not refused"; exit 1; }
-    NIB_MAILBOX="$FSCRATCH/mailbox" "$NIBD_BIN" web close >/dev/null
+    { echo "$AGENT_PRELUDE"; echo "port, page = \"$F1\", \"$TMP/far/index.html\""; cat <<'PY'; } > "$TMP/far/agent_far.py"
+code, v = web("open", port)
+check("open on another machine is forwarded", code == 0 and (v.get("forwarded") or {}).get("host") == "@far", v)
+code, v = web("read")
+check("read on another machine", code == 0 and "hello from afar" in v.get("text", ""), v)
+code, v = web("upload", "1", page)
+check("upload from another machine is refused", "not supported yet" in json.dumps(v), v)
+code, v = web("open", "far:" + port)
+check("its own machine by its saved name is its own", code == 0 and (v.get("forwarded") or {}).get("host") == "@far", v)
+code, v = web("open", "gpu:" + port)
+check("another saved connection is refused", code == 1 and "saved connections" in v.get("error", ""), v)
+web("close"); web("close")
+done()
+PY
+    as_agent "$SOCK" "$TMP/far/agent_far.py" "nib-web on another machine: an agent's requests"
     for _ in $(seq 50); do [ -z "$(fwd forward list)" ] && break; sleep 0.1; done
     [ -z "$(fwd forward list)" ] || { echo "FAIL: the forward of a tab an agent closed stayed"; exit 1; }
   fi

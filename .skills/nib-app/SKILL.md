@@ -26,7 +26,7 @@ it is writing that down for nib, once, so that next time they open it with one c
 2. **Pick fixed ports** (the ones the project already uses, when it has them).
 3. **Write the app as JSON**: one entry in `servers` per process; `after` for the order (a
    frontend after its backend); `page` on the server whose page the user looks at.
-4. **Register it, start it, look at it**:
+4. **Register it** (the user approves it before anything starts, see below):
    ```
    nib-app set myapp --json - <<'EOF'
    { "title": "My app",
@@ -36,12 +36,17 @@ it is writing that down for nib, once, so that next time they open it with one c
        "web": { "cmd": "npm run dev -- --port 8766 --host 127.0.0.1", "port": 8766,
                 "after": ["api"], "cwd": "frontend", "env": { "API_URL": "http://127.0.0.1:8765" } } } }
    EOF
-   nib-app open myapp
+   ```
+5. **Tell the user** it is under **Apps** on the toolbar, and ask them to open it: the first
+   time, nib shows them its commands to approve. You cannot start it before they do.
+6. **Once they have opened it, look at it**:
+   ```
+   nib-app open myapp            # waits until its servers are ready
    nib-web read                  # its page renders? (the nib-web skill)
    ```
-   Not ready? `nib-app log myapp api` says why; fix the definition and `set` it again.
-5. **Tell the user** it is under **Apps** on the toolbar, and that the first time they open it
-   nib shows them its commands to approve.
+   Not ready? `nib-app log myapp api` says why. Fixing the definition (`set` again) asks the
+   user to approve again, so get the commands right before you register: run each once
+   yourself if you are unsure of it.
 
 What a server's command must be:
 
@@ -60,8 +65,12 @@ An app you define (or change) **waits for the user's approval**: the Apps panel 
 the first time they open it, nib shows them every command, folder and variable and asks. Only
 they approve, with their own click; nothing you can run does it for them. Until then:
 
-- you may start the app **you** registered, to check it works (`nib-app open`);
-- the user's own "start everything" skips it, and so does any other agent.
+- nobody starts it, you included: `nib-app open` says it waits. Its commands run as the user,
+  outside whatever sandbox or permission mode holds you, so the user reads them first;
+- ask the user to open it from the Apps panel once. After that you can start, stop and
+  restart it, and read what it prints, to check it works.
+
+Approval is kept by nib, not in `apps.json`: writing `approved` there does nothing.
 
 Changing an approved app (any `set`) takes the approval away again. So register what the user
 asked for, and nothing they would be surprised to read.

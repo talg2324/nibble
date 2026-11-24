@@ -388,6 +388,28 @@ struct Bundle {
     manifest: Manifest,
 }
 
+/// The repository whose release workflow builds what nib downloads.
+const REPO: &str = "talg2324/nibble";
+
+/// Check `archive` against GitHub's record (Sigstore) that the release workflow of [`REPO`]
+/// built it: `gh attestation verify`. That takes the GitHub CLI, signed in; without one it is
+/// not checked, and that is said. `Err`: it was asked, and GitHub has no such record.
+fn provenance(archive: &Path) -> Result<()> {
+    let gh = |args: &[&str]| crate::transport::command("gh").args(args).stdin(std::process::Stdio::null()).output();
+    if !gh(&["auth", "status"]).is_ok_and(|o| o.status.success()) {
+        eprintln!("provenance not checked: that takes the GitHub CLI, signed in (gh auth login)");
+        return Ok(());
+    }
+    let file = archive.to_string_lossy();
+    let out = gh(&["attestation", "verify", &file, "--repo", REPO, "--signer-workflow", &format!("{REPO}/.github/workflows/release.yml")])?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        let last: Vec<&str> = said.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect();
+        bail!("{} was not built by {REPO}'s release workflow, or GitHub has no record that it was: {}", archive.file_name().unwrap_or_default().to_string_lossy(), last.join(" "));
+    }
+    Ok(())
+}
+
 impl Bundle {
     fn open(dir: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(dir.join("manifest.toml"))
@@ -396,6 +418,10 @@ impl Bundle {
     }
 
     /// The release's bundle for this machine, downloaded and unpacked once into the cache.
+    ///
+    /// What is in it is run (the grammars are native libraries), so it is checked twice: against
+    /// the release's `SHA256SUMS` (a broken download), and against its build provenance
+    /// ([`provenance`]: that nibble's release workflow built this very file).
     fn download() -> Result<Self> {
         let triple = triple().ok_or_else(|| anyhow!("releases have none for this platform"))?;
         let tag = release_tag();
@@ -421,6 +447,11 @@ impl Bundle {
         let got = hex(&Sha256::digest(std::fs::read(&archive)?));
         if got != want {
             bail!("{name}.tar.gz doesn't match SHA256SUMS ({got} ≠ {want})");
+        }
+        // The sums come from where the bundle comes from. A release's own bundle is also
+        // checked against GitHub's record of who built it, when that can be asked.
+        if std::env::var_os("NIB_GRAMMARS_URL").is_none() {
+            provenance(&archive)?;
         }
         run(Command::new("tar").arg("-xzf").arg(&archive).arg("-C").arg(&tmp))?;
         let _ = std::fs::remove_file(&archive);

@@ -126,6 +126,32 @@ pub fn log(kind: &str, text: &str) {
     let _ = writeln!(r.log.lock().unwrap(), "{} {kind:<5} {text}", nib_proto::log_clock());
 }
 
+/// A request as the log keeps it. What is typed into a page (`web.fill`, `web.type`: often a
+/// password or a token) is its length only, and an address loses what follows `?` or `#`, and
+/// a name and password before `@`: enough to follow what was done, nothing to sign in with.
+pub fn loggable(req: &Value) -> String {
+    let mut v = req.clone();
+    let web = v.get("cmd").and_then(Value::as_str).is_some_and(|c| c.starts_with("web."));
+    if let Some(o) = v.as_object_mut().filter(|_| web) {
+        if let Some(n) = o.get("text").and_then(Value::as_str).map(|t| t.chars().count()) {
+            o.insert("text".into(), Value::String(format!("<{n} chars>")));
+        }
+        if let Some(url) = o.get("url").and_then(Value::as_str) {
+            let mut shown = url[..url.find(['?', '#']).unwrap_or(url.len())].to_string();
+            if shown.len() < url.len() {
+                shown.push('…');
+            }
+            let start = shown.find("://").map_or(0, |i| i + 3);
+            let host_end = shown[start..].find('/').map_or(shown.len(), |i| start + i);
+            if let Some(at) = shown[start..host_end].rfind('@') {
+                shown.replace_range(start..start + at, "…");
+            }
+            o.insert("url".into(), Value::String(shown));
+        }
+    }
+    v.to_string()
+}
+
 /// Next default snapshot file: `<run dir>/snapshots/001.png`, `002.png`, …
 pub fn next_snapshot_path() -> Option<PathBuf> {
     let r = RUN.get()?;
@@ -317,7 +343,10 @@ mod sys {
             if line.contains(r#""cmd":"askpass""#) {
                 log("ctl", r#"{"cmd":"askpass", …}"#);
             } else if !line.contains(r#""cmd":"pending""#) {
-                log("ctl", line.trim());
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(req) => log("ctl", &loggable(&req)),
+                    Err(_) => log("ctl", line.trim()),
+                }
             }
             let reply = match serde_json::from_str::<Value>(&line) {
                 Ok(req) if req.is_object() => {
@@ -812,6 +841,18 @@ fn abs_paths(paths: &[&str]) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_log_keeps_no_password_and_no_signed_address() {
+        let line = loggable(&json!({ "cmd": "web.fill", "ref": "3", "text": "hunter2 is my password" }));
+        assert!(!line.contains("hunter2") && line.contains("<22 chars>") && line.contains("\"ref\":\"3\""), "{line}");
+        assert!(!loggable(&json!({ "cmd": "web.type", "text": "s3cret\n" })).contains("s3cret"));
+        let line = loggable(&json!({ "cmd": "web.open", "url": "http://ada:pw@127.0.0.1:8888/lab?token=abc123#frag" }));
+        assert!(line.contains("http://…@127.0.0.1:8888/lab…") && !line.contains("abc123") && !line.contains("pw@"), "{line}");
+        assert_eq!(loggable(&json!({ "cmd": "web.open", "url": "8765" })), json!({ "cmd": "web.open", "url": "8765" }).to_string());
+        // What is typed into the editor is the user's own text, and stays readable.
+        assert!(loggable(&json!({ "cmd": "type", "text": "x = 1" })).contains("x = 1"));
+    }
 
     #[test]
     fn forward_requests_from_the_command_line() {

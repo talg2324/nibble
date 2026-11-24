@@ -788,9 +788,11 @@ pub struct Sessions {
     touched: HashMap<AiId, std::collections::BTreeSet<String>>,
     /// When each file was last changed with an edit tool, and by whom.
     edit_at: HashMap<String, (AiId, Instant)>,
-    /// Where agents' branch records, plans and reviews are kept between sessions
-    /// (`$NIBDIR/work`, by conversation).
+    /// Where agents' branch records, plans and reviews are kept between sessions, by
+    /// conversation: in the daemon's own folder for the project (`places`), not in NIBDIR.
     store: Option<PathBuf>,
+    /// Where agents' work trees are (`$NIBDIR/worktrees`): only one of those is landed.
+    trees: Option<PathBuf>,
     /// A command (or, for an assistant that reports its commands only when they are over, a
     /// whole run) of a session in the shared work tree is under way: what was changed there
     /// when it began, and when that was. What differs when it ends is the session's doing.
@@ -873,7 +875,8 @@ pub fn land(sessions: &Shared, id: AiId, root: &Path, message: &str) -> (bool, S
         s.mail.clone().zip(s.meta.get(&id).map(|m| m.id_name.clone()))
     };
     let Some((dir, agent)) = found else { return (false, "no such agent".to_string()) };
-    match work::land(&dir, &agent, root, message) {
+    let Some(trees) = sessions.lock().unwrap().trees.clone() else { return (false, "no NIBDIR on this machine: there are no work trees to land".to_string()) };
+    match work::land(&dir, &agent, root, &trees, message) {
         Ok(out) => {
             // Its branch is gone: the client hears so.
             mail::report(&dir, &agent, &mail::Report::Work);
@@ -1233,6 +1236,8 @@ fn prompt_file(id: AiId, prompt: &str) -> Option<PathBuf> {
 pub struct Dirs<'a> {
     pub scratch: Option<&'a Path>,
     pub nibdir: Option<&'a Path>,
+    /// The daemon's own folder for the project (`places`): no agent writes there.
+    pub private: Option<&'a Path>,
 }
 
 /// What the user set for a session beside the model: how hard it thinks and what is added to
@@ -1346,7 +1351,18 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
         s.root = Some(root.to_path_buf());
     }
     if s.store.is_none() {
-        s.store = dirs.nibdir.map(|d| d.join("work"));
+        // What is kept of a conversation to reopen it (its branch, plan and review) is believed
+        // when it comes back, so it is kept where no agent writes. Before v0.4 that was
+        // `$NIBDIR/work`: what is there moves, once.
+        s.store = dirs.private.map(|d| d.join("work"));
+        if let (Some(new), Some(old)) = (&s.store, dirs.nibdir.map(|d| d.join("work"))) {
+            if !new.exists() && old.is_dir() && *new != old {
+                let _ = std::fs::rename(&old, new);
+            }
+        }
+    }
+    if s.trees.is_none() {
+        s.trees = dirs.nibdir.map(|d| d.join("worktrees"));
     }
     if !std::mem::replace(&mut s.posting, true) {
         let weak = Arc::downgrade(sessions);
@@ -1359,8 +1375,21 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
     // compare against, say) is known to be its, and goes when it does (`close`).
     let own_scratch = dirs.scratch.map(|p| p.join("agents").join(&name)).filter(|p| std::fs::create_dir_all(p).is_ok());
     env.extend(own_scratch.as_ref().map(|p| ("NIB_SCRATCH", p.as_os_str().to_os_string())));
+    // A sandboxed agent is not given the machine's temp folders (`codex_sandbox`): they are
+    // everybody's, nib's own files among them. It gets one of its own instead, inside its
+    // scratch, which it may write; what honours `TMPDIR` (mktemp, most tools) works as ever.
+    if agent == AiAgent::Codex && cfg!(unix) {
+        if let Some(tmp) = own_scratch.as_ref().map(|p| p.join("tmp")).filter(|p| std::fs::create_dir_all(p).is_ok()) {
+            env.push(("TMPDIR", tmp.into_os_string()));
+        }
+    }
     env.extend(dirs.nibdir.map(|p| ("NIBDIR", p.as_os_str().to_os_string())));
     if let (true, Some(dir), Ok(me)) = (tools, &s.mail, std::env::current_exe()) {
+        // Its own part of the mailbox, made here: a sandboxed agent writes there and nowhere
+        // else in it, and cannot make the folder itself.
+        if let Err(e) = mail::make_own(dir, &name) {
+            let _ = tx.send(ServerMsg::Notify(ServerNotify::Log { level: nib_proto::LogLevel::Warn, msg: format!("{name}: no mailbox folder of its own ({e}): nib-mail, nib-work, nib-app and nib-web will not work for it") }));
+        }
         env.push(("NIB_MAILBOX", dir.as_os_str().to_os_string()));
         env.push(("NIB_AGENT", name.clone().into()));
         // What its `nib-app` and `nib-web` requests carry, so the daemon knows they are its.
@@ -1368,10 +1397,10 @@ fn open_ready(sessions: &Shared, replace: Option<AiId>, agent: AiAgent, model: O
         env.push(("NIBD", me.into_os_string()));
         // For `nib-work`: where the project is, whatever folder the agent is in.
         env.push(("NIB_ROOT", root.as_os_str().to_os_string()));
-        // `nib-mail` is in the mailbox's `bin`.
+        // `nib-mail` and the rest are beside the mailbox (`mail::bin`), where no agent writes.
         // `join_paths` uses the system's separator (`;` on Windows).
         let rest = std::env::var_os("PATH").unwrap_or_default();
-        let dirs = std::iter::once(dir.join("bin")).chain(std::env::split_paths(&rest));
+        let dirs = std::iter::once(mail::bin(dir)).chain(std::env::split_paths(&rest));
         if let Ok(path) = std::env::join_paths(dirs) {
             env.push(("PATH", path));
         }
@@ -1499,7 +1528,10 @@ fn codex_roots(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
     let mut roots: Vec<PathBuf> = Vec::new();
     roots.extend(var("NIB_SCRATCH"));
     roots.extend(var("NIBDIR"));
-    roots.extend(var("NIB_MAILBOX"));
+    // Of the mailbox, its own part only (`mail::own`): the rest is what nib tells the agents,
+    // and the other agents' own parts.
+    let agent = env.iter().find(|(k, _)| *k == "NIB_AGENT").map(|(_, v)| v.to_string_lossy().into_owned());
+    roots.extend(var("NIB_MAILBOX").zip(agent).map(|(dir, agent)| mail::own(&dir, &agent)));
     let git = crate::git::cmd(root).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).output();
     if let Ok(out) = git {
         let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1516,6 +1548,18 @@ fn codex_roots(root: &Path, env: &[(&'static str, OsString)]) -> Vec<String> {
     roots.sort();
     roots.dedup();
     roots.iter().map(|r| r.to_string_lossy().into_owned()).collect()
+}
+
+/// Codex's sandbox for an agent that may write: the project, `roots`, and nothing else.
+///
+/// Not the machine's temp folders, which Codex adds unless told not to (`/tmp`, and whatever
+/// `TMPDIR` names). They are shared by everything the user runs: nib keeps files there itself
+/// (each window's control socket and log, the prompts and pictures it hands assistants), a
+/// project or nib's own folders may be put there (`XDG_CACHE_HOME`, a throwaway checkout), and
+/// so may anybody else's work. An agent given all of that is not in a sandbox. Its temp folder
+/// is its own (`TMPDIR`, set where its environment is made), inside a root it has.
+fn codex_sandbox(roots: Vec<String>) -> Value {
+    serde_json::json!({ "sandbox_workspace_write": { "writable_roots": roots, "exclude_tmpdir_env_var": true, "exclude_slash_tmp": true } })
 }
 
 /// The folder agents' work trees go in (`$NIBDIR/worktrees`), made if needed.
@@ -2682,7 +2726,7 @@ impl PerTurn {
                             let _ = codex_rpc(stdin, &serde_json::json!({ "jsonrpc": "2.0", "method": "initialized" }));
                             let acts = matches!(mode, AiMode::AcceptEdits | AiMode::Auto);
                             let roots = if acts { codex_roots(&me.root, &me.env) } else { Vec::new() };
-                            let config = if roots.is_empty() { Value::Null } else { serde_json::json!({ "sandbox_workspace_write": { "writable_roots": roots } }) };
+                            let config = if acts { codex_sandbox(roots) } else { Value::Null };
                             let mut instructions = me.tuning.prompt.clone().unwrap_or_default();
                             if me.tools {
                                 let catalog = codex_skill_catalog(&bundled_skills_for(AiAgent::Codex));
@@ -3118,9 +3162,12 @@ pub fn close(sessions: &Shared, id: AiId) {
         s.carry.remove(&id);
         // The agent itself ends with its last session (a model switch handed its name on, so
         // there it goes on): then the work trees it made in its scratch go too.
-        let ended = meta
-            .filter(|m| !s.meta.values().any(|o| o.id_name == m.id_name))
-            .and_then(|m| Some((s.root.clone()?, m.scratch?)));
+        let ended = meta.filter(|m| !s.meta.values().any(|o| o.id_name == m.id_name));
+        // Its token goes with it: a command it left running asks for nothing more.
+        if let Some(m) = &ended {
+            crate::tokens::revoke(&m.id_name);
+        }
+        let ended = ended.and_then(|m| Some((s.root.clone()?, m.scratch?)));
         (s.map.remove(&id), s.frozen.remove(&id), ended)
     };
     if let Some(s) = session {
@@ -3157,7 +3204,7 @@ mod tests {
     use super::*;
 
     fn test_open(shared: &Shared, replace: Option<AiId>, agent: AiAgent, model: &str, root: &Path, tx: &Sender<ServerMsg>) -> Result<AiId, RpcError> {
-        open_ready(shared, replace, agent, Some(model.into()), Tuning::default(), true, AiMode::Auto, None, root, Dirs { scratch: Some(root), nibdir: Some(root) }, tx.clone(), root.join("missing-assistant"))
+        open_ready(shared, replace, agent, Some(model.into()), Tuning::default(), true, AiMode::Auto, None, root, Dirs { scratch: Some(root), nibdir: Some(root), private: Some(root) }, tx.clone(), root.join("missing-assistant"))
     }
 
     #[test]
@@ -3188,7 +3235,7 @@ mod tests {
         work::set_plan(&mailbox, &name, "# Parser\nRun escaped quote tests").unwrap();
         let record = work::Record { branch: "nib/feat/parser".into(), base: "main".into(), tree: root.join("parser-tree"), dir: root.join("parser-tree") };
         std::fs::create_dir_all(&record.dir).unwrap();
-        std::fs::write(mailbox.join("work").join(format!("{name}.json")), serde_json::to_vec(&record).unwrap()).unwrap();
+        std::fs::write(work::kept_dir(&mailbox, &name).join(format!("{name}.json")), serde_json::to_vec(&record).unwrap()).unwrap();
         review_edit(&shared, first, nib_proto::ReviewOp::Comment(nib_proto::ReviewComment { body: "Cover escaped quotes".into(), ..Default::default() })).unwrap();
         let work_before = work::state(&mailbox, &name);
         work::persist(&mailbox, &name, &root.join("work"), &history_id);
@@ -3229,7 +3276,7 @@ mod tests {
         assert!(shared.lock().unwrap().meta.contains_key(&fourth));
         assert_eq!(history::list(&root, "")[0].agent, AiAgent::Grok);
         close(&shared, fourth);
-        let reopened = open_ready(&shared, None, AiAgent::Grok, Some("another-model".into()), Tuning::default(), true, AiMode::Auto, Some(&history_id), &root, Dirs { scratch: Some(&root), nibdir: Some(&root) }, tx, root.join("missing-assistant")).unwrap();
+        let reopened = open_ready(&shared, None, AiAgent::Grok, Some("another-model".into()), Tuning::default(), true, AiMode::Auto, Some(&history_id), &root, Dirs { scratch: Some(&root), nibdir: Some(&root), private: Some(&root) }, tx, root.join("missing-assistant")).unwrap();
         assert_eq!(plan(&shared, reopened).as_deref(), Some("# Parser\nRun escaped quote tests"));
         assert_eq!(review(&shared, reopened).comments[0].body, "Cover escaped quotes");
         assert!(shared.lock().unwrap().carry[&reopened].contains("parser-tree"));
@@ -3258,7 +3305,7 @@ mod tests {
             r.event(&AiEvent::Text("Parser changed; tests still need running.".into()));
             r.id()
         };
-        let new = open_ready(&shared, Some(old), AiAgent::Claude, Some("opus".into()), Tuning::default(), true, AiMode::Auto, None, &root, Dirs { scratch: Some(&root), nibdir: Some(&root) }, tx, exe).unwrap();
+        let new = open_ready(&shared, Some(old), AiAgent::Claude, Some("opus".into()), Tuning::default(), true, AiMode::Auto, None, &root, Dirs { scratch: Some(&root), nibdir: Some(&root), private: Some(&root) }, tx, exe).unwrap();
         send(&shared, new, "Run the tests now", &[]);
         loop {
             let msg = rx.recv_timeout(Duration::from_secs(5)).expect("the stand-in should answer");
@@ -3461,9 +3508,19 @@ mod tests {
             ("NIB_SCRATCH", "/s/scratch".into()),
             ("NIBDIR", "/s/nibdir".into()),
             ("NIB_MAILBOX", "/s/mailbox".into()),
+            ("NIB_AGENT", "codex-4".into()),
         ];
         let roots = codex_roots(Path::new("/nonexistent-nib-root"), &env);
-        assert_eq!(roots, ["/s/mailbox", "/s/nibdir", "/s/scratch"]);
+        // Of the mailbox, only the agent's own part: not the roster, the switch for
+        // worktree-per-feature, another agent's outbox or plan, or the commands beside it.
+        let own = Path::new("/s/mailbox").join("agents").join("codex-4").to_string_lossy().into_owned();
+        assert_eq!(roots, [own.as_str(), "/s/nibdir", "/s/scratch"]);
+        // And not the temp folders, where nib's own files and everybody else's are.
+        let sandbox = codex_sandbox(roots.clone());
+        assert_eq!(sandbox["sandbox_workspace_write"], serde_json::json!({ "writable_roots": roots, "exclude_tmpdir_env_var": true, "exclude_slash_tmp": true }));
+        assert_eq!(codex_sandbox(Vec::new())["sandbox_workspace_write"]["exclude_slash_tmp"], true, "with no folder of nib's either");
+        // Without a name there is no part that is its own, and none of the mailbox is given.
+        assert_eq!(codex_roots(Path::new("/nonexistent-nib-root"), &env[..3]), ["/s/nibdir", "/s/scratch"]);
         assert!(codex_roots(Path::new("/nonexistent-nib-root"), &[]).is_empty());
     }
 

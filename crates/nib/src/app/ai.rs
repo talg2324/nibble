@@ -883,6 +883,10 @@ impl App {
     /// Send the answer to what the shown agent asked; answers to its questions show in the
     /// transcript as the user's.
     fn ai_send_answer(&mut self, allow: bool, message: Option<String>, answers: Vec<String>) {
+        if let Some(why) = self.ai_ctl_refused(allow) {
+            crate::control::log("warn", why);
+            return;
+        }
         let (Some(ask), Session::Ready(id)) = (self.ai.ask.take(), &self.ai.session) else { return };
         let id = *id;
         let plan = ask.tool == PLAN_TOOL;
@@ -1086,6 +1090,27 @@ impl App {
         self.ai.ask.is_some()
     }
 
+    /// Why a yes to what the shown agent asks leave for (a command, an edit, its plan) is not
+    /// taken, when it comes from a control client in a window a person sits at
+    /// (`App::ctl_decides`): the agent asked the user, and anything that can reach the socket
+    /// (another agent, a script the agent itself started) would otherwise answer for them. A
+    /// no is anybody's to give, and so are answers to its questions, which allow nothing.
+    pub(super) fn ai_ctl_refused(&self, allow: bool) -> Option<&'static str> {
+        let leave = self.ai.ask.as_ref().is_some_and(|a| a.questions.is_empty());
+        (allow && leave && self.ctl_decides()).then_some("only the user allows what an agent asks leave for: not through nib ctl (a --headless nib takes it)")
+    }
+
+    /// Why the shown agent's mode is not changed to `mode` by a control client in a window a
+    /// person sits at: one that lets it do more without asking than it may now.
+    pub(super) fn ai_mode_refused(&self, mode: AiMode) -> Option<&'static str> {
+        let unasked = |m: AiMode| match m {
+            AiMode::Manual | AiMode::Plan => 0,
+            AiMode::AcceptEdits => 1,
+            AiMode::Auto => 2,
+        };
+        (self.ctl_decides() && unasked(mode) > unasked(self.ai.mode)).then_some("only the user lets an agent do more without asking: not through nib ctl (a --headless nib takes it)")
+    }
+
     /// The shown agent's place in the list.
     pub(super) fn ai_current(&self) -> usize {
         self.ai.cur
@@ -1253,6 +1278,9 @@ impl App {
             Msg::PanicRelease => return self.ai_release(),
             Msg::Clock => return self.ai_clock(),
             Msg::Mode(mode) => {
+                if let Some(why) = self.ai_mode_refused(mode) {
+                    return self.flash_warn(why);
+                }
                 self.ai.mode = mode;
                 if let Session::Ready(id) = self.ai.session {
                     self.ai.told_mode = mode;
@@ -3697,6 +3725,56 @@ mod tests {
         assert!(told.contains("On lines 3–5:\n> Why: slow.\n>\n> 1. Add a cache\nwhy a cache?\nmeasure first"), "{told}");
         assert_eq!(a.ai.plans["t4"].outcome, Some(Outcome::Revise));
         assert_eq!(a.ai.turns.last().map(|t| t.text.as_str()), Some("Sent the plan back with 1 comment."));
+    }
+
+    #[test]
+    fn a_control_client_cannot_allow_or_let_an_agent_do_more_in_a_window_somebody_sits_at() {
+        use crate::control::Call;
+        use serde_json::json;
+        let ctl = |a: &mut App, req: serde_json::Value| {
+            let (call, rx) = Call::test(req);
+            let _ = a.on_control(call);
+            rx.try_recv().unwrap()
+        };
+        let mut a = chatting();
+        let _ = a.update(Message::Ai(Msg::Mode(AiMode::Manual)));
+        say(&mut a, "clean up");
+        event(&mut a, 7, ask("Bash", false));
+        // Its yes, by name or as the Enter the user would press: not taken, and it still waits.
+        let said = ctl(&mut a, json!({ "cmd": "ai.answer", "allow": true }));
+        assert!(said["ok"] == false && said["error"].as_str().unwrap().contains("only the user allows"), "{said}");
+        assert_eq!(ctl(&mut a, json!({ "cmd": "key", "chord": "enter" }))["ok"], true);
+        assert!(a.ai.ask.is_some(), "still asked of the user");
+        // Nor more leave for the agent; less is anybody's to ask for.
+        for mode in ["accept-edits", "auto"] {
+            let said = ctl(&mut a, json!({ "cmd": "ai.mode", "mode": mode }));
+            assert!(said["ok"] == false && said["error"].as_str().unwrap().contains("do more without asking"), "{said}");
+        }
+        assert_eq!(a.ai_state_json()["mode"], "manual");
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.mode", "mode": "plan" }))["ok"], true);
+        // A no is anybody's to give.
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.answer", "allow": false }))["ok"], true);
+        assert!(a.ai.ask.is_none());
+        // Answers to its questions allow nothing, and are taken.
+        event(&mut a, 7, ask("AskUserQuestion", true));
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.answer", "answers": ["1"] }))["ok"], true);
+        // The user's own Enter and their own switch work as ever.
+        event(&mut a, 7, ask("Bash", false));
+        key(&mut a, "enter");
+        assert!(a.ai.ask.is_none());
+        let _ = a.update(Message::Ai(Msg::Mode(AiMode::Auto)));
+        assert_eq!(a.ai_state_json()["mode"], "auto");
+        // From auto, a control client may take leave away, and not give it back.
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.mode", "mode": "manual" }))["ok"], true);
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.mode", "mode": "auto" }))["ok"], false);
+        // A headless nib has nobody to speak for: whoever started it answers.
+        event(&mut a, 7, ask("Bash", false));
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.answer", "allow": true }))["ok"], false);
+        a.headless = true;
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.answer", "allow": true }))["ok"], true);
+        assert!(a.ai.ask.is_none());
+        assert_eq!(ctl(&mut a, json!({ "cmd": "ai.mode", "mode": "auto" }))["ok"], true);
+        assert_eq!(a.ai_state_json()["mode"], "auto");
     }
 
     #[test]

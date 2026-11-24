@@ -15,7 +15,8 @@ pub(super) const MESSAGE_LOG: usize = 50;
 impl App {
     /// A control request. The keys it presses and the commands it runs are handled here and
     /// now, marked as not the user's own (`ctl_input`): an agent can drive nib, but cannot
-    /// approve an app for the user.
+    /// decide for the user (`App::ctl_decides`: approve an app, allow what an agent asks, let
+    /// an agent do more unasked, trust a host's key).
     pub(super) fn on_control(&mut self, call: Call) -> Task<Message> {
         let was = std::mem::replace(&mut self.ctl_input, true);
         let t = self.on_control_call(call);
@@ -88,7 +89,7 @@ impl App {
             }
             // The web tab's engine answers these itself, on its own thread (crate::web).
             c if c.starts_with("web.") => {
-                crate::web::submit(call, &self.root.to_string());
+                crate::web::submit(call, &self.web_project());
                 Task::none()
             }
             "commands" => {
@@ -286,6 +287,10 @@ impl App {
                     call.err("ai mode needs one of: manual, accept-edits, plan, auto");
                     return Task::none();
                 };
+                if let Some(why) = self.ai_mode_refused(mode) {
+                    call.err(why);
+                    return Task::none();
+                }
                 let t = self.handle(Message::Ai(super::ai::Msg::Mode(mode)));
                 call.ok(json!({ "mode": mode.name() }));
                 t
@@ -306,6 +311,10 @@ impl App {
                     return Task::none();
                 }
                 let allow = call.req.get("allow").and_then(Value::as_bool).unwrap_or(false);
+                if let Some(why) = self.ai_ctl_refused(allow) {
+                    call.err(why);
+                    return Task::none();
+                }
                 let message = call.str_arg("message").filter(|m| !m.is_empty()).map(str::to_string);
                 self.ai_answer(allow, message);
                 call.ok(json!({ "allowed": allow }));

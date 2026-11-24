@@ -2,8 +2,8 @@
 //! of its plan, sent to it in rounds; it answers each one (`nib-review reply`) and the
 //! user resolves them.
 //!
-//! Kept beside the agent's branch record, in the session's mailbox folder
-//! (`work/<agent>.review.json`). Like `nib-mail` and `nib-work`, `nib-review` is this binary
+//! Kept beside the agent's branch record, in its own part of the session's mailbox folder
+//! (`work::kept_dir`: `work/<agent>.review.json`). Like `nib-mail` and `nib-work`, `nib-review` is this binary
 //! run by the agent as a plain command.
 
 use crate::mail::{self, Report};
@@ -29,7 +29,7 @@ struct Kept {
 }
 
 fn file(mailbox: &Path, agent: &str) -> PathBuf {
-    mailbox.join("work").join(format!("{agent}.review.json"))
+    work::kept_dir(mailbox, agent).join(format!("{agent}.review.json"))
 }
 
 fn kept(mailbox: &Path, agent: &str) -> Kept {
@@ -37,7 +37,7 @@ fn kept(mailbox: &Path, agent: &str) -> Kept {
 }
 
 fn keep(mailbox: &Path, agent: &str, k: &Kept) -> std::io::Result<()> {
-    fs::create_dir_all(mailbox.join("work"))?;
+    fs::create_dir_all(work::kept_dir(mailbox, agent))?;
     crate::fs_ops::write_whole(&file(mailbox, agent), serde_json::to_vec_pretty(k).unwrap_or_default())
 }
 
@@ -296,7 +296,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nibd-review-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let (mailbox, tree) = (dir.join("mailbox"), dir.join("tree"));
-        fs::create_dir_all(mailbox.join("outbox")).unwrap();
+        mail::make_own(&mailbox, "claude-1").unwrap();
         fs::create_dir_all(&tree).unwrap();
         fs::write(tree.join("a.rs"), "fn a() {}\nfn b() {\n    1\n}\n").unwrap();
         let me = "claude-1";
@@ -347,7 +347,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nibd-review-plan-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let (mailbox, tree) = (dir.join("mailbox"), dir.join("tree"));
-        fs::create_dir_all(mailbox.join("outbox")).unwrap();
+        mail::make_own(&mailbox, "claude-1").unwrap();
         fs::create_dir_all(&tree).unwrap();
         let me = "claude-1";
         let go = |args: &[&str]| run(&mailbox, me, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());

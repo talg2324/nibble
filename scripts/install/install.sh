@@ -6,7 +6,10 @@
 #   curl -fsSL …/install.sh | bash -s -- --uninstall
 #   curl -fsSL …/install.sh | NIB_VERSION=v0.4-rc.1 bash      # that release (also --version TAG)
 #
-# Installs the latest release into ~/.local/share/nib, with `nib` and `nibd` in ~/.local/bin.
+# Installs the latest release into ~/.local/lib/nib, with `nib` and `nibd` in ~/.local/bin.
+# Never into ~/.local/share/nib: that is where nib keeps what is yours (conversations, each
+# project's NIBDIR, agents' work trees). Installers before v0.4 put the program there too; this
+# one takes the program's files out of it, by name, and leaves the rest.
 # "Latest" never means a prerelease (a release candidate, vX.Y-rc.N): those only by name.
 # Running it again updates in place. Bash 3.2 compatible (macOS /bin/bash).
 set -u
@@ -154,13 +157,20 @@ detect() {
     fish) RC="$HOME/.config/fish/conf.d/nib.fish" ;;
     *)    RC="$HOME/.profile" ;;
   esac
-  BIN="$PREFIX/bin"; HOME_DIR="$PREFIX/share/nib"; STATE="$HOME_DIR/install-state"
+  BIN="$PREFIX/bin"; HOME_DIR="$PREFIX/lib/nib"; STATE="$HOME_DIR/install-state"
+  # Where installers before v0.4 put the program: also nib's data folder, so never removed whole.
+  OLD_DIR="$PREFIX/share/nib"
+  LEGACY=0; [ -e "$OLD_DIR/nib" ] || [ -e "$OLD_DIR/install-state" ] && LEGACY=1
+  # The state to read: this install's, or the one an earlier installer left.
+  STATE_READ="$STATE"; [ -f "$STATE" ] || { [ -f "$OLD_DIR/install-state" ] && STATE_READ="$OLD_DIR/install-state"; }
   ON_PATH=0; case ":$PATH:" in *":$BIN:"*) ON_PATH=1 ;; esac
   COLS=$(stty size 2>/dev/null <"${TTY:-/dev/tty}" | cut -d' ' -f2); COLS=${COLS:-${COLUMNS:-100}}
   SSH_HOSTS=0
   [ -r "$HOME/.ssh/config" ] && SSH_HOSTS=$(grep -ciE '^[[:space:]]*host[[:space:]]+[^*?]+$' "$HOME/.ssh/config")
-  HAVE=""; [ -x "$HOME_DIR/nib" ] && HAVE=$("$HOME_DIR/nib" --version 2>/dev/null | head -1)
-  HAD_DAEMONS=0; [ -d "$HOME_DIR/daemons" ] && HAD_DAEMONS=1
+  HAVE=""
+  if [ -x "$HOME_DIR/nib" ]; then HAVE=$("$HOME_DIR/nib" --version 2>/dev/null | head -1)
+  elif [ -x "$OLD_DIR/nib" ]; then HAVE=$("$OLD_DIR/nib" --version 2>/dev/null | head -1); fi
+  HAD_DAEMONS=0; [ -d "$HOME_DIR/daemons" ] || [ -d "$OLD_DIR/daemons" ] && HAD_DAEMONS=1
   HARN=""; for h in claude codex gemini opencode ollama; do command -v $h >/dev/null 2>&1 && HARN="$HARN $h"; done
   HARN="${HARN# }"
   command -v git >/dev/null 2>&1 && GIT=1 || GIT=0
@@ -192,7 +202,7 @@ defaults() {
   [ $OPT_PATH = -1 ] && OPT_PATH=1
   if [ $OPT_UPSTREAM = -1 ]; then
     OPT_UPSTREAM=0
-    [ -f "$STATE" ] && grep -q '/nib-upstream ' "$STATE" && OPT_UPSTREAM=1
+    [ -f "$STATE_READ" ] && grep -q '/nib-upstream ' "$STATE_READ" && OPT_UPSTREAM=1
   fi
 }
 
@@ -296,6 +306,23 @@ do_verify() {
   local f
   for f in "$TMPD"/*.tar.gz; do verify "$f" || return 1; done
 }
+# Releases made before provenance was (v0.4): nothing to check them against.
+unattested() { case "$TAG" in v0.[0-3]|v0.[0-3][.-]*|v0.4-rc.*) return 0 ;; esac; return 1; }
+# SHA256SUMS comes from the release the archives come from: it tells of a broken download, not
+# of a release somebody else filled. Provenance does: GitHub's record (Sigstore) that this very
+# file was built by the release workflow of $REPO. Checking it takes the GitHub CLI, signed in;
+# without one it is not checked, and the summary says so.
+can_attest() { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }
+do_attest() {
+  local f
+  for f in "$TMPD"/*.tar.gz; do
+    gh attestation verify "$f" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml" >/dev/null 2>"$TMPD/attest.err" || {
+      echo "$(basename "$f") was not built by $REPO's release workflow, or GitHub has no record that it was:"
+      tail -5 "$TMPD/attest.err"
+      return 1
+    }
+  done
+}
 do_unpack() {
   # Unpacked beside the installed one, then swapped in (do_swap): a failed step leaves it as it was.
   rm -rf "$HOME_DIR.new" "$TMPD/x" && mkdir -p "$TMPD/x" "$(dirname "$HOME_DIR")"
@@ -309,15 +336,45 @@ do_unpack() {
       chmod +x "$HOME_DIR.new/daemons/$t/nibd"
     done
   fi
-  [ -f "$STATE" ] && cp "$STATE" "$HOME_DIR.new/install-state"
+  [ -f "$STATE_READ" ] && cp "$STATE_READ" "$HOME_DIR.new/install-state"
   chmod +x "$HOME_DIR.new/nib" "$HOME_DIR.new/nibd"
   if [ "$OS" = Darwin ]; then xattr -dr com.apple.quarantine "$HOME_DIR.new" 2>/dev/null || true; fi
 }
+# What an install is made of (scripts/build/package.sh, the daemons, this script's state, and the
+# nibble.app the window makes beside nib on macOS).
+PROGRAM="nib nibd BUILD_INFO .skills LICENSE README.md icon.svg nibble.icns nibble.app daemons install-state"
+# rm_program DIR [LIKE]: take the program's files out of DIR, by name (and whatever is named as
+# in LIKE, a newer install), then DIR itself if nothing is left. Never the folder whole: what
+# nib did not put there is somebody's, and before v0.4 that was the user's conversations and
+# work trees.
+rm_program() {
+  local dir="$1" like="${2:-}" n left
+  [ -d "$dir" ] || return 0
+  for n in $PROGRAM; do rm -rf "${dir:?}/$n"; done
+  if [ -n "$like" ] && [ -d "$like" ]; then
+    for n in "$like"/* "$like"/.[!.]*; do
+      [ -e "$n" ] && rm -rf "${dir:?}/$(basename "$n")"
+    done
+  fi
+  rmdir "$dir" 2>/dev/null && return 0
+  # nib's data folder: what is left there is the user's, as it should be.
+  [ "$dir" = "$OLD_DIR" ] && return 0
+  left=$(ls -A "$dir" | tr '\n' ' ')
+  note "${D}left in $(tilde "$dir"), not the installer's: ${left% }${R}"
+}
 do_swap() {
-  rm -rf "$HOME_DIR.old"
+  # An interrupted run's: its program files only, like any other.
+  rm_program "$HOME_DIR.old" "$HOME_DIR.new"
+  [ -d "$HOME_DIR.old" ] && { echo "$HOME_DIR.old is in the way: move it aside and run this again"; return 1; }
   [ -d "$HOME_DIR" ] && mv "$HOME_DIR" "$HOME_DIR.old"
   mv "$HOME_DIR.new" "$HOME_DIR"
-  rm -rf "$HOME_DIR.old"
+  rm_program "$HOME_DIR.old" "$HOME_DIR"
+  # An install from before v0.4, in nib's data folder: the program leaves it, the data stays.
+  if [ $LEGACY = 1 ]; then
+    rm_program "$OLD_DIR"
+    note "${D}nib moved from $(tilde "$OLD_DIR") to $(tilde "$HOME_DIR"); your conversations and work trees stay in $(tilde "$OLD_DIR")${R}"
+  fi
+  return 0
 }
 # A two-line script rather than a symlink: nib finds its daemon and skills next to the real binary.
 wrapper() {  # wrapper NAME
@@ -424,6 +481,9 @@ install() {
   rule
   step "Download"     "nibble-$TAG-$TRIPLE.tar.gz$([ $OPT_REMOTES = 1 ] && echo " + the Linux daemons")" do_download
   step "Check sha256" "against the release's SHA256SUMS" do_verify
+  if unattested; then note "${D}$TAG was released before nib's builds carried provenance: not checked${R}"
+  elif can_attest; then step "Provenance" "built by $REPO's release workflow (gh attestation verify)" do_attest
+  else note "${D}provenance not checked: that takes the GitHub CLI, signed in (gh auth login), then run this again${R}"; fi
   step "Unpack"       "into $H" do_unpack
   step "Swap in"      "$([ -n "$HAVE" ] && echo "replacing $HAVE" || echo "$H")" do_swap
   step "Commands"     "nib, nibd in $(tilde "$BIN")" do_link
@@ -455,12 +515,12 @@ finish() {
 
 # ── uninstall ───────────────────────────────────────────────────────────────
 un_skills() {
-  [ -f "$STATE" ] || return 0
+  [ -f "$STATE_READ" ] || return 0
   local p h
   while read -r p h; do
     [ -d "$p" ] || continue
     if [ "$(dirhash "$p")" = "$h" ]; then rm -rf "$p"; else note "${Y}!${R} kept your edited $(tilde "$p")"; fi
-  done < "$STATE"
+  done < "$STATE_READ"
 }
 un_links() {
   local n
@@ -478,13 +538,18 @@ un_icon() {
   rm -rf "$HOME/Applications/nibble.app" "$HOME/Applications/nib.app"
   rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nibble.desktop" "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nib.desktop"
 }
-un_program() { rm -rf "$HOME_DIR"; }
+un_program() {
+  rm_program "$HOME_DIR"
+  [ $LEGACY = 1 ] && rm_program "$OLD_DIR"
+  return 0
+}
 
 uninstall() {
   local ans
   say "  ${B}${WHITE}Remove nib${R}  ${D}your settings in ~/.config/nib and your projects stay${R}"
+  say "  ${D}so do your conversations and agents' work trees, in $(tilde "${XDG_DATA_HOME:-$HOME/.local/share}/nib")${R}"
   say ""
-  [ -d "$HOME_DIR" ] || [ -e "$BIN/nib" ] || { say "  ${D}nib isn't installed in $(tilde "$PREFIX").${R}"; exit 0; }
+  [ -d "$HOME_DIR" ] || [ -e "$BIN/nib" ] || [ $LEGACY = 1 ] || { say "  ${D}nib isn't installed in $(tilde "$PREFIX").${R}"; exit 0; }
   if [ $YES = 0 ]; then
     printf '  Remove it? %s[y/N]%s ' "$D" "$R"; IFS= read -r ans <"$TTY"
     case "$ans" in y|Y|yes) ;; *) say "  ${D}nothing was changed.${R}"; exit 0 ;; esac
@@ -494,7 +559,7 @@ uninstall() {
   step "Commands"     "nib, nibd in $(tilde "$BIN")" un_links
   step "PATH line"    "the line marked by the installer" un_path
   step "App icon"     "nibble.app / nibble.desktop" un_icon
-  step "Program"      "$(tilde "$HOME_DIR")" un_program
+  step "Program"      "$(tilde "$HOME_DIR")$([ $LEGACY = 1 ] && echo ", and nib's files in $(tilde "$OLD_DIR")")" un_program
   rule
   [ -s "$TMPD/notes" ] && { say ""; sed 's/^/  /' "$TMPD/notes"; }
   say ""; say "  ${G}${B}nib is removed.${R}"; say ""

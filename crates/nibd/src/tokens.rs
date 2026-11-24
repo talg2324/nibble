@@ -4,8 +4,11 @@
 //! environment (`$NIB_TOKEN`, beside `$NIB_AGENT`), every request carries it, and the daemon
 //! acts only on a request whose token it gave out, as the agent it gave it to.
 //!
-//! Tokens live in this process: they are as good as the daemon that runs the agents, and gone
-//! with it.
+//! A token alone is not enough: each agent leaves its requests in its own part of the mailbox
+//! (`mail::own`), and the daemon acts on one only when its token is that folder's agent's. So a
+//! token read from another agent's request is of no use to an agent that cannot write there.
+//!
+//! Tokens live in this process: gone with the daemon, and each with its agent ([`revoke`]).
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -52,6 +55,14 @@ pub fn who(token: &str) -> Option<String> {
     GIVEN.lock().unwrap().as_ref()?.get(token).cloned()
 }
 
+/// Take back the token of `agent`, whose last session ended: what still carries it is refused.
+/// A session of that name started later gets a new one.
+pub fn revoke(agent: &str) {
+    if let Some(map) = GIVEN.lock().unwrap().as_mut() {
+        map.retain(|_, a| a != agent);
+    }
+}
+
 /// Make `dir` (a mailbox folder) readable and writable by its owner only. On Windows the
 /// folder is under the user's own profile, which other users cannot open already.
 pub fn private(dir: &std::path::Path) {
@@ -79,5 +90,10 @@ mod tests {
         assert_eq!(who(&b).as_deref(), Some("codex-92"));
         assert_eq!(who(""), None);
         assert_eq!(who("0123456789abcdef0123456789abcdef"), None);
+        // Taken back when the agent ends; another's is untouched, and the name gets a new one.
+        revoke("claude-91");
+        assert_eq!(who(&a), None);
+        assert_eq!(who(&b).as_deref(), Some("codex-92"));
+        assert_ne!(issue("claude-91"), a);
     }
 }

@@ -30,9 +30,10 @@ pub fn print((out, code): (String, i32)) -> i32 {
     code
 }
 
-/// `$NIB_MAILBOX/SUB` with its `req/` and `res/` made (see `rpc`), when nib started this agent
-/// (its mailbox folder has an `outbox/`). `None`: it did not, or the folders cannot be made.
+/// This agent's own folder for requests of kind `sub` (`app`, `web`), with its `req/` and `res/`
+/// made (see `rpc`), when nib started this agent (`mail::owner`). `None`: it did not, or the
+/// folders cannot be made.
 pub fn rpc_dir(sub: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("NIB_MAILBOX").map(PathBuf::from).filter(|d| d.join("outbox").is_dir()).map(|d| d.join(sub))?;
+    let dir = crate::mail::owner().map(|(dir, me)| crate::mail::own(&dir, &me).join(sub))?;
     (std::fs::create_dir_all(dir.join("req")).is_ok() && std::fs::create_dir_all(dir.join("res")).is_ok()).then_some(dir)
 }

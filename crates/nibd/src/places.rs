@@ -11,8 +11,14 @@
 //!   `<XDG_CACHE_HOME or ~/.cache>/nib/scratch/<project name>-<pid>/`. Deleted once its daemon is
 //!   gone and nothing in it changed for a day.
 //!
-//! On Windows (no XDG variables set) both live under `%LOCALAPPDATA%\nib\`: `data\nibdir\…` and
-//! `cache\scratch\…`.
+//! - **private**: the daemon's own, one per project, which no agent is given to write and no
+//!   terminal is told of: `<XDG_DATA_HOME or ~/.local/share>/nib/private/<folder>-<hash of the
+//!   root>/` (a temp project's: next to its scratch, and deleted with it). For what nib must be able to believe later: which apps the user approved
+//!   (`serve`), and the branch, plan and review of a conversation that may be reopened
+//!   (`work::persist`). NIBDIR is no place for those: agents write there.
+//!
+//! On Windows (no XDG variables set) these live under `%LOCALAPPDATA%\nib\`: `data\nibdir\…`,
+//! `data\private\…` and `cache\scratch\…`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,6 +29,9 @@ const KEEP_SCRATCH: Duration = Duration::from_secs(24 * 3600);
 pub struct Places {
     pub scratch: PathBuf,
     pub nibdir: PathBuf,
+    /// The daemon's own folder for this project (`None`: it could not be made, and then nothing
+    /// is approved or kept for later).
+    pub private: Option<PathBuf>,
 }
 
 fn home() -> Option<PathBuf> {
@@ -62,7 +71,7 @@ pub fn project_name(root: &Path) -> String {
     read_index(&index).get(&*root.to_string_lossy()).cloned().unwrap_or_else(|| slug(root))
 }
 
-fn private_dir(p: &Path) -> std::io::Result<()> {
+pub(crate) fn private_dir(p: &Path) -> std::io::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]
@@ -99,6 +108,9 @@ pub fn private_temp() -> Option<&'static Path> {
 /// Suffix of a temp project's throwaway NIBDIR, next to its scratch directory.
 const TEMP_NIBDIR: &str = ".nibdir";
 
+/// Suffix of a temp project's throwaway private folder, next to its scratch directory.
+const TEMP_PRIVATE: &str = ".private";
+
 /// `root` (canonical) is inside a temp directory.
 fn in_temp(root: &Path) -> bool {
     let tmp = std::env::temp_dir();
@@ -125,7 +137,16 @@ pub fn setup(root: &Path) -> std::io::Result<Places> {
         dir.join(nibdir_name(&dir, root, &slug)?)
     };
     private_dir(&nibdir)?;
-    Ok(Places { scratch, nibdir })
+    // Named by the whole root, not by the folder's name alone: two projects called `app` must
+    // not share what the user approved.
+    let digest: String = <sha2::Sha256 as sha2::Digest>::digest(root.to_string_lossy().as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let private = match in_temp(root) {
+        // A temp project's goes with its scratch and NIBDIR.
+        true => base.join(format!("{slug}-{}{TEMP_PRIVATE}", std::process::id())),
+        false => xdg("XDG_DATA_HOME", &[".local", "share"]).join("private").join(format!("{slug}-{digest}")),
+    };
+    let private = private_dir(&private).is_ok().then_some(private);
+    Ok(Places { scratch, nibdir, private })
 }
 
 type Index = std::collections::BTreeMap<String, String>;
@@ -212,7 +233,7 @@ fn prune(base: &Path) {
     let Ok(entries) = std::fs::read_dir(base) else { return };
     for e in entries.flatten() {
         let p = e.path();
-        let name = p.file_name().and_then(|n| n.to_str()).map(|n| n.trim_end_matches(TEMP_NIBDIR));
+        let name = p.file_name().and_then(|n| n.to_str()).map(|n| n.trim_end_matches(TEMP_NIBDIR).trim_end_matches(TEMP_PRIVATE));
         let Some(pid) = name.and_then(|n| n.rsplit_once('-')).and_then(|(_, pid)| pid.parse::<u32>().ok())
         else {
             continue;

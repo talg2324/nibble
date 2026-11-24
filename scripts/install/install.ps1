@@ -262,6 +262,25 @@ function Install-Nib {
         Step 'Check sha256' "against the release's SHA256SUMS" {
             Get-ChildItem $tmp -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | ForEach-Object { Verify $_.FullName (Join-Path $tmp 'SHA256SUMS') }
         }
+        # SHA256SUMS comes from the release the archives come from: it tells of a broken download,
+        # not of a release somebody else filled. Provenance does: GitHub's record (Sigstore) that
+        # this very file was built by the release workflow of $Repo. Checking it takes the GitHub
+        # CLI, signed in; without one it is not checked, and the summary says so. Releases made
+        # before provenance was (v0.4) have nothing to be checked against.
+        $ghIn = $false
+        if (Get-Command gh -ErrorAction SilentlyContinue) { & gh auth status *> $null; $ghIn = ($LASTEXITCODE -eq 0) }
+        if ($Tag -match '^v0\.[0-3]([.-]|$)' -or $Tag -match '^v0\.4-rc\.') {
+            $Notes.Add("$D$Tag was released before nib's builds carried provenance: not checked$R")
+        } elseif ($ghIn) {
+            Step 'Provenance' "built by $Repo's release workflow (gh attestation verify)" {
+                Get-ChildItem $tmp -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | ForEach-Object {
+                    $said = & gh attestation verify $_.FullName --repo $Repo --signer-workflow "$Repo/.github/workflows/release.yml" 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "$($_.Name) was not built by $Repo's release workflow, or GitHub has no record that it was: $(($said | Select-Object -Last 3) -join ' ')" }
+                }
+            }
+        } else {
+            $Notes.Add("${D}provenance not checked: that takes the GitHub CLI, signed in (gh auth login), then run this again$R")
+        }
         Step 'Unpack' (tilde $Dir) {
             # Unpacked beside the installed one, then swapped in: a failed step leaves it as it was.
             if (Test-Path $new) { Remove-Item -Recurse -Force $new }

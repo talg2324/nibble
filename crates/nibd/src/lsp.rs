@@ -556,11 +556,23 @@ fn find_ty() -> Option<Vec<String>> {
 // reading the server
 // ---------------------------------------------------------------------------------------------
 
+/// A header line longer than this is not a language server's.
+const MAX_HEADER: u64 = 8 * 1024;
+/// The largest message taken (a whole project's diagnostics or symbols is a few megabytes).
+const MAX_MESSAGE: usize = 64 * 1024 * 1024;
+
+/// The next message of a language server. `None`: its output ended, or is not the protocol
+/// (and then it is not read further: the server is taken for gone). A server is a program the
+/// project chose, so what it sends is bounded before any of it is kept: a header line that
+/// never ends, or a length of gigabytes, would otherwise be memory nibd asks for at its word.
 fn read_msg(r: &mut impl BufRead) -> Option<Value> {
     let mut len = None;
     loop {
         let mut line = String::new();
-        if r.read_line(&mut line).ok()? == 0 {
+        if std::io::Read::take(&mut *r, MAX_HEADER).read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if !line.ends_with('\n') {
             return None;
         }
         let line = line.trim_end();
@@ -573,7 +585,7 @@ fn read_msg(r: &mut impl BufRead) -> Option<Value> {
             }
         }
     }
-    let mut buf = vec![0; len?];
+    let mut buf = vec![0; len.filter(|n| *n <= MAX_MESSAGE)?];
     r.read_exact(&mut buf).ok()?;
     serde_json::from_slice(&buf).ok()
 }
@@ -949,6 +961,27 @@ fn uri_to_path(uri: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_servers_message_is_bounded_before_it_is_kept() {
+        let msg = |text: &str| read_msg(&mut std::io::Cursor::new(text.as_bytes().to_vec()));
+        assert_eq!(msg("Content-Length: 2\r\nContent-Type: x\r\n\r\n{}"), Some(serde_json::json!({})));
+        // A length nobody would send: refused before a byte is asked of the system for it.
+        assert_eq!(msg(&format!("Content-Length: {}\r\n\r\n{{}}", usize::MAX)), None);
+        assert_eq!(msg(&format!("Content-Length: {}\r\n\r\n{{}}", MAX_MESSAGE + 1)), None);
+        // A header line that never ends is read no further than a header may be long.
+        struct Endless(u64);
+        impl std::io::Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += buf.len() as u64;
+                buf.fill(b'x');
+                Ok(buf.len())
+            }
+        }
+        let mut endless = BufReader::new(Endless(0));
+        assert_eq!(read_msg(&mut endless), None);
+        assert!(endless.get_ref().0 <= MAX_HEADER + 64 * 1024, "read {} bytes of a header", endless.get_ref().0);
+    }
 
     #[test]
     fn config_over_builtins() {

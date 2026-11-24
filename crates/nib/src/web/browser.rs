@@ -209,7 +209,17 @@ user_pref("browser.download.manager.addToRecentDocs", false);
 user_pref("focusmanager.testmode", true);
 "#;
 
-/// Letters, digits, `-` and `_` of the project folder's name: the profile folder's name.
+/// Which project a profile is of: the folder's name, to read, and the start of a hash of
+/// everything that names the project (`App::web_project`: the machine and the whole path), so two
+/// projects that are both called `app`, here or on two machines, never share cookies and
+/// storage (they are served at the same `localhost:PORT`).
+fn profile_name(key: &str) -> String {
+    use sha2::Digest as _;
+    let digest: String = sha2::Sha256::digest(key.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect();
+    format!("{}-{digest}", slug(key))
+}
+
+/// Letters, digits, `-` and `_` of the project folder's name.
 fn slug(root: &str) -> String {
     let name: String = root
         .trim_end_matches(['/', '\\'])
@@ -232,7 +242,16 @@ fn owner(profile: &Path) -> Option<(u32, u32)> {
 /// that is still running has it. A browser left behind by a nib that is gone is stopped first.
 /// Each browser keeps its own (`proj.firefox`, `proj.chrome`): their profiles are not alike.
 fn claim(base: &Path, root: &str, browser: &str) -> Result<PathBuf> {
-    let name = format!("{}.{}", slug(root), browser.to_lowercase());
+    let name = format!("{}.{}", profile_name(root), browser.to_lowercase());
+    // Before v0.4 a profile was named by the folder's name alone, and so was shared by every
+    // project of that name: those go, with what they kept, unless a running nib still has one.
+    let old = format!("{}.{}", slug(root), browser.to_lowercase());
+    for n in 1..=20 {
+        let dir = base.join(if n == 1 { old.clone() } else { format!("{old}-{n}") });
+        if dir.is_dir() && !owner(&dir).is_some_and(|(nib, _)| sys::alive(nib)) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
     for n in 1..=20 {
         let dir = base.join(if n == 1 { name.clone() } else { format!("{name}-{n}") });
         match owner(&dir) {
@@ -460,17 +479,29 @@ mod tests {
         let base = std::env::temp_dir().join(format!("nib-web-claim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         // Free: the project's own.
-        let first = claim(&base, "/x/proj", "Firefox").unwrap();
-        assert_eq!(first.file_name().unwrap(), "proj.firefox");
-        assert_eq!(claim(&base, "/x/proj", "Chrome").unwrap().file_name().unwrap(), "proj.chrome");
+        let first = claim(&base, "local:/x/proj", "Firefox").unwrap();
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        let stem = name.strip_suffix(".firefox").unwrap().to_string();
+        assert!(stem.starts_with("proj-") && stem.len() == "proj-".len() + 8, "{name}");
+        assert_eq!(claim(&base, "local:/x/proj", "Chrome").unwrap().file_name().unwrap().to_string_lossy(), format!("{stem}.chrome"));
+        // Another project of the same name, here or on another machine, has its own: they are
+        // all served at localhost, and would read each other's cookies and storage.
+        let others: Vec<String> = ["local:/y/proj", "@gpu:/x/proj"].iter().map(|k| claim(&base, k, "Firefox").unwrap().file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert!(others.iter().all(|o| o.starts_with("proj-") && *o != name) && others[0] != others[1], "{others:?}");
+        // One named as before v0.4, by the folder's name alone, goes with what it kept.
+        let shared = base.join("proj.firefox");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("cookies.sqlite"), "another project's").unwrap();
+        claim(&base, "local:/x/proj", "Firefox").unwrap();
+        assert!(!shared.exists());
         // Held by a process that is alive and is not us (pid 1 always is, on Unix): the next one.
         if cfg!(unix) {
             std::fs::write(first.join(OWNER_FILE), json!({ "nib": 1, "firefox": 0 }).to_string()).unwrap();
-            assert_eq!(claim(&base, "/x/proj", "Firefox").unwrap().file_name().unwrap(), "proj.firefox-2");
+            assert_eq!(claim(&base, "local:/x/proj", "Firefox").unwrap().file_name().unwrap().to_string_lossy(), format!("{name}-2"));
         }
         // Held by a nib that is gone: taken back.
         std::fs::write(first.join(OWNER_FILE), json!({ "nib": 0x7fff_fff0u32, "firefox": 0x7fff_fff1u32 }).to_string()).unwrap();
-        assert_eq!(claim(&base, "/x/proj", "Firefox").unwrap().file_name().unwrap(), "proj.firefox");
+        assert_eq!(claim(&base, "local:/x/proj", "Firefox").unwrap().file_name().unwrap().to_string_lossy(), name);
         let _ = std::fs::remove_dir_all(&base);
     }
 

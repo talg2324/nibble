@@ -197,6 +197,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v5
       # Not `assets/`: the checkout has one (the logo, the README's pictures).
@@ -209,6 +211,21 @@ jobs:
             if [[ -f "$f" ]]; then cp "$f" release-assets/; fi
           done
           (cd release-assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      # Build provenance (Sigstore, kept by GitHub): says that this very file was made by this
+      # workflow of this repository, at this commit. SHA256SUMS comes from the same release as
+      # the files, so it tells of a broken download, not of a release somebody else filled;
+      # the installers check this as well when they can (`gh attestation verify`).
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release-assets/*
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in release-assets/*.tar.gz release-assets/*.zip; do
+            [[ -f "$f" ]] || continue
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" > /dev/null \
+              || { echo "::error::$f has no provenance that verifies"; exit 1; }
+          done
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.check.outputs.version }}
@@ -225,6 +242,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -252,6 +271,24 @@ jobs:
             esac
           done
           (cd out && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      # The archives were packed again under their new name, so they are new files: attested
+      # as this workflow's, like a release's.
+      # Build provenance (Sigstore, kept by GitHub): says that this very file was made by this
+      # workflow of this repository, at this commit. SHA256SUMS comes from the same release as
+      # the files, so it tells of a broken download, not of a release somebody else filled;
+      # the installers check this as well when they can (`gh attestation verify`).
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: out/*
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in out/*.tar.gz out/*.zip; do
+            [[ -f "$f" ]] || continue
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" > /dev/null \
+              || { echo "::error::$f has no provenance that verifies"; exit 1; }
+          done
+      - run: |
           gh release create "$TAG" out/* --verify-tag --title "nibble $TAG" \
             --notes "Promoted from $RC (same binaries, smoke-tested)." --generate-notes --latest
 
@@ -302,10 +339,10 @@ jobs:
           else
             curl -fsSL "$LATEST/install.sh" | bash -s -- --yes --remotes
           fi
-          N="$HOME/.local/share/nib/nib"
+          N="$HOME/.local/lib/nib/nib"
           "$N" --version
-          grep -q "commit ${COMMIT::7}" "$HOME/.local/share/nib/BUILD_INFO" \
-            || { echo "::error::installed a different build:"; cat "$HOME/.local/share/nib/BUILD_INFO"; exit 1; }
+          grep -q "commit ${COMMIT::7}" "$HOME/.local/lib/nib/BUILD_INFO" \
+            || { echo "::error::installed a different build:"; cat "$HOME/.local/lib/nib/BUILD_INFO"; exit 1; }
           out="$("$N" grammar add python 2>&1)"; echo "$out"
           grep -q "added python (prebuilt)" <<< "$out" || { echo "::error::python was not installed from the release's bundle"; exit 1; }
       # The web leg's "another machine": a name nib takes for another machine (only localhost,
@@ -316,7 +353,7 @@ jobs:
         run: |
           if [[ "$RUNNER_OS" == macOS ]]; then
             echo "127.0.0.1 outside.test" | sudo tee -a /etc/hosts >/dev/null
-            NIB="$HOME/.local/share/nib/nib" NIB_E2E_OUTSIDE=outside.test scripts/test/e2e.sh
+            NIB="$HOME/.local/lib/nib/nib" NIB_E2E_OUTSIDE=outside.test scripts/test/e2e.sh
           else
             echo "127.0.0.1 outside.test" >> /etc/hosts
             # Chrome will not run as root without --no-sandbox, which nib does not pass: here, as
@@ -332,7 +369,7 @@ jobs:
               else
                 curl -fsSL "$LATEST/install.sh" | bash -s -- --yes --no-modify-path > /dev/null
               fi
-              NIB="$HOME/.local/share/nib/nib" NIB_E2E_OUTSIDE=outside.test scripts/test/e2e.sh'
+              NIB="$HOME/.local/lib/nib/nib" NIB_E2E_OUTSIDE=outside.test scripts/test/e2e.sh'
           fi
       - name: install, version, grammar, headless edit (Windows)
         if: runner.os == 'Windows'

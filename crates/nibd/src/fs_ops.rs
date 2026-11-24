@@ -10,13 +10,40 @@ use std::time::UNIX_EPOCH;
 /// (mailbox, apps, reviews, plans, branch records). A file the user edits goes through
 /// `write_file`, which keeps permissions and syncs.
 pub fn write_whole(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()));
-    fs::write(&tmp, bytes).and_then(|_| fs::rename(&tmp, path)).inspect_err(|_| {
+    let (mut f, tmp) = new_beside(path, None)?;
+    f.write_all(bytes.as_ref()).and_then(|_| fs::rename(&tmp, path)).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
+}
+
+/// A new, empty file beside `target`, to be written and renamed over it, and its path.
+///
+/// The folder may be one others write too (a shared checkout, an agent's work tree). So the
+/// name cannot be told in advance (64 random bits), and the file is made only if nothing has
+/// that name (`create_new`: never through a link somebody left there, never a file somebody
+/// else made). `mode` (Unix): the permissions it is made with, for a target whose own are
+/// narrower than the default, so that what is written is at no moment readable by more
+/// people than the target is.
+pub(crate) fn new_beside(target: &Path, mode: Option<u32>) -> std::io::Result<(fs::File, PathBuf)> {
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut last = None;
+    for _ in 0..8 {
+        let tmp = target.with_file_name(format!(".{name}.nib-{}.tmp", &crate::tokens::fresh()[..16]));
+        let mut open = fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            std::os::unix::fs::OpenOptionsExt::mode(&mut open, mode & 0o7777);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        match open.open(&tmp) {
+            Ok(f) => return Ok((f, tmp)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no name for a temporary file")))
 }
 
 pub fn expand_home(p: &str) -> PathBuf {
@@ -79,24 +106,22 @@ pub fn write_file(
             ));
         }
     }
-    let dir = target
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.nib-{}.tmp", std::process::id()));
-    {
-        let mut f = fs::File::create(&tmp)?;
+    #[cfg(unix)]
+    let mode = existing.as_ref().map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()));
+    #[cfg(not(unix))]
+    let mode = None;
+    let (mut f, tmp) = new_beside(&target, mode)?;
+    let written = (|| {
         f.write_all(data)?;
         f.sync_all()?;
+        // Exactly the target's, whatever the umask took from the mode it was made with.
         if let Some(meta) = &existing {
             fs::set_permissions(&tmp, meta.permissions())?;
         }
-    }
-    if let Err(e) = fs::rename(&tmp, &target) {
+        drop(f);
+        fs::rename(&tmp, &target)
+    })();
+    if let Err(e) = written {
         let _ = fs::remove_file(&tmp);
         return Err(e.into());
     }
@@ -207,4 +232,42 @@ pub fn fs_op(root: &Path, op: &FsOp) -> Result<Response, RpcError> {
         }
     }
     Ok(Response::Ok)
+}
+
+#[cfg(all(test, unix))]
+mod write_tests {
+    use super::*;
+
+    /// A folder others may write (a shared checkout, an agent's work tree): a link left where the
+    /// temporary file used to be made, by a name that could be told in advance, sent the save
+    /// through it, into any file the user may write.
+    #[test]
+    fn a_save_does_not_follow_a_link_left_where_its_temporary_file_goes() {
+        let dir = std::env::temp_dir().join(format!("nibd-save-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("shared")).unwrap();
+        let (victim, target) = (dir.join("authorized_keys"), dir.join("shared/notes.txt"));
+        fs::write(&victim, "the user's keys\n").unwrap();
+        fs::write(&target, "old\n").unwrap();
+        for name in ["notes.txt", "state.json"] {
+            // The names both writers used before: the process id, and a count from 0.
+            for planted in [format!(".{name}.nib-{}.tmp", std::process::id()), format!(".{name}.{}-0.tmp", std::process::id())] {
+                std::os::unix::fs::symlink(&victim, dir.join("shared").join(planted)).unwrap();
+            }
+        }
+        write_file(&target, b"new\n", None).unwrap();
+        write_whole(&dir.join("shared/state.json"), "{}").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "the user's keys\n");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert!(!fs::symlink_metadata(&target).unwrap().file_type().is_symlink() && !fs::symlink_metadata(dir.join("shared/state.json")).unwrap().file_type().is_symlink());
+        // A file that was private stays so, and is never anything wider on the way.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        write_file(&target, b"secret\n", None).unwrap();
+        assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+        // Nothing is left beside them.
+        let left: Vec<String> = fs::read_dir(dir.join("shared")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp") && !fs::symlink_metadata(dir.join("shared").join(n)).unwrap().file_type().is_symlink()).collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
