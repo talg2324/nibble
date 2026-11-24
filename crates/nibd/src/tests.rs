@@ -437,7 +437,9 @@ fn search_names_and_lines_skipping_hidden_ignored_and_binary() {
     let res = run(vec![hello(&dir), Request::Search { query: "needle".into(), max: 1 }]);
     let Ok(Response::Search(found)) = &res[1] else { panic!() };
     assert!(found.lines.len() == 1 && found.truncated);
-    std::fs::remove_dir_all(&dir).unwrap();
+    // Best effort, like the other tests: on Windows a handle the search left open (a git child,
+    // the watcher) can still hold the folder for a moment (os error 32).
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A folder that arrives with its own `.git` (an archive, a copied directory) must not run what
