@@ -103,6 +103,20 @@ struct Langs {
     output: Option<Result<String, String>>,
     /// Opened on startup; `[editor] languages_offered` is written when the page closes.
     first_run: bool,
+    /// "Compile on save": one row per built-in compiler.
+    compile: Vec<CompileRow>,
+}
+
+/// A compiler on the Languages page.
+struct CompileRow {
+    lang: String,
+    /// The program as typed (empty: the default's).
+    program: String,
+    on: bool,
+    /// Where nibd finds it, or how to install it; `None` until it answers.
+    found: Option<Result<String, String>>,
+    /// Being written to config.toml.
+    saving: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +164,11 @@ pub enum Msg {
     PickLanguage(&'static str),
     AddLanguages,
     LanguagesAdded(Result<String, String>),
+    CompileProgram(usize, String),
+    CompileToggle(usize),
+    CompileSave(usize),
+    /// `[compile.*]` written: the compilers as they are now.
+    CompileSaved(Result<Vec<super::compile::Compiler>, String>),
 }
 
 /// Window size presets (logical px). Ones larger than the monitor are hidden.
@@ -350,6 +369,7 @@ impl App {
         }
         if page == Page::Languages {
             self.settings.langs.added = added_languages();
+            return Task::batch([mark, self.compile_rows()]);
         }
         mark
     }
@@ -492,6 +512,39 @@ impl App {
                 st.output = None;
                 let langs: Vec<String> = st.picked.iter().map(|l| l.to_string()).collect();
                 return Task::perform(add_languages(langs), |r| s(Msg::LanguagesAdded(r)));
+            }
+            Msg::CompileProgram(i, v) => {
+                if let Some(r) = self.settings.langs.compile.get_mut(i) {
+                    r.program = v;
+                }
+            }
+            Msg::CompileToggle(i) => {
+                if let Some(r) = self.settings.langs.compile.get_mut(i) {
+                    r.on = !r.on;
+                    return self.update(s(Msg::CompileSave(i)));
+                }
+            }
+            Msg::CompileSave(i) => {
+                let Some(r) = self.settings.langs.compile.get_mut(i) else { return Task::none() };
+                if r.saving {
+                    return Task::none();
+                }
+                r.saving = true;
+                let (lang, program, on) = (r.lang.clone(), r.program.trim().to_string(), r.on);
+                return Task::perform(save_compile(lang, program, on), |r| s(Msg::CompileSaved(r)));
+            }
+            Msg::CompileSaved(r) => {
+                for row in &mut self.settings.langs.compile {
+                    row.saving = false;
+                }
+                return match r {
+                    Ok(list) => {
+                        self.compilers = list;
+                        let rows = self.compile_rows();
+                        Task::batch([rows, self.flash_info("saved: the next save of such a file compiles with it")])
+                    }
+                    Err(e) => self.flash_warn(e),
+                };
             }
             Msg::LanguagesAdded(r) => {
                 let st = &mut self.settings.langs;
@@ -764,6 +817,8 @@ impl App {
             .collect();
         let lsp_changed = lsp != self.lsp;
         self.lsp = lsp;
+        // Compilers: the next save uses them.
+        self.compilers = super::compile::compilers(&cfg.compile);
         if self.ai.adopt_switches(&cfg.ai) {
             self.ai_tell_wpf();
         }
@@ -1400,6 +1455,7 @@ impl App {
                 col = col.push(text("Open a new nib window to use them.").size(12).color(th.foreground));
             }
         }
+        col = col.push(self.compile_section());
         col = col.push(self.section("Other languages"));
         col = col.push(
             text("Add any other language with `nib grammar add <language>`; `nib grammar list --available` lists them, `nib grammar rm` takes one away.")
@@ -1407,6 +1463,96 @@ impl App {
                 .color(th.dim),
         );
         col.into()
+    }
+
+    /// "Compile on save": each built-in compiler, on or off, the program it runs, and whether
+    /// nibd finds it on the machine with the files.
+    fn compile_section(&self) -> Element<'_, Message> {
+        let th = &self.theme;
+        let mut col = column![
+            self.section("Compile on save"),
+            text("Saving one of these files runs its compiler on the machine with the files; the PDF shows beside the source, errors on their lines. A `% !TEX root = main.tex` (or `// !typst root = main.typ`) line near the top compiles that file instead.")
+                .size(12)
+                .color(th.dim),
+        ]
+        .spacing(4);
+        let defaults = super::compile::builtin();
+        for (i, r) in self.settings.langs.compile.iter().enumerate() {
+            let default = defaults.iter().find(|d| d.lang == r.lang);
+            let title = match r.lang.as_str() {
+                "typst" => "Typst (.typ)".to_string(),
+                "latex" => "LaTeX (.tex)".to_string(),
+                other => other.to_string(),
+            };
+            let placeholder = default.and_then(|d| d.command.first()).cloned().unwrap_or_default();
+            let toggle = self
+                .flat_button(
+                    row![text(if r.on { "☑" } else { "☐" }).size(13).color(if r.on { th.accent } else { th.dim }).width(16), text(title).size(12).color(th.foreground)]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    s(Msg::CompileToggle(i)),
+                )
+                .padding([5, 10]);
+            let input = text_input(&placeholder, &r.program)
+                .on_input(move |v| s(Msg::CompileProgram(i, v)))
+                .on_submit(s(Msg::CompileSave(i)))
+                .size(12)
+                .padding([3, 6])
+                .width(Length::Fill);
+            let save: Element<'_, Message> = if r.saving { text("Saving…").size(11).color(th.dim).into() } else { self.small_button("Save", s(Msg::CompileSave(i))) };
+            col = col.push(row![toggle, input, save].spacing(8).align_y(Alignment::Center));
+            let (status, color) = match &r.found {
+                _ if !r.on => ("off: saving doesn't compile".to_string(), th.dim),
+                None => ("looking for it…".to_string(), th.dim),
+                Some(Ok(p)) => (format!("found: {p}"), th.dim),
+                Some(Err(e)) => (e.clone(), th.warn),
+            };
+            col = col.push(container(text(status).size(11).color(color)).padding(Padding { left: 34.0, bottom: 4.0, ..Padding::ZERO }));
+        }
+        col.into()
+    }
+
+    /// The compile rows as the compilers are now, and nibd asked where their programs are.
+    fn compile_rows(&mut self) -> Task<Message> {
+        let defaults = super::compile::builtin();
+        let rows: Vec<CompileRow> = defaults
+            .iter()
+            .map(|d| {
+                let now = self.compilers.iter().find(|c| c.lang == d.lang);
+                let on = now.is_some_and(|c| !c.command.is_empty());
+                let program = now.and_then(|c| c.command.first()).filter(|p| Some(*p) != d.command.first()).cloned().unwrap_or_default();
+                CompileRow { lang: d.lang.clone(), program, on, found: None, saving: false }
+            })
+            .collect();
+        let names: Vec<String> = rows
+            .iter()
+            .map(|r| if r.program.is_empty() { defaults.iter().find(|d| d.lang == r.lang).and_then(|d| d.command.first()).cloned().unwrap_or_default() } else { r.program.clone() })
+            .collect();
+        self.settings.langs.compile = rows;
+        if !self.live() {
+            for r in &mut self.settings.langs.compile {
+                r.found = Some(Err("not connected".into()));
+            }
+            return Task::none();
+        }
+        self.request(nib_proto::Request::Which { names }, super::Pending::Which)
+    }
+
+    pub(super) fn on_which(&mut self, result: Result<nib_proto::Response, nib_proto::RpcError>) -> Task<Message> {
+        match result {
+            Ok(nib_proto::Response::Which(found)) => {
+                for (r, f) in self.settings.langs.compile.iter_mut().zip(found) {
+                    r.found = Some(f.path.ok_or(f.hint));
+                }
+            }
+            Err(e) => {
+                for r in &mut self.settings.langs.compile {
+                    r.found = Some(Err(e.to_string()));
+                }
+            }
+            Ok(_) => {}
+        }
+        Task::none()
     }
 
     fn shortcuts_page(&self) -> Element<'_, Message> {
@@ -1605,6 +1751,36 @@ impl App {
         .style(move |_| container::Style::default().background(panel))
         .into()
     }
+}
+
+
+/// Write `[compile.<lang>]` for the Languages page: `program` in place of the command's first
+/// word (the built-in one when empty), or `command = []` when turned off. Other fields of the
+/// entry are kept. Off the UI thread; answers with the compilers as config.toml now has them.
+async fn save_compile(lang: String, program: String, on: bool) -> Result<Vec<super::compile::Compiler>, String> {
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let r = (|| -> anyhow::Result<Vec<super::compile::Compiler>> {
+            let cfg = Config::load()?;
+            let mut entry = cfg.compile.get(&lang).cloned().unwrap_or_default();
+            let default = super::compile::builtin().into_iter().find(|c| c.lang == lang).map(|c| c.command).unwrap_or_default();
+            entry.command = if !on {
+                Some(Vec::new())
+            } else {
+                // The arguments as they were set (or the built-in ones), with the program swapped.
+                let mut cmd = entry.command.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| default.clone());
+                match cmd.first_mut() {
+                    Some(first) => *first = if program.is_empty() { default.first().cloned().unwrap_or_default() } else { program },
+                    None => cmd.push(program),
+                }
+                (cmd != default).then_some(cmd)
+            };
+            Config::save_compile(&lang, &entry)?;
+            Ok(super::compile::compilers(&Config::load()?.compile))
+        })();
+        let _ = tx.send(r.map_err(|e| format!("couldn't save: {e}")));
+    });
+    rx.await.unwrap_or_else(|_| Err("couldn't save".into()))
 }
 
 #[cfg(test)]

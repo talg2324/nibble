@@ -66,9 +66,10 @@
 
 # Language servers run inside nibd, on the machine with the code, and start when a file they serve
 # is opened. Built in: python (ty), rust (rust-analyzer), go (gopls), typescript
-# (typescript-language-server), c (clangd). A built-in name changes only the fields given; any
-# other name adds a server. A bare command is also looked up in the project's .venv and
-# node_modules/.bin, ~/.local/bin, ~/.cargo/bin and ~/go/bin.
+# (typescript-language-server), c (clangd), typst (tinymist), latex (texlab). A built-in name
+# changes only the fields given; any other name adds a server. A bare command is looked up in
+# $PATH, ~/.local/bin, ~/.cargo/bin, ~/go/bin, /opt/homebrew/bin and TeX's own folders (never
+# inside the project: name a project's own server by its path).
 # [lsp.python]
 # command = ["ty", "server"]     # default: ty from .venv, $PATH or ~/.local/bin, else uvx
 # [lsp.go]
@@ -77,6 +78,20 @@
 # command = ["zls"]
 # extensions = ["zig", "zon"]    # claiming an extension takes it from any other server
 # roots = ["build.zig"]          # topmost dir holding one is the server's root (default: nib's root)
+
+# Compile on save: saving a file of the language runs this on the machine with the code, and the
+# PDF shows beside the source (Settings → Languages sets the program). Built in: typst, latex.
+# Placeholders: {main} the saved file, or the root a `% !TEX root = main.tex` /
+# `// !typst root = main.typ` line near its top names; {dir} its folder; {stem} its name without
+# the extension; {pdf} the output. A built-in name changes only the fields given.
+# [compile.typst]
+# command = ["typst", "compile", "--diagnostic-format", "short", "{main}", "{pdf}"]
+# [compile.latex]
+# command = ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "-outdir={dir}", "{main}"]
+# pdf = "{dir}/{stem}.pdf"       # the file it writes (default)
+# [compile.pandoc]
+# command = ["pandoc", "{main}", "-o", "{pdf}"]
+# extensions = ["md"]            # a new compiler needs these two
 
 # The AI panel.
 [ai]

@@ -2,7 +2,7 @@
 //! and the pane are in `crate::pdf`.
 
 use super::viewers::open_external;
-use super::{App, Focus, Message};
+use super::{App, Focus, Message, Tab};
 use crate::media::Media;
 use crate::pdf::{self, Msg, PdfView, Target};
 use iced::widget::operation::{scroll_to, AbsoluteOffset};
@@ -22,8 +22,10 @@ fn scroll(to: Vector) -> Task<Message> {
 }
 
 impl App {
+    /// The PDF the active tab shows: a PDF file's, or the one a source file compiles to, when
+    /// its preview is shown.
     fn pdf_view(&mut self) -> Option<&mut PdfView> {
-        self.tabs.get_mut(self.active)?.media.as_mut()?.pdf_mut()
+        pane_pdf(self.tabs.get_mut(self.active)?)
     }
 
     pub(super) fn pdf_active(&self) -> bool {
@@ -48,6 +50,21 @@ impl App {
         match msg {
             Msg::Loaded(id, r) => {
                 let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+                // A source file's compiled PDF.
+                if let Some(o) = t.out.as_mut().filter(|_| t.media.is_none()) {
+                    let Ok(doc) = r else { return Task::none() };
+                    if let Some(v) = o.view.as_mut() {
+                        return scroll(v.replace_doc(doc));
+                    }
+                    let mut v = PdfView::new(doc, DEFAULT_DPI);
+                    // Half the window already: no outline beside it (open the PDF in a tab for that).
+                    v.outline_open = false;
+                    o.view = Some(Box::new(v));
+                    if self.headless {
+                        return Task::none();
+                    }
+                    return iced::window::latest().and_then(iced::window::scale_factor).map(|s| Message::Pdf(Msg::Dpi(s)));
+                }
                 // Read again (it was rebuilt): where it was being read, at the same zoom.
                 if let Some(v) = t.media.as_mut().and_then(Media::pdf_mut) {
                     return match r {
@@ -68,13 +85,13 @@ impl App {
                     .map(|s| Message::Pdf(Msg::Dpi(s)))
             }
             Msg::Rendered { tab, page, scale, result } => {
-                if let Some(v) = self.tabs.iter_mut().find(|t| t.id == tab).and_then(|t| t.media.as_mut()?.pdf_mut()) {
+                if let Some(v) = self.tabs.iter_mut().find(|t| t.id == tab).and_then(any_pdf) {
                     v.on_rendered(page, scale, result);
                 }
                 Task::none()
             }
             Msg::Dpi(dpi) => {
-                for v in self.tabs.iter_mut().filter_map(|t| t.media.as_mut()?.pdf_mut()) {
+                for v in self.tabs.iter_mut().filter_map(any_pdf) {
                     v.dpi = dpi;
                 }
                 Task::none()
@@ -127,7 +144,7 @@ impl App {
     pub(super) fn pdf_tick(&mut self) -> Task<Message> {
         let Some(tab) = self.tabs.get_mut(self.active) else { return Task::none() };
         let id = tab.id;
-        let Some(v) = tab.media.as_mut().and_then(Media::pdf_mut) else { return Task::none() };
+        let Some(v) = pane_pdf(tab) else { return Task::none() };
         let doc = v.doc.clone();
         Task::batch(v.wants().into_iter().map(|(page, scale)| {
             let doc = doc.clone();
@@ -170,4 +187,20 @@ impl App {
         };
         Some(scroll(v.scroll_by(dx, dy)))
     }
+}
+
+/// A PDF file's view, or a source file's compiled PDF whatever is shown.
+fn any_pdf(t: &mut Tab) -> Option<&mut PdfView> {
+    match t.media.as_mut() {
+        Some(m) => m.pdf_mut(),
+        None => t.out.as_mut()?.view.as_deref_mut(),
+    }
+}
+
+/// The PDF tab `t` shows now: its own, or its compiled PDF while the preview is open.
+fn pane_pdf(t: &mut Tab) -> Option<&mut PdfView> {
+    if t.media.is_none() && !t.rendered {
+        return None;
+    }
+    any_pdf(t)
 }

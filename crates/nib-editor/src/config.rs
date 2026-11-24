@@ -32,6 +32,29 @@ pub struct Config {
     /// `[languages.<name>]`: grammars loaded at runtime (written by `nib grammar add`).
     #[serde(default)]
     pub languages: BTreeMap<String, LanguageEntry>,
+    /// `[compile.<lang>]`: what runs when a file is saved (Typst, LaTeX), applied over the
+    /// built-in entries.
+    #[serde(default)]
+    pub compile: BTreeMap<String, CompileConfig>,
+}
+
+/// `[compile.<lang>]`: a compiler run on the daemon's machine each time a file of the language is
+/// saved, its output PDF shown beside the source. nib has built-in entries for `typst` and
+/// `latex`; one with either name changes only the fields it sets, any other name adds one (then
+/// `command` and `extensions` are needed). Placeholders, in `command` and `pdf`: `{main}` the
+/// file to compile (the saved one, or the root it names on a `% !TEX root = …` /
+/// `// !typst root = …` line), `{dir}` its folder, `{stem}` its name without the extension,
+/// `{pdf}` the output.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CompileConfig {
+    /// argv; a bare program name is looked up on the daemon's machine. `[]` turns it off.
+    pub command: Option<Vec<String>>,
+    /// File extensions it compiles, without the dot.
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    /// The PDF it writes. Default `{dir}/{stem}.pdf`.
+    pub pdf: Option<String>,
 }
 
 /// `[languages.<name>]`: a language whose grammar is a shared library in `grammars/` beside
@@ -112,13 +135,13 @@ impl Default for AiConfig {
 
 /// `[lsp.<name>]`: a language server. They run inside nibd, on the machine with the code. nibd
 /// has built-in ones (`python`: ty, `rust`: rust-analyzer, `go`: gopls, `typescript`:
-/// typescript-language-server, `c`: clangd); an entry with one of those names changes only the
+/// typescript-language-server, `c`: clangd, `typst`: tinymist, `latex`: texlab); an entry with one of those names changes only the
 /// fields it sets, any other name adds a server (then `command` and `extensions` are needed).
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LspServerConfig {
-    /// argv, e.g. `["rust-analyzer"]`; a bare name is also looked up in the project's `.venv`
-    /// and `node_modules/.bin`, `~/.local/bin`, `~/.cargo/bin`, `~/go/bin`. `[]` turns it off.
+    /// argv, e.g. `["rust-analyzer"]`; a bare name is looked up in `$PATH`, `~/.local/bin`,
+    /// `~/.cargo/bin`, `~/go/bin` and the like (never inside the project). `[]` turns it off.
     pub command: Option<Vec<String>>,
     /// File extensions it serves, without the dot. Taken away from any other server.
     #[serde(default)]
@@ -704,6 +727,31 @@ impl Config {
                 }
             }
             langs.insert(name, toml_edit::Item::Table(t));
+            Ok(())
+        })
+    }
+
+    /// Add or replace `[compile.<lang>]` (Settings → Languages). An entry with nothing set is
+    /// removed, so the built-in one applies.
+    pub fn save_compile(lang: &str, c: &CompileConfig) -> anyhow::Result<PathBuf> {
+        Self::edit(|doc| {
+            let mut t = toml_edit::Table::new();
+            if let Some(cmd) = &c.command {
+                t["command"] = toml_edit::value(cmd.iter().collect::<toml_edit::Array>());
+            }
+            if !c.extensions.is_empty() {
+                t["extensions"] = toml_edit::value(c.extensions.iter().collect::<toml_edit::Array>());
+            }
+            if let Some(pdf) = &c.pdf {
+                t["pdf"] = toml_edit::value(pdf.as_str());
+            }
+            let all = table(doc, "compile");
+            all.set_implicit(true);
+            if t.is_empty() {
+                all.remove(lang);
+            } else {
+                all.insert(lang, toml_edit::Item::Table(t));
+            }
             Ok(())
         })
     }

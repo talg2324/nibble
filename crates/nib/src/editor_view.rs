@@ -91,6 +91,9 @@ pub struct EditorView<'a, Message> {
     tag: Option<(String, Color)>,
     /// Git blame for the selection: dim text after the end of this 0-based line.
     blame: Option<(usize, String)>,
+    /// Compiler errors and warnings: text in their colour after the end of each 0-based line
+    /// (a blame on the same line wins).
+    notes: Vec<(usize, String, Color)>,
     on_event: Box<dyn Fn(ViewEvent) -> Message + 'a>,
 }
 
@@ -112,6 +115,7 @@ impl<'a, Message> EditorView<'a, Message> {
             marks: Vec::new(),
             tag: None,
             blame: None,
+            notes: Vec::new(),
             on_event: Box::new(on_event),
         }
     }
@@ -128,6 +132,11 @@ impl<'a, Message> EditorView<'a, Message> {
 
     pub fn blame(mut self, blame: Option<(usize, String)>) -> Self {
         self.blame = blame;
+        self
+    }
+
+    pub fn notes(mut self, notes: Vec<(usize, String, Color)>) -> Self {
+        self.notes = notes;
         self
     }
 }
@@ -529,14 +538,21 @@ where
             flush(renderer, &mut run, run_col, run_color);
 
             // Git blame: past the line's end (and its selected newline), a few cells apart.
-            if let Some((_, label)) = self.blame.as_ref().filter(|(l, _)| *l == line) {
+            // A compiler's note likewise, in its own colour.
+            let after_end = self
+                .blame
+                .as_ref()
+                .filter(|(l, _)| *l == line)
+                .map(|(_, label)| (label, th.gutter))
+                .or_else(|| self.notes.iter().find(|(l, _, _)| *l == line).map(|(_, label, c)| (label, *c)));
+            if let Some((label, color)) = after_end {
                 let at = col + BLAME_GAP;
                 if at >= self.left {
                     let x = text_x + (at - self.left) as f32 * cw;
-                    renderer.fill_text(mk_text(label.clone(), self.face.size), Point::new(x, y), th.gutter, text_clip);
+                    renderer.fill_text(mk_text(label.clone(), self.face.size), Point::new(x, y), color, text_clip);
                 } else if at + label.chars().count() > self.left {
                     let shown: String = label.chars().skip(self.left - at).collect();
-                    renderer.fill_text(mk_text(shown, self.face.size), Point::new(text_x, y), th.gutter, text_clip);
+                    renderer.fill_text(mk_text(shown, self.face.size), Point::new(text_x, y), color, text_clip);
                 }
             }
         }

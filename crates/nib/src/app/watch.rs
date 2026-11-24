@@ -18,6 +18,7 @@ impl App {
             .iter()
             .filter(|t| !t.local && matches!(t.media, None | Some(Media::Image { .. } | Media::Pdf(_) | Media::Loading | Media::Failed(_))))
             .filter_map(|t| Some(t.doc.path.as_ref()?.to_string_lossy().into_owned()))
+            .chain(self.compile_watch_paths())
             .collect();
         paths.sort();
         paths.dedup();
@@ -49,7 +50,7 @@ impl App {
             .filter(|t| !t.local && t.doc.path.as_deref() == Some(Path::new(&path)))
             .map(|t| (t.id, t.media.is_some(), t.kind == Kind::Pdf, t.doc.is_modified(), t.doc.disk_mtime_ns))
             .collect();
-        let mut tasks = Vec::new();
+        let mut tasks = vec![self.compile_file_changed(&path)];
         for (tab, media, pdf, modified, known) in tabs {
             match mtime_ns {
                 None => tasks.push(self.flash_warn(format!("{name} was deleted on disk; saving writes it again"))),

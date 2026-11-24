@@ -2,6 +2,7 @@ mod ai;
 mod blame;
 mod code;
 mod comment;
+mod compile;
 mod connection;
 mod control;
 mod diff;
@@ -192,6 +193,13 @@ enum Pending {
     Browse,
     /// Find across the project, for query number `seq`.
     Search { seq: u64 },
+    /// Compiling tab `tab`'s file (or its root) after a save, with the `lang` compiler.
+    Compile { tab: u64, lang: String },
+    /// The PDF a compile writes, shown as tab `tab`'s preview.
+    /// `show`: after the user's own build (the preview opens the first time).
+    CompiledPdf { tab: u64, show: bool },
+    /// Where the compilers are, for Settings → Languages.
+    Which,
 }
 
 /// What a "press again to confirm" warning is waiting for. A second press confirms only the same
@@ -241,6 +249,8 @@ pub struct Tab {
     svg: Option<viewers::SvgPreview>,
     /// `Document::version` last sent to the language server (`DocSync`).
     lsp_synced: Option<u64>,
+    /// The PDF a compiler builds from this file (Typst, LaTeX): its preview.
+    out: Option<compile::Output>,
     /// The diff tab (`diff.rs`): its document is an empty placeholder.
     diff: bool,
     /// A web tab (`web.rs`), likewise: the page it shows.
@@ -433,6 +443,10 @@ pub struct App {
     /// `ssh.connect` waiting for the new daemon's `Hello`.
     connect_call: Option<crate::control::Call>,
     lsp: Vec<nib_proto::LspServer>,
+    /// `[compile.*]` over the built-in compilers.
+    compilers: Vec<compile::Compiler>,
+    /// What the last compile of each root file reported, by that file.
+    compile_errors: HashMap<String, Vec<nib_proto::CompileError>>,
     ssh: ssh::Panel,
     apps: apps::Panel,
     /// A control client's keys and commands are being handled (not the user's own): what only
@@ -535,6 +549,8 @@ pub struct Init {
     pub headless: bool,
     /// `[lsp.<name>]`
     pub lsp: Vec<nib_proto::LspServer>,
+    /// `[compile.<lang>]`
+    pub compile: std::collections::BTreeMap<String, nib_editor::config::CompileConfig>,
     /// `[ai]`
     pub ai: nib_editor::config::AiConfig,
     /// `[window]`: what Settings writes back until the window says its real size (never, headless).
@@ -564,6 +580,7 @@ impl App {
             bench,
             headless,
             lsp,
+            compile,
             ai,
             window,
         } = init;
@@ -582,6 +599,8 @@ impl App {
             conn_error: None,
             connect_call: None,
             lsp,
+            compilers: compile::compilers(&compile),
+            compile_errors: HashMap::new(),
             ssh: Default::default(),
             apps: Default::default(),
             ctl_input: false,
@@ -1105,6 +1124,9 @@ impl App {
             (Pending::AiDelete { model }, result) => self.on_ai_deleted(model, result),
             (Pending::Browse, result) => self.on_browse(result),
             (Pending::Search { seq }, result) => self.on_search_results(seq, result),
+            (Pending::Compile { tab, lang }, result) => self.on_compiled(tab, lang, result),
+            (Pending::CompiledPdf { tab, show }, result) => self.on_compiled_pdf(tab, show, result),
+            (Pending::Which, result) => self.on_which(result),
             (Pending::Serve { call, quiet }, result) => self.on_serve(call, quiet, result),
             (Pending::GitDetails, result) => self.on_git_details(result),
             (Pending::Blame { gen }, result) => self.on_blame(gen, result),
@@ -1158,10 +1180,14 @@ impl App {
                 if let Some(pos) = goto {
                     self.goto_in_active(pos);
                 }
+                let out = match self.tab().map(|t| t.id) {
+                    Some(id) => self.compile_attach(id),
+                    None => Task::none(),
+                };
                 if ro {
-                    return self.flash_warn("file is not valid UTF-8 — opened read-only");
+                    return Task::batch([out, self.flash_warn("file is not valid UTF-8 — opened read-only")]);
                 }
-                Task::none()
+                out
             }
             (Pending::Lsp { tab, version, op }, result) => self.on_lsp(tab, version, op, result),
             (Pending::ApplyEdits, Ok(_)) => Task::none(),
@@ -1177,7 +1203,7 @@ impl App {
                     t.doc.mark_saved(revision, mtime_ns);
                 }
                 let saved = self.flash_info(format!("saved {}", path.rsplit('/').next().unwrap_or(&path)));
-                Task::batch([saved, self.tree_refresh()])
+                Task::batch([saved, self.tree_refresh(), self.compile_after_save(tab)])
             }
             (Pending::Save { tab, .. }, Err(e)) if e.kind == ErrorKind::Conflict => {
                 self.arm(Armed::ForceSave(tab));
@@ -2634,6 +2660,7 @@ mod tests {
             offer_languages: false,
             theme_cfg: Default::default(),
             lsp: vec![],
+            compile: Default::default(),
             ai: Default::default(),
             window: Default::default(),
             launch: crate::Launch {

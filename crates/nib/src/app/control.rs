@@ -486,6 +486,17 @@ impl App {
                     "rendered": t.rendered,
                 "web": t.web,
                     "pdf": t.media.as_ref().and_then(Media::pdf).map(crate::pdf::PdfView::state_json),
+                    "compile": t.out.as_ref().map(|o| json!({
+                        "pdf": o.pdf,
+                        "running": o.running,
+                        "preview": o.view.as_ref().map(|v| v.state_json()),
+                    })),
+                    "compile_errors": t.doc.path.as_ref().filter(|_| !t.local).map(|p| {
+                        self.compile_errors_in(&p.to_string_lossy())
+                            .iter()
+                            .map(|e| json!({ "line": e.line + 1, "col": e.col + 1, "message": e.message, "warning": e.warning }))
+                            .collect::<Vec<_>>()
+                    }).unwrap_or_default(),
                 })
             })
             .collect();

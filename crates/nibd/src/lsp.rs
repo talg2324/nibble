@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use crate::exe::find_exe;
 
 /// Give up restarting a server that keeps dying after this many starts.
 const MAX_STARTS: u32 = 3;
@@ -57,6 +58,8 @@ fn builtin() -> Vec<Spec> {
             &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"],
             &["tsconfig.json", "jsconfig.json", "package.json"],
         ),
+        spec("typst", &["tinymist"], &["typ"], &[]),
+        spec("latex", &["texlab"], &["tex", "bib"], &[]),
         spec(
             "c",
             &["clangd"],
@@ -362,10 +365,10 @@ impl Client {
             .stderr(Stdio::inherit()) // nibd's stderr is the client's per-target log
             .spawn()
             .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => format!(
-                    "{} not found: install it for {spec_name} files, or set `command` under \
-                     [lsp.{spec_name}] in the config",
-                    argv[0]
+                std::io::ErrorKind::NotFound => crate::exe::not_found(
+                    &argv[0],
+                    &format!("{spec_name} files"),
+                    &format!("set `command` under [lsp.{spec_name}] in the config"),
                 ),
                 _ => format!("starting {:?}: {e}", argv.join(" ")),
             })?;
@@ -511,33 +514,6 @@ impl Drop for Server {
 // ---------------------------------------------------------------------------------------------
 // finding the server
 // ---------------------------------------------------------------------------------------------
-
-/// A bare command name looked up in `$VIRTUAL_ENV`, `$PATH`, and the usual install dirs. (Over
-/// ssh nibd runs from a non-login shell, so `$PATH` often lacks `~/.local/bin`, `~/.cargo/bin`,
-/// `~/go/bin`.) Paths are left alone.
-///
-/// Never in the project itself (`.venv/bin`, `node_modules/.bin`): those come with whatever was
-/// cloned or unpacked, and a server starts as soon as one of its files is opened, before anybody
-/// has looked at the repository. A project's own server is named by path in the config.
-fn find_exe(name: &str) -> Option<PathBuf> {
-    if name.contains(std::path::is_separator) {
-        return None;
-    }
-    let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    let bin = if cfg!(windows) { "Scripts" } else { "bin" };
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(v) = std::env::var_os("VIRTUAL_ENV") {
-        dirs.push(PathBuf::from(v).join(bin));
-    }
-    if let Some(p) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&p));
-    }
-    if let Some(h) = nib_proto::path::home_dir() {
-        dirs.extend([h.join(".local/bin"), h.join(".cargo/bin"), h.join("go/bin")]);
-    }
-    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
-    dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
-}
 
 /// `ty server` found like any command; else through uv.
 fn find_ty() -> Option<Vec<String>> {

@@ -288,6 +288,7 @@ fn main() -> Result<()> {
                     roots: s.roots.clone(),
                 })
                 .collect(),
+            compile: cfg.compile.clone(),
             ai: cfg.ai.clone(),
             window: cfg.window.clone(),
             launch,

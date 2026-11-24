@@ -129,10 +129,11 @@ The window and the daemon speak a small typed protocol (length-prefixed msgpack)
 ## Features
 
 - **Editing**: tabs, familiar keys, undo and redo, comment, duplicate and delete lines, change all occurrences, word navigation, system clipboard, mouse selection. Every key is rebindable in a visual shortcut editor.
-- **Highlighting**: tree-sitter. Bash, JSON, YAML, TOML, Markdown and HTML are built in; on first run nib offers Python, Rust, Go, Zig, Java and JavaScript, and [any other language](#adding-a-language) Helix supports is one command.
-- **Language servers**: go to definition, find references, rename, hover. They run on the code's machine and start only when you open a file they serve. Python, Rust, Go, TypeScript/JavaScript and C/C++ work out of the box once their server is installed; any other is a few lines of config.
+- **Highlighting**: tree-sitter. Bash, JSON, YAML, TOML, Markdown and HTML are built in; on first run nib offers Python, Rust, Go, Zig, Java, JavaScript, Typst and LaTeX, and [any other language](#adding-a-language) Helix supports is one command.
+- **Language servers**: go to definition, find references, rename, hover. They run on the code's machine and start only when you open a file they serve. Python, Rust, Go, TypeScript/JavaScript, C/C++, Typst (tinymist) and LaTeX (texlab) work out of the box once their server is installed (a missing one says how to install it); any other is a few lines of config.
 - **Find** (⌘F): in the current file or agent chat; Tab switches to the whole project, which is searched by `nibd`, so it is fast over SSH too. Fuzzy file names plus matching lines, skipping gitignored, hidden and binary files.
 - **Files follow the disk**: when a file open in a tab is changed outside nibble (a terminal, a formatter, `git checkout`, an agent's script), the tab updates within a second, over SSH too. Unsaved edits are never replaced; saving over an outside change asks first.
+- **Typst and LaTeX**: saving a `.typ` or `.tex` file runs `typst` / `latexmk` on the code's machine; the PDF shows beside the source and follows each build, and errors are marked on their lines. A `% !TEX root = main.tex` (or `// !typst root = main.typ`) line compiles the root file instead. Settings → Languages shows where each compiler was found, or how to install it, and takes another path; `[compile.<lang>]` in the config changes the command.
 - **Terminals**: docked beside the code, running where the code lives.
 - **Servers**: the project's backend, frontend, TensorBoard or notebook server, started by nibble instead of kept alive in a split terminal. See [Apps](#apps).
 - **Git**: branch and last commit in the status strip; a panel for fetch, pull, push, commit, stash, staging, changes and history.

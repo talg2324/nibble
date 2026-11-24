@@ -494,6 +494,7 @@ impl Tab {
             preview: None,
             svg: None,
             lsp_synced: None,
+            out: None,
             diff: false,
             web: None,
             transient: None,
@@ -503,6 +504,12 @@ impl Tab {
     /// Opened in passing and not touched since: the next file opened in passing replaces it.
     pub(super) fn is_transient(&self) -> bool {
         self.transient == Some(self.doc.version()) && !self.doc.is_modified() && !self.diff && self.web.is_none()
+    }
+
+    /// Has a rendered view to show next to (or instead of) its text: a preview, a table, or the
+    /// PDF it compiles to.
+    pub(super) fn has_preview(&self) -> bool {
+        self.media.is_none() && (self.kind.has_preview() || self.out.is_some())
     }
 
     /// Shows something other than the editable text, so typing and cursor keys don't apply.
@@ -664,8 +671,11 @@ impl App {
 
     pub(super) fn toggle_preview(&mut self) -> Task<Message> {
         let Some(tab) = self.tabs.get_mut(self.active) else { return Task::none() };
-        if tab.media.is_some() || !tab.kind.has_preview() {
+        if !tab.has_preview() {
             return self.flash_info("no preview for this file type");
+        }
+        if let Some(o) = tab.out.as_mut() {
+            o.opened = true;
         }
         tab.rendered = !tab.rendered;
         tab.top = 0;
@@ -907,11 +917,33 @@ impl App {
         }
         let editor = || -> Element<'a, Message> {
             let (mut marks, tag) = self.ai_follow_view(tab.id);
+            let (errors, notes) = self.compile_marks(tab);
+            marks.extend(errors);
             marks.extend(self.search_marks(tab));
-            EditorView::new(&tab.doc, th, tab.top, tab.left, self.face, Message::View).marks(marks).tag(tag).blame(self.blame_shown(tab.id)).into()
+            EditorView::new(&tab.doc, th, tab.top, tab.left, self.face, Message::View)
+                .marks(marks)
+                .tag(tag)
+                .blame(self.blame_shown(tab.id))
+                .notes(notes)
+                .into()
         };
         if !tab.rendered {
             return editor();
+        }
+        if let Some(o) = &tab.out {
+            let pane: Element<'a, Message> = match &o.view {
+                Some(v) => ZoomZone::new(Zone::Pdf, v.view(th).map(Message::Pdf)).into(),
+                None => {
+                    let say = if o.running { "Compiling…" } else { "Save to compile" };
+                    container(text(say).size(13).color(th.dim)).center(Length::Fill).into()
+                }
+            };
+            return row![
+                container(editor()).width(Length::FillPortion(1)),
+                self.vrule(),
+                container(pane).width(Length::FillPortion(1)),
+            ]
+            .into();
         }
         if let (Kind::Svg, Some(p)) = (tab.kind, &tab.svg) {
             let z = self.preview_zoom;
@@ -1023,7 +1055,7 @@ impl App {
             }
             return Some(container(pills).padding([0, 8]).into());
         }
-        let tab = self.tab().filter(|t| t.media.is_none() && t.kind.has_preview())?;
+        let tab = self.tab().filter(|t| t.has_preview())?;
         let label = match (tab.kind, tab.rendered) {
             (Kind::Csv, true) => "Text",
             (Kind::Csv, false) => "Table",

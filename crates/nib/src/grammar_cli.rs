@@ -33,7 +33,7 @@ usage: nib grammar add [--from-source | --from DIR] LANGUAGE...
 afterwards.";
 
 /// Languages nib offers to add on first run (Settings → Languages). Each release prebuilds these.
-pub const OFFERED: &[&str] = &["python", "rust", "go", "zig", "java", "javascript"];
+pub const OFFERED: &[&str] = &["python", "rust", "go", "zig", "java", "javascript", "typst", "latex"];
 
 /// Where releases live; `NIB_GRAMMARS_URL` replaces it (a mirror, or a test server).
 const RELEASES: &str = "https://github.com/talg2324/nibble/releases/download";

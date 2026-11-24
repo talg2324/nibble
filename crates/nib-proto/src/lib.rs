@@ -20,7 +20,7 @@ pub use frame::{read_frame, write_frame, FrameError, MAX_FRAME};
 /// binary is content-addressed and uploaded by the client), but a `nibd` found on `$PATH` or set
 /// in a profile may be older; this is what refuses it, with a message, instead of failing later
 /// on a message it can't decode.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Time of day in UTC, `HH:MM:SS.mmmZ`: the stamp on every line nib and nibd write to their logs.
 pub fn log_clock() -> String {
@@ -272,6 +272,13 @@ pub enum Request {
     /// window passes on. Only the user approves an app, and the user's requests start only
     /// approved ones (see `AppOp::Approve`).
     App { op: AppOp, user: bool },
+    /// Run a compiler (Typst, LaTeX) on `main`, from `cwd` -> `Compiled`. `argv[0]` is looked
+    /// up like a language server's command. A newer `Compile` of the same `main` ends this one
+    /// (answered with `cancelled`). `pdf`: the file it writes, reported when the run succeeds.
+    Compile { main: String, argv: Vec<String>, cwd: String, pdf: String },
+    /// Where each program would be found on the daemon's machine -> `Which`, in the same order:
+    /// its path, or what to do to install it. A path is checked as it is.
+    Which { names: Vec<String> },
     Shutdown,
 }
 
@@ -610,7 +617,7 @@ pub struct HoverInfo {
 }
 
 /// A language server the client config adds or changes (`[lsp.<name>]`). The daemon has
-/// built-in servers (python, rust, go, typescript, c); an entry with one of their names changes
+/// built-in servers (python, rust, go, typescript, c, typst, latex); an entry with one of their names changes
 /// only the fields it sets.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LspServer {
@@ -622,6 +629,27 @@ pub struct LspServer {
     /// Files that mark a project root (`Cargo.toml`, `go.mod`): the nearest one above a file,
     /// within the nib root, is the server's root. Empty: the built-in list.
     pub roots: Vec<String>,
+}
+
+/// Where nibd finds a program (`Request::Which`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Found {
+    /// Its path; `None`: not found.
+    pub path: Option<String>,
+    /// When not found: how to install it.
+    pub hint: String,
+}
+
+/// One error or warning a compiler printed, for a line of a file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompileError {
+    /// Absolute path on the daemon side.
+    pub path: String,
+    /// 0-based; `col` counts chars (0 when the compiler gives none).
+    pub line: u32,
+    pub col: u32,
+    pub message: String,
+    pub warning: bool,
 }
 
 /// 0-based line and column. Columns count Unicode scalar values (Rust `char`s), which is what
@@ -967,6 +995,23 @@ pub enum Response {
     Search(SearchResults),
     /// In the order of their names.
     Apps(Vec<AppInfo>),
+    Compiled {
+        main: String,
+        /// The compiler exited with success.
+        ok: bool,
+        /// A newer `Compile` of the same file ended this one.
+        #[serde(default)]
+        cancelled: bool,
+        /// The program wasn't found (`log` says what to do).
+        #[serde(default)]
+        missing: bool,
+        /// The output, when `ok` and it exists.
+        pdf: Option<String>,
+        errors: Vec<CompileError>,
+        /// The end of what it printed.
+        log: String,
+    },
+    Which(Vec<Found>),
     Ok,
 }
 
@@ -1672,5 +1717,50 @@ mod tests {
         send(&mut buf, &m).unwrap();
         let got: ServerMsg = recv(&mut &buf[..]).unwrap().unwrap();
         assert_eq!(got, m);
+    }
+
+    #[test]
+    fn compile_roundtrip() {
+        let reqs = vec![
+            ClientMsg::Request { id: 4, req: Request::Compile { main: "/d/a.typ".into(), argv: vec!["typst".into()], cwd: "/d".into(), pdf: "/d/a.pdf".into() } },
+            ClientMsg::Request { id: 5, req: Request::Which { names: vec!["typst".into(), "latexmk".into()] } },
+        ];
+        let resps = vec![
+            ServerMsg::Response {
+                id: 4,
+                result: Ok(Response::Compiled {
+                    main: "/d/a.typ".into(),
+                    ok: false,
+                    cancelled: false,
+                    missing: false,
+                    pdf: None,
+                    errors: vec![CompileError { path: "/d/a.typ".into(), line: 2, col: 10, message: "unknown variable".into(), warning: false }],
+                    log: "x".into(),
+                }),
+            },
+            ServerMsg::Response {
+                id: 5,
+                result: Ok(Response::Which(vec![
+                    Found { path: Some("/opt/homebrew/bin/typst".into()), hint: String::new() },
+                    Found { path: None, hint: "install MacTeX".into() },
+                ])),
+            },
+        ];
+        let mut buf = Vec::new();
+        for m in &reqs {
+            send(&mut buf, m).unwrap();
+        }
+        let mut r = &buf[..];
+        for m in &reqs {
+            assert_eq!(&recv::<_, ClientMsg>(&mut r).unwrap().unwrap(), m);
+        }
+        let mut buf = Vec::new();
+        for m in &resps {
+            send(&mut buf, m).unwrap();
+        }
+        let mut r = &buf[..];
+        for m in &resps {
+            assert_eq!(&recv::<_, ServerMsg>(&mut r).unwrap().unwrap(), m);
+        }
     }
 }

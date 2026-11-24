@@ -14,7 +14,9 @@ mod history;
 mod mail;
 mod attach;
 mod cli;
+mod compile;
 mod diff;
+mod exe;
 mod fs_ops;
 mod git;
 mod jobs;
@@ -167,7 +169,7 @@ fn serve_with<W: io::Write + Send + 'static>(
     });
 
     let mut state =
-        State { root: None, places: None, ptys: Default::default(), serve: None, web: None, lsp: None, ai: Default::default(), watch: watch::Watcher::new(tx.clone()), tx: tx.clone(), history: worker() };
+        State { root: None, places: None, ptys: Default::default(), serve: None, web: None, lsp: None, ai: Default::default(), watch: watch::Watcher::new(tx.clone()), tx: tx.clone(), history: worker(), compiles: Default::default() };
     while let Some(msg) = next()? {
         let t0 = Instant::now();
         // Requests are timed by the writer; a notification is done when this loop turns.
@@ -306,6 +308,8 @@ struct State {
     /// thread so a ping or a keystroke for a terminal never waits behind them, and in the order
     /// they came.
     history: mpsc::Sender<Box<dyn FnOnce() + Send>>,
+    /// Compiles going on (Typst, LaTeX), so a newer save ends the older run.
+    compiles: compile::Running,
 }
 
 /// `path` relative to the root, or absolute.
@@ -405,6 +409,12 @@ impl State {
             let root = self.root()?;
             // Reads the whole project.
             return self.later(id, move || Ok(Response::Search(search::search(&root, &query, max as usize))));
+        }
+        if let Request::Compile { main, argv, cwd, pdf } = req {
+            let (main, cwd, pdf) = (self.resolve(&main), self.resolve(&cwd), self.resolve(&pdf));
+            let running = self.compiles.clone();
+            // A compile takes seconds (LaTeX runs several passes).
+            return self.later(id, move || Ok(compile::run(&running, &main, &argv, &cwd, &pdf)));
         }
         if let Request::GitBlame { path, first, last, contents } = req {
             let file = self.resolve(&path);
@@ -568,7 +578,8 @@ impl State {
             | Request::AiInstall { .. }
             | Request::AiPull { .. }
             | Request::AiDelete { .. }
-            | Request::AiAgents => {
+            | Request::AiAgents
+            | Request::Compile { .. } => {
                 unreachable!("handled in State::handle")
             }
             // In order, on this thread: a rename followed by a delete must not race.
@@ -614,6 +625,22 @@ impl State {
                 Some(serve) => serve.lock().unwrap().request(op, user).map(Response::Apps),
                 None => Err(no_hello()),
             },
+            Request::Which { names } => Ok(Response::Which(
+                names
+                    .iter()
+                    .map(|n| {
+                        let p = self.resolve(n);
+                        let found = if n.contains(std::path::is_separator) { p.is_file().then_some(p) } else { exe::find_exe(n) };
+                        match found {
+                            Some(p) => nib_proto::Found { path: Some(nib_proto::path::to_wire(&p)), hint: String::new() },
+                            None => nib_proto::Found {
+                                path: None,
+                                hint: exe::not_found(n, "compiling", "type its path here"),
+                            },
+                        }
+                    })
+                    .collect(),
+            )),
             Request::Shutdown => Ok(Response::Ok),
         }
     }
