@@ -119,4 +119,5 @@ commands! {
     OpenLanguages   => "open_languages",    "Settings",  "Settings: Languages (add syntax highlighting)";
     ToggleBeginnerMode => "toggle_beginner_mode", "Settings", "Beginner mode (shortcut cheat sheet)";
     ToggleFullscreen => "toggle_fullscreen",  "Window",    "Fullscreen";
+    NewWindow       => "new_window",        "Window",    "New window: another project on this machine (picks its folder first)";
 }

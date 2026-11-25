@@ -46,6 +46,8 @@ usage: nib [PATH]              open a local file or directory (default: .)
        nib --headless [@PROFILE] [PATH]
                                no window: same editor, driven only through `nib ctl`; prints
                                its session (pid, socket, run_dir, logs) on stdout, exits on `nib ctl run quit`
+       nib --browse [@PROFILE] [PATH]
+                               open with the folder browser up, to pick the project (New window, ⌘N)
        nib --bench FILE        scroll FILE for 300 frames and print frames/s, then exit
        nib --commands          list command names usable in [keys]
        nib ctl COMMAND         drive a running window from a script or agent (nib ctl help)
@@ -182,6 +184,9 @@ fn main() -> Result<()> {
     }
     let headless = args.first().map(String::as_str) == Some("--headless");
     let args = if headless { &args[1..] } else { &args[..] };
+    // A window made by New window (app/window.rs): pick its folder first.
+    let browse_first = args.first().map(String::as_str) == Some("--browse");
+    let args = if browse_first { &args[1..] } else { args };
     timing::start();
     let cfg = Config::load()?;
     let Some((launch, bench)) = parse_args(&cfg, args)? else {
@@ -294,6 +299,7 @@ fn main() -> Result<()> {
             launch,
             bench,
             headless,
+            browse_first,
         },
         syn_rx,
         ctl_rx,

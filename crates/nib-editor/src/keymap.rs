@@ -244,6 +244,7 @@ pub fn default_bindings() -> Vec<(&'static str, Command)> {
         ("mod+a", SelectAll),
         ("mod+b", ToggleExplorer),
         ("mod+o", OpenFolder),
+        ("mod+n", NewWindow),
         ("mod+enter", OpenInNewTab),
         ("ctrl+tab", NextTab),
         ("ctrl+shift+tab", PrevTab),

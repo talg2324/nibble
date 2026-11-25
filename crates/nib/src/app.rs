@@ -25,6 +25,7 @@ mod line_input;
 mod viewers;
 mod web;
 mod watch;
+mod window;
 
 pub use connection::ConnEvent;
 pub use web::Msg as WebMsg;
@@ -374,6 +375,7 @@ fn app_wide(c: Command) -> bool {
                 | ToggleSsh
                 | ToggleApps
                 | OpenFolder
+                | NewWindow
                 | ToggleAi
                 | NextAgent
                 | PrevAgent
@@ -547,6 +549,8 @@ pub struct Init {
     pub bench: bool,
     /// No window (`nib --headless`): driven only through the control socket.
     pub headless: bool,
+    /// `nib --browse`: open the folder browser once connected (a window made by New window).
+    pub browse_first: bool,
     /// `[lsp.<name>]`
     pub lsp: Vec<nib_proto::LspServer>,
     /// `[compile.<lang>]`
@@ -579,6 +583,7 @@ impl App {
             launch,
             bench,
             headless,
+            browse_first,
             lsp,
             compile,
             ai,
@@ -659,6 +664,7 @@ impl App {
             palette: None,
         };
         app.seed_window(&window);
+        app.ssh.browse_next = browse_first;
         if offer_languages && !headless {
             app.offer_languages();
         }
@@ -1879,6 +1885,7 @@ impl App {
                 let root = self.root.clone();
                 return self.ssh_browse(root);
             }
+            NewWindow => return self.new_window_here(),
             FocusToolbar => {
                 if self.focus == Focus::Toolbar {
                     self.leave_toolbar();
@@ -2672,6 +2679,7 @@ mod tests {
             },
             bench: false,
             headless: false,
+            browse_first: false,
         };
         let mut a = App::boot(init).0;
         // As a daemon with only the built-in python server would say in its Hello.

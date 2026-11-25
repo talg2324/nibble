@@ -182,6 +182,8 @@ pub enum Msg {
     BrowseInto(usize),
     /// Open the selected folder as the project.
     BrowseOpen,
+    /// Open the selected folder in a new window; this one stays as it was.
+    BrowseNewWindow,
     BrowseUp,
     EditField(usize),
     EditSave,
@@ -299,6 +301,7 @@ impl App {
                 return self.ssh_browse_into();
             }
             Msg::BrowseOpen => return self.ssh_browse_open(),
+            Msg::BrowseNewWindow => return self.ssh_browse_new_window(),
             Msg::BrowseUp => return self.ssh_browse_up(),
             Msg::EditField(i) => {
                 self.ssh_focus();
@@ -756,12 +759,22 @@ impl App {
         self.change_root(dir)
     }
 
+    /// Open the selected folder in a new window, and give this one its tree back.
+    fn ssh_browse_new_window(&mut self) -> Task<Message> {
+        let Some(dir) = self.ssh_browse_target() else { return Task::none() };
+        self.ssh.browse = None;
+        self.tree.open = true;
+        self.focus = Focus::Tree;
+        self.new_window(dir, false)
+    }
+
     pub(super) fn ssh_browse_key(&mut self, chord: KeyChord, text: Option<String>) -> Task<Message> {
         let held = chord.ctrl || chord.logo;
         let paste = self.keymap.lookup(&chord) == Some(Command::Paste);
         let Some(b) = &mut self.ssh.browse else { return Task::none() };
         let n = b.shown().len() + 1;
         match chord.key {
+            Key::Enter if held && chord.shift => return self.ssh_browse_new_window(),
             Key::Enter if held => return self.ssh_browse_open(),
             Key::Enter | Key::Right if !chord.alt => return self.ssh_browse_into(),
             Key::Left if !held => return self.ssh_browse_up(),
@@ -1360,10 +1373,12 @@ impl App {
         }
         c = c.push(scrollable(list).style(crate::theme::scrollbar).height(Length::Fill));
         let open = self.panel_button("Open as project", Some(Message::Ssh(Msg::BrowseOpen)), false);
-        c = c.push(open);
+        let new_window = self.panel_button("New window", Some(Message::Ssh(Msg::BrowseNewWindow)), false);
+        c = c.push(row![open, new_window].spacing(6));
         if focused {
             c = c.push(row![self.hint("↵", "go in"), self.hint("←", "up")].spacing(10));
             c = c.push(row![self.hint(&format!("{MOD_PLUS}↵"), "open"), self.hint("esc", "back")].spacing(10));
+            c = c.push(self.hint(&format!("{MOD_PLUS}⇧↵"), "new window"));
         }
         Some(container(c).padding(Padding { left: 10.0, right: 10.0, top: 10.0, bottom: 10.0 }).height(Length::Fill).into())
     }
