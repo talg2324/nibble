@@ -314,7 +314,8 @@ Editing is built on [helix-core](https://github.com/helix-editor/helix) (rope, s
 - [x] **v0.2**: Windows support and a revamped diff experience. Native Windows works for local projects (editor, tree, search, git, terminals, language servers, `nib ctl`) and SSH remotes, and nibble runs inside WSL. The diff tab shows your changes and each agent's like a pull request, live: agents work on a branch of their own (`nib-work`), you comment on their diff and send it back, and accepting lands the branch as one commit.
 - [x] **v0.3**: localhost integration: see web servers running on the remote (dev servers, notebooks, dashboards) inside nibble, with agents able to read and act on the page.
 - [x] **v0.4**: prebuilt releases. GitHub Actions build nibble for macOS, Linux and Windows and publish each tagged version with its Linux daemons and prebuilt grammars; one-line installers for macOS / Linux / WSL and Windows; polish.
-- [ ] **v0.5**: model routing: nibble picks the model (and thinking level) for each task, with a small local model deciding and the user able to override.
+- [x] **v0.5**: documents and polish. Typst and LaTeX compile on save, with errors on their lines and the PDF as the tab's preview; ⌘N opens another window; editor and chat niceties (auto-closing brackets, double-click selects a word, selectable chat, copy a picture, ⌘↵ sends a reviewed plan); Windows-Terminal keys and a WSL Start-menu entry.
+- [ ] **v0.6**: model routing: nibble picks the model (and thinking level) for each task, with a small local model deciding and the user able to override.
 
 ## Contributing
 
