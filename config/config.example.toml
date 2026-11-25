@@ -82,10 +82,12 @@
 # Compile on save: saving a file of the language runs this on the machine with the code, and the
 # PDF shows beside the source (Settings → Languages sets the program). Built in: typst, latex.
 # Placeholders: {main} the saved file, or the root a `% !TEX root = main.tex` /
-# `// !typst root = main.typ` line near its top names; {dir} its folder; {stem} its name without
-# the extension; {pdf} the output. A built-in name changes only the fields given.
+# `// !typst root = main.typ` line near its top names; {dir} its folder; {root} the folder nib
+# has open (or {dir} when the file is outside it), Typst's project root, so a document in a
+# subfolder can import `/shared/x.typ`; {stem} its name without the extension; {pdf} the output.
+# A built-in name changes only the fields given.
 # [compile.typst]
-# command = ["typst", "compile", "--diagnostic-format", "short", "{main}", "{pdf}"]
+# command = ["typst", "compile", "--root", "{root}", "--diagnostic-format", "short", "{main}", "{pdf}"]
 # [compile.latex]
 # command = ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "-outdir={dir}", "{main}"]
 # pdf = "{dir}/{stem}.pdf"       # the file it writes (default)

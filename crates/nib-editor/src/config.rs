@@ -43,8 +43,8 @@ pub struct Config {
 /// `latex`; one with either name changes only the fields it sets, any other name adds one (then
 /// `command` and `extensions` are needed). Placeholders, in `command` and `pdf`: `{main}` the
 /// file to compile (the saved one, or the root it names on a `% !TEX root = …` /
-/// `// !typst root = …` line), `{dir}` its folder, `{stem}` its name without the extension,
-/// `{pdf}` the output.
+/// `// !typst root = …` line), `{dir}` its folder, `{root}` the folder nib has open (or `{dir}`
+/// when the file is outside it), `{stem}` its name without the extension, `{pdf}` the output.
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CompileConfig {

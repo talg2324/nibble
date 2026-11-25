@@ -32,7 +32,7 @@ pub fn builtin() -> Vec<Compiler> {
     vec![
         Compiler {
             lang: "typst".into(),
-            command: v(&["typst", "compile", "--diagnostic-format", "short", "{main}", "{pdf}"]),
+            command: v(&["typst", "compile", "--root", "{root}", "--diagnostic-format", "short", "{main}", "{pdf}"]),
             extensions: v(&["typ"]),
             pdf: DEFAULT_PDF.into(),
         },
@@ -129,12 +129,23 @@ fn normalize(p: &str) -> String {
     out.join("/")
 }
 
-/// `Request::Compile` for `main` with `c`: placeholders filled in.
-pub fn request(c: &Compiler, main: &str) -> Request {
+/// The project folder for `main`: `project` (the folder nib has open) when `main` is inside it,
+/// as an editor's workspace folder is; else `main`'s own folder.
+fn root_for<'a>(project: &'a str, main: &'a str) -> &'a str {
+    let p = project.trim_end_matches(['/', '\\']);
+    let inside = !p.is_empty() && main.strip_prefix(p).is_some_and(|rest| rest.starts_with(['/', '\\']));
+    if inside { p } else { dir_of(main) }
+}
+
+/// `Request::Compile` for `main` with `c`, in the project `project`: placeholders filled in.
+pub fn request(c: &Compiler, main: &str, project: &str) -> Request {
     let dir = dir_of(main).to_string();
+    let root = root_for(project, main);
     let name = nib_proto::path::file_name(main);
     let stem = name.rsplit_once('.').map_or(name, |(s, _)| s).to_string();
-    let fill = |s: &str, pdf: &str| s.replace("{main}", main).replace("{dir}", &dir).replace("{stem}", &stem).replace("{pdf}", pdf);
+    let fill = |s: &str, pdf: &str| {
+        s.replace("{main}", main).replace("{dir}", &dir).replace("{root}", root).replace("{stem}", &stem).replace("{pdf}", pdf)
+    };
     let pdf = fill(&c.pdf, "");
     let argv = c.command.iter().map(|a| fill(a, &pdf)).collect();
     Request::Compile { main: main.to_string(), argv, cwd: dir, pdf }
@@ -172,7 +183,7 @@ impl App {
         let Some(path) = t.doc.path.as_ref().map(|p| p.to_string_lossy().into_owned()) else { return Task::none() };
         let Some(c) = for_path(&self.compilers, &path) else { return Task::none() };
         let main = main_for(t, &path);
-        let Request::Compile { pdf, .. } = request(c, &main) else { unreachable!() };
+        let Request::Compile { pdf, .. } = request(c, &main, &self.root) else { unreachable!() };
         t.out = Some(Output::new(pdf.clone()));
         self.request(Request::ReadFile { path: pdf }, Pending::CompiledPdf { tab, show: false })
     }
@@ -183,7 +194,7 @@ impl App {
         let Some(path) = t.doc.path.as_ref().map(|p| p.to_string_lossy().into_owned()) else { return Task::none() };
         let Some(c) = for_path(&self.compilers, &path) else { return Task::none() };
         let main = main_for(t, &path);
-        let req = request(c, &main);
+        let req = request(c, &main, &self.root);
         let Request::Compile { pdf, .. } = &req else { unreachable!() };
         let out = t.out.get_or_insert_with(|| Output::new(pdf.clone()));
         if out.pdf != *pdf {
@@ -324,11 +335,30 @@ mod tests {
     #[test]
     fn placeholders_are_filled_in() {
         let all = compilers(&BTreeMap::new());
-        let Request::Compile { main, argv, cwd, pdf } = request(for_path(&all, "/d/paper.typ").unwrap(), "/d/paper.typ") else { panic!() };
+        let Request::Compile { main, argv, cwd, pdf } = request(for_path(&all, "/d/paper.typ").unwrap(), "/d/paper.typ", "/d") else { panic!() };
         assert_eq!((main.as_str(), cwd.as_str(), pdf.as_str()), ("/d/paper.typ", "/d", "/d/paper.pdf"));
-        assert_eq!(argv, v(&["typst", "compile", "--diagnostic-format", "short", "/d/paper.typ", "/d/paper.pdf"]));
-        let Request::Compile { argv, .. } = request(for_path(&all, "C:/d/x.tex").unwrap(), "C:/d/x.tex") else { panic!() };
+        assert_eq!(argv, v(&["typst", "compile", "--root", "/d", "--diagnostic-format", "short", "/d/paper.typ", "/d/paper.pdf"]));
+        let Request::Compile { argv, .. } = request(for_path(&all, "C:/d/x.tex").unwrap(), "C:/d/x.tex", "C:/d") else { panic!() };
         assert!(argv.contains(&"-outdir=C:/d".to_string()) && argv.last().unwrap() == "C:/d/x.tex");
+    }
+
+    /// Typst's root is the folder nib has open, as VS Code's workspace folder is for tinymist:
+    /// a document in a subfolder can import `/shared/x.typ` or `../../shared/x.typ`.
+    #[test]
+    fn typst_root_is_the_project_folder() {
+        let all = compilers(&BTreeMap::new());
+        let c = for_path(&all, "/p/docs/a/main.typ").unwrap();
+        let Request::Compile { argv, cwd, pdf, .. } = request(c, "/p/docs/a/main.typ", "/p/docs") else { panic!() };
+        assert_eq!((argv[3].as_str(), cwd.as_str(), pdf.as_str()), ("/p/docs", "/p/docs/a", "/p/docs/a/main.pdf"));
+        let Request::Compile { argv, .. } = request(c, "/p/docs/a/main.typ", "/p/docs/") else { panic!() };
+        assert_eq!(argv[3], "/p/docs");
+        // Outside the project (or only a name prefix of it): the file's own folder.
+        let Request::Compile { argv, .. } = request(c, "/tmp/x/main.typ", "/p/docs") else { panic!() };
+        assert_eq!(argv[3], "/tmp/x");
+        let Request::Compile { argv, .. } = request(c, "/p/docs-old/main.typ", "/p/docs") else { panic!() };
+        assert_eq!(argv[3], "/p/docs-old");
+        let Request::Compile { argv, .. } = request(c, "C:/p/a/main.typ", "C:/p") else { panic!() };
+        assert_eq!(argv[3], "C:/p");
     }
 
     #[test]
